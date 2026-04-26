@@ -25,6 +25,9 @@ __pycache__/
 venv/
 *.egg-info/
 
+# Windows 本地 ffmpeg 可执行文件（单文件近 100MB，Gitee/GitHub 会拒；Linux/Docker 用镜像内 ffmpeg）
+backend/ffmpeg/bin/*.exe
+
 # 日志与本地数据
 *.log
 backend/data/
