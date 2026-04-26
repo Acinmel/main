@@ -1,0 +1,16 @@
+{
+  "name": "shuziren",
+  "private": true,
+  "description": "口播重制：前端 + Nest 后端 + Whisper Python",
+  "scripts": {
+    "dev:backend": "npm --prefix backend run start:dev",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:whisper": "npm --prefix backend/whisper-python-service run start",
+    "test:backend:e2e": "npm --prefix backend run test:e2e",
+    "test:backend:pipeline": "npm --prefix backend run test:pipeline",
+    "whisper:dev": "npm --prefix backend/whisper-python-service run start",
+    "whisper:watch": "npm --prefix backend/whisper-python-service run dev",
+    "whisper:docker": "docker compose up whisper -d --build",
+    "whisper:docker-logs": "docker compose logs -f whisper"
+  }
+}

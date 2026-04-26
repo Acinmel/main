@@ -1,0 +1,123 @@
+# 线上/内网一体化：Web（Nginx+静态）→ API（Nest + yt-dlp + ffmpeg）→ Whisper（Python）
+# 使用：在项目根目录执行  docker compose up -d --build
+# 访问：http://localhost:8080  （API 经同域 /api 反代，浏览器无需单独配后端地址）
+#
+# 数据：MySQL 8（用户 / 数字人元数据）；任务流水线仍为内存态（见 TasksService）。
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-koubo}
+      MYSQL_USER: ${MYSQL_USER:-koubo}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-koubo}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - '127.0.0.1:3306:3306'
+    networks: [kb_net]
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  whisper:
+    build: ./backend/whisper-python-service
+    restart: unless-stopped
+    environment:
+      # 2GB 内存 ECS 建议 .env 保持 base；内存充足可设 medium
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      # 设为 1 时启动即加载模型，首包慢但首用户转写更快（健康检查会等服务监听后再通过）
+      WHISPER_PRELOAD: ${WHISPER_PRELOAD:-0}
+    # 本机直接跑 Nest（npm run start:dev）时，宿主机可经此端口访问 Whisper，与 backend/.env 中
+    # WHISPER_HTTP_URL=http://127.0.0.1:8010/transcribe 对齐；纯容器内联调时 api 仍用服务名 whisper:8010
+    # 仅绑定本机回环，避免 Whisper 端口对公网直连暴露（容器内 api → whisper 不受影响）
+    ports:
+      - '127.0.0.1:8010:8010'
+    networks: [kb_net]
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'python',
+          '-c',
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5)",
+        ]
+      interval: 15s
+      timeout: 8s
+      retries: 6
+      start_period: 120s
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    # 连接宿主机上的 MySQL 时：.env 中设 MYSQL_HOST=host.docker.internal，并注释掉本文件中的 mysql 服务及 api 对 mysql 的 depends_on
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    # 根目录 .env 中其余变量（如 OPENAI_API_KEY）会注入容器，供 ConfigModule 读取
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      # 与下方 mysql 服务一致；使用宿主机 MySQL 时在 .env 中覆盖 MYSQL_HOST / 用户库名
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER:-koubo}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-koubo}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-koubo}
+      JWT_SECRET: ${JWT_SECRET:-}
+      # Nginx 反代时识别 X-Forwarded-*（限流、审计等如需真实客户端 IP）
+      TRUST_PROXY: '1'
+      # 前后端分离部署时填写浏览器 Origin，逗号分隔；留空则与开发一致（origin: true）
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      WHISPER_HTTP_URL: http://whisper:8010/transcribe
+      WHISPER_HTTP_HEALTH_URL: http://whisper:8010/health
+      WHISPER_HTTP_TIMEOUT_MS: '600000'
+      YTDLP_BIN: /usr/local/bin/yt-dlp
+      YTDLP_TIMEOUT_MS: '300000'
+      # 抖音下载（首页「源视频保存 + Whisper」）；不上线抖音可留空
+      DY_DOWNLOADER_COOKIE: ${DY_DOWNLOADER_COOKIE:-}
+      DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-120000}
+      # Linux 容器内落盘目录（与源码包内默认 Windows 路径无关）
+      VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/data/download-video}
+      FFMPEG_BIN: ${FFMPEG_BIN:-/usr/bin/ffmpeg}
+      # 数字人形象落盘（与默认 data/digital-humans 一致，避免容器重建丢文件）
+      DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
+      # 可选：OPENAI_API_KEY=...
+    volumes:
+      - video_downloads:/data/download-video
+      - digital_human_storage:/workspace/backend/data/digital-humans
+    depends_on:
+      mysql:
+        condition: service_healthy
+      whisper:
+        condition: service_healthy
+    networks: [kb_net]
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: /api
+    ports:
+      - '${WEB_PORT:-8080}:80'
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks: [kb_net]
+
+volumes:
+  mysql_data:
+  video_downloads:
+  digital_human_storage:
+
+networks:
+  kb_net:
+    driver: bridge

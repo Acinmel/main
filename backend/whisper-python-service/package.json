@@ -1,0 +1,9 @@
+{
+  "name": "whisper-python-service",
+  "private": true,
+  "description": "本地 openai-whisper HTTP，与主后端 WHISPER_HTTP_URL 对接",
+  "scripts": {
+    "start": "python -m uvicorn server:app --host 127.0.0.1 --port 8010",
+    "dev": "python -m uvicorn server:app --host 127.0.0.1 --port 8010 --reload"
+  }
+}

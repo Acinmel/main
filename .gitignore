@@ -1,0 +1,41 @@
+deploy/compose.env
+
+# 本地密钥（切勿提交）
+.env
+**/.env
+backend/.env
+frontend/.env
+frontend/.env.*
+
+# 销售素材（本地定制，默认不入库）
+docs/销售一页纸.md
+
+# 依赖与构建产物
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+*.tsbuildinfo
+.cache/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 日志与本地数据
+*.log
+backend/data/
+
+# IDE / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# 测试与覆盖率
+coverage/
+.nyc_output/
