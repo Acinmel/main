@@ -2,6 +2,21 @@
 
 本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + Whisper + MySQL** 的一体化部署。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
 
+## 最快：连上 SSH 后两条命令（推荐）
+
+代码已在服务器目录后（例如 `/opt/koubo-remake`）：
+
+```bash
+cd /opt/koubo-remake          # 改成你的项目路径
+sudo bash deploy/quickstart-server.sh
+```
+
+脚本会：**按需安装 Docker**（阿里云 Linux 会走 `setup-docker-alinux.sh`）、**自动生成** `.env` 里的 MySQL 密码与 `JWT_SECRET`、尝试放行本机 `firewalld`、再 `docker compose up -d --build`。结束时打印访问地址示例。
+
+**公网打不开页面时，90% 是安全组没放行端口**：登录阿里云控制台 → ECS → 实例 → **安全组** → 入方向规则 → 添加 **`TCP 8080`**（与 `.env` 里 `WEB_PORT` 一致，默认 8080），源 `0.0.0.0/0`（或你的办公网段）。浏览器地址必须是 **`http://公网IP:8080/`**（带端口）。
+
+脚本说明：[`deploy/quickstart-server.sh`](./deploy/quickstart-server.sh)。若你希望首次创建 `.env` 后**自己填密码**（不用随机密码），仍可用 [`deploy/bootstrap-server.sh`](./deploy/bootstrap-server.sh)。
+
 ## 0. 关于「远程代部署」与本机自动化
 
 - 从本机 **SSH 连接服务器** 需要 **公钥认证** 或你在终端里 **手动输入密码**；自动化环境不能使用聊天里的密码，也无法代替你完成交互式登录。
@@ -11,14 +26,13 @@
   ssh-copy-id -i ~/.ssh/id_ed25519_koubo.pub root@你的服务器IP
   ssh -i ~/.ssh/id_ed25519_koubo root@你的服务器IP
   ```
-- 连上服务器后，先 **克隆或 rsync 完整项目** 到如 `/opt/koubo-remake`，再在**仓库根目录**执行：
+- 连上服务器后，先 **克隆或 rsync 完整项目** 到如 `/opt/koubo-remake`，再执行上一节 **`quickstart-server.sh`** 或：
   ```bash
   git clone 'https://你的仓库/shuziren.git' /opt/koubo-remake
   cd /opt/koubo-remake
-  bash deploy/bootstrap-server.sh
+  sudo bash deploy/quickstart-server.sh
   ```
-  无 git 时：将整个项目目录同步到服务器后，同样 `cd` 到该目录执行 `bash deploy/bootstrap-server.sh`（可无 `.git`，脚本会跳过 pull）。
-- 脚本路径：[`deploy/bootstrap-server.sh`](./deploy/bootstrap-server.sh)。若首次自动创建 `.env`，脚本以 **退出码 2** 结束，请编辑 `.env` 后再次执行同一命令。
+  无 git 时：将整个项目目录同步到服务器后，同样 `cd` 到该目录执行 `sudo bash deploy/quickstart-server.sh`。
 
 ## 1. 服务器准备
 
