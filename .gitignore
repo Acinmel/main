@@ -27,6 +27,7 @@ venv/
 
 # Windows 本地 ffmpeg 可执行文件（单文件近 100MB，Gitee/GitHub 会拒；Linux/Docker 用镜像内 ffmpeg）
 backend/ffmpeg/bin/*.exe
+backend/ffmpeg/
 backend/ffmpeg/bin/*.dll
 
 # --- 大体积文件（勿提交；确需入库的小文件可用 git add -f 强制添加）---
@@ -60,6 +61,10 @@ backend/ffmpeg/bin/*.dll
 *.h5
 *.pb
 *.tflite
+yt-dlp-master/
+.env
+.env.*
+*.log
 
 # Whisper 等模型目录（若克隆在仓库内）
 whisper_models/
