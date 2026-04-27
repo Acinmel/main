@@ -8,7 +8,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [[ -n "${QUICKSTART_ROOT:-}" ]]; then
+  ROOT="$(cd "$QUICKSTART_ROOT" && pwd)"
+else
+  ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 cd "$ROOT"
 
 compose() {
@@ -29,7 +33,7 @@ ensure_docker() {
   echo ">>> 未检测到 Docker，开始安装（需要 root 权限）…" >&2
   if [[ "${EUID:-0}" -ne 0 ]]; then
     if command -v sudo &>/dev/null; then
-      exec sudo bash "$ROOT/deploy/quickstart-server.sh"
+      exec sudo env QUICKSTART_ROOT="$ROOT" bash "$ROOT/deploy/quickstart-server.sh"
     fi
     echo "请用 root 执行：sudo bash deploy/quickstart-server.sh" >&2
     exit 1

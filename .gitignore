@@ -27,6 +27,43 @@ venv/
 
 # Windows 本地 ffmpeg 可执行文件（单文件近 100MB，Gitee/GitHub 会拒；Linux/Docker 用镜像内 ffmpeg）
 backend/ffmpeg/bin/*.exe
+backend/ffmpeg/bin/*.dll
+
+# --- 大体积文件（勿提交；确需入库的小文件可用 git add -f 强制添加）---
+# 音视频
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.m4v
+*.wmv
+*.flv
+*.wav
+*.flac
+*.aac
+# 压缩包 / 镜像
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+*.iso
+*.dmg
+# 模型权重 / 推理缓存
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.ckpt
+*.h5
+*.pb
+*.tflite
+
+# Whisper 等模型目录（若克隆在仓库内）
+whisper_models/
+**/.whisper/
 
 # 日志与本地数据
 *.log
