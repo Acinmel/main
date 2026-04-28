@@ -93,6 +93,8 @@ sudo bash deploy/quickstart-server.sh
 
 **公网打不开时**：安全组放行 **`TCP 8080`**（与 `.env` 中 `WEB_PORT` 一致），浏览器使用 **`http://公网IP:8080/`**。
 
+**数字人形象「未配置 ARK / SEEDREAM」**：根目录 **`.env` 被 git 忽略**，`git pull` **不会**把本机的 `ARK_API_KEY` 带到服务器。须在 ECS 上**编辑或上传**同目录 `.env`，至少增加一行 `ARK_API_KEY=你的密钥`（或按 `deploy/docker.env.example` 配置 Seedream），然后执行 `docker compose up -d api`。
+
 其他：[`deploy/quickstart-server.sh`](./deploy/quickstart-server.sh)、[`deploy/bootstrap-server.sh`](./deploy/bootstrap-server.sh)（手写 `.env` 时用）。
 
 ## 0. 关于「远程代部署」与本机自动化

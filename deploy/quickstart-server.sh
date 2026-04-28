@@ -81,6 +81,10 @@ ensure_env() {
   if [[ ! -f "$ROOT/.env" ]]; then
     need_gen=1
     cp "$ROOT/deploy/docker.env.example" "$ROOT/.env"
+  # 仅有空行/注释：等同「空 .env」，docker 会用 compose 默认值连库，与已有 MySQL 卷密码常不一致 → 注册/登录全挂
+  elif ! grep -qE '^[^#[:space:]]' "$ROOT/.env" 2>/dev/null; then
+    need_gen=1
+    cp "$ROOT/deploy/docker.env.example" "$ROOT/.env"
   elif grep -qE '请改为强密码|请使用 openssl' "$ROOT/.env" 2>/dev/null; then
     need_gen=1
   fi
@@ -93,6 +97,8 @@ ensure_env() {
     sed -i "s/^MYSQL_PASSWORD=.*/MYSQL_PASSWORD=${upw}/" "$ROOT/.env"
     sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${jwt}/" "$ROOT/.env"
     echo ">>> 已写入随机 MySQL 密码与 JWT_SECRET 到 .env（请自行备份 .env，勿提交 git）" >&2
+    echo ">>> 【重要】若 ECS 上 MySQL 数据卷是以前用「另一套密码」初始化的，新密码与库里不一致会导致 API 连不上库（注册/登录失败、502）。" >&2
+    echo ">>> 请从备份恢复当时的 MYSQL_* / JWT_SECRET，或确认可清空数据后执行：cd $ROOT && docker compose down -v && docker compose up -d" >&2
   fi
   if ! grep -qE '^BCRYPT_ROUNDS=' "$ROOT/.env" 2>/dev/null; then
     echo "BCRYPT_ROUNDS=8" >> "$ROOT/.env"
@@ -121,6 +127,18 @@ ensure_env
 WEB_PORT=$(grep -E '^WEB_PORT=' "$ROOT/.env" | head -1 | cut -d= -f2 | tr -d '\r' || true)
 WEB_PORT=${WEB_PORT:-8080}
 open_firewall_port "$WEB_PORT"
+
+# 数字人形象：密钥只在根 .env（git 不同步）；缺则线上一直提示未配置
+if [[ -f "$ROOT/.env" ]]; then
+  if ! grep -qE '^[[:space:]]*ARK_API_KEY=[^[:space:]]' "$ROOT/.env" 2>/dev/null \
+    && ! grep -qE '^[[:space:]]*SEEDREAM_HTTP_URL=[^[:space:]]' "$ROOT/.env" 2>/dev/null \
+    && ! grep -qE '^[[:space:]]*DIGITAL_HUMAN_API_URL=[^[:space:]]' "$ROOT/.env" 2>/dev/null; then
+    echo ">>> 【重要】根目录 .env 未配置 ARK_API_KEY（或 SEEDREAM_* / DIGITAL_HUMAN_API_URL），数字人形象将提示未配置。" >&2
+    echo ">>> git 不会提交 .env；请在服务器编辑 $ROOT/.env 追加密钥，或从本机 scp .env 上来。示例见 deploy/docker.env.example" >&2
+  fi
+else
+  echo ">>> 提示：尚无 $ROOT/.env，本次将由 ensure_env 从 docker.env.example 生成（需再自行追加 ARK_API_KEY 等）。 " >&2
+fi
 
 if [[ -f "$ROOT/backend/whisper-python-service/Dockerfile" ]] && ! grep -q 'mirrors.aliyun.com' "$ROOT/backend/whisper-python-service/Dockerfile" 2>/dev/null; then
   echo ">>> 【重要】当前 Whisper Dockerfile 仍是旧版（无阿里云 apt 换源），在国内 ECS 上 apt 可能卡 1 小时以上。" >&2

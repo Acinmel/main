@@ -90,23 +90,15 @@ services:
       WHISPER_HTTP_TIMEOUT_MS: '600000'
       YTDLP_BIN: /usr/local/bin/yt-dlp
       YTDLP_TIMEOUT_MS: '300000'
-      # 抖音下载（首页「源视频保存 + Whisper」）；不上线抖音可留空
-      DY_DOWNLOADER_COOKIE: ${DY_DOWNLOADER_COOKIE:-}
+      # 抖音 Cookie 仅由根目录 env_file .env 注入（勿用 ${} 展开，避免值中含 $ 被 compose 误解析）
       DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-120000}
       # Linux 容器内落盘目录（与源码包内默认 Windows 路径无关）
       VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/data/download-video}
       FFMPEG_BIN: ${FFMPEG_BIN:-/usr/bin/ffmpeg}
       # 数字人形象落盘（与默认 data/digital-humans 一致，避免容器重建丢文件）
       DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
-      # 数字人形象生成（与 deploy/docker.env.example 一致；不配则走 mock，仅提示配置）
-      ARK_API_KEY: ${ARK_API_KEY:-}
-      ARK_BASE_URL: ${ARK_BASE_URL:-}
-      ARK_IMAGE_MODEL: ${ARK_IMAGE_MODEL:-}
-      SEEDREAM_HTTP_URL: ${SEEDREAM_HTTP_URL:-}
-      SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
-      DIGITAL_HUMAN_API_URL: ${DIGITAL_HUMAN_API_URL:-}
-      DIGITAL_HUMAN_API_KEY: ${DIGITAL_HUMAN_API_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # ARK_API_KEY / SEEDREAM_* / DIGITAL_HUMAN_* / OPENAI_* / DY_DOWNLOADER_COOKIE：
+      # 只写在根目录 .env，经 env_file 原样注入容器（勿在此用 ${VAR:-}，否则易覆盖成空导致「未配置」）
     volumes:
       - video_downloads:/data/download-video
       - digital_human_storage:/workspace/backend/data/digital-humans

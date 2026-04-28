@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Nest API：ffmpeg + yt-dlp（源码 pip）
+# Nest API：ffmpeg + yt-dlp（PyPI；勿依赖仓库根 yt-dlp-master，该目录在 .gitignore 中，克隆后不存在）
 # 构建上下文应为仓库根目录：docker build -f backend/Dockerfile .
 
 FROM node:22-bookworm-slim AS deps
@@ -22,7 +22,6 @@ FROM node:22-bookworm-slim AS runner
 WORKDIR /workspace
 ENV NODE_ENV=production
 
-COPY yt-dlp-master /opt/yt-dlp-master
 ARG USE_CN_MIRROR=1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
@@ -40,9 +39,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg ca-certificates python3 python3-pip \
   && if [ "$USE_CN_MIRROR" = "1" ]; then \
-       pip3 install --break-system-packages -i https://pypi.tuna.tsinghua.edu.cn/simple -e /opt/yt-dlp-master; \
+       pip3 install --break-system-packages -i https://pypi.tuna.tsinghua.edu.cn/simple 'yt-dlp>=2024.1.0'; \
      else \
-       pip3 install --break-system-packages -e /opt/yt-dlp-master; \
+       pip3 install --break-system-packages 'yt-dlp>=2024.1.0'; \
      fi \
   && rm -rf /var/lib/apt/lists/*
 

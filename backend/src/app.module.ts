@@ -1,4 +1,5 @@
 import './load-env';
+import { existsSync } from 'fs';
 import { join } from 'path';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
@@ -12,15 +13,19 @@ import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { JwtAuthGuard } from './modules/auth/jwt-auth.guard';
 
+const inDocker = existsSync('/.dockerenv');
+const rootEnvPath = join(__dirname, '..', '..', '.env');
+const backendEnvPath = join(__dirname, '..', '.env');
+const envFilePath = [
+  ...(inDocker && existsSync(rootEnvPath) ? [rootEnvPath] : []),
+  ...(existsSync(backendEnvPath) ? [backendEnvPath] : []),
+];
+
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      // 与 load-env.ts 一致：根 .env（Docker/运维）+ backend/.env（本地优先覆盖）
-      envFilePath: [
-        join(__dirname, '..', '..', '.env'),
-        join(__dirname, '..', '.env'),
-      ],
+      ...(envFilePath.length > 0 ? { envFilePath } : {}),
     }),
     DatabaseModule,
     AuthModule,
