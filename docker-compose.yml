@@ -15,8 +15,9 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-koubo}
     volumes:
       - mysql_data:/var/lib/mysql
+    # 宿主机端口；与本机已装的 MySQL 冲突时在根 .env 设 MYSQL_HOST_PORT=3307（api 仍连容器内 mysql:3306）
     ports:
-      - '127.0.0.1:3306:3306'
+      - '127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306'
     networks: [kb_net]
     healthcheck:
       test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost']
