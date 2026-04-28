@@ -48,6 +48,7 @@ import { WhisperService } from '../../integrations/whisper/whisper.service';
 import type { WhisperTranscribeResultDto } from '../../integrations/whisper/whisper.types';
 import type { RewriteStyle } from '../tasks/tasks.types';
 import { DigitalHumanPersistenceService } from '../digital-human/digital-human-persistence.service';
+import { Public } from '../auth/public.decorator';
 
 class SourceVideoUrlDto {
   /** 支持抖音整段分享文案或纯 URL */
@@ -434,6 +435,26 @@ export class ToolsController {
       throw new BadRequestException('非法文件路径');
     }
     return full;
+  }
+
+  /**
+   * 数字人形象：当前进程是否读到 ARK / Seedream / 自建 URL（不返回密钥）。
+   * 排障：curl http://127.0.0.1:8080/api/v1/tools/digital-human-env
+   */
+  @Public()
+  @Get('digital-human-env')
+  digitalHumanEnvStatus() {
+    const seedreamUrl = this.config.get<string>('SEEDREAM_HTTP_URL')?.trim();
+    const seedreamKey = this.config.get<string>('SEEDREAM_API_KEY')?.trim();
+    const ark = this.config.get<string>('ARK_API_KEY')?.trim();
+    const remote = this.config.get<string>('DIGITAL_HUMAN_API_URL')?.trim();
+    return {
+      arkConfigured: Boolean(ark),
+      seedreamConfigured: Boolean(seedreamUrl && seedreamKey),
+      remoteConfigured: Boolean(remote),
+      /** 仅长度，便于确认是否注入成功（勿当密钥用） */
+      arkKeyLength: ark?.length ?? 0,
+    };
   }
 
   /** 是否已配置 DY_DOWNLOADER_COOKIE（不返回具体值，供前端展示） */

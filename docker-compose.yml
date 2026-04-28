@@ -66,7 +66,8 @@ services:
     # 连接宿主机上的 MySQL 时：.env 中设 MYSQL_HOST=host.docker.internal，并注释掉本文件中的 mysql 服务及 api 对 mysql 的 depends_on
     extra_hosts:
       - 'host.docker.internal:host-gateway'
-    # 根目录 .env + 可选 backend/.env（后加载的覆盖同名键；只习惯写 backend/.env 时也能进容器）
+    # 根 .env 先，backend/.env 后（后加载覆盖同名键 → 仅写在 backend/.env 的 ARK 可覆盖根里空的 ARK_API_KEY=）
+    # 模板勿含「ARK_API_KEY=」空赋值；若根 .env 仍有该行请删掉或填实值。
     env_file:
       - path: .env
         required: false
