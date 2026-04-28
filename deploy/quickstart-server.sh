@@ -64,6 +64,10 @@ ensure_env() {
     sed -i "s/^JWT_SECRET=.*/JWT_SECRET=${jwt}/" "$ROOT/.env"
     echo ">>> 已写入随机 MySQL 密码与 JWT_SECRET 到 .env（请自行备份 .env，勿提交 git）" >&2
   fi
+  if ! grep -qE '^BCRYPT_ROUNDS=' "$ROOT/.env" 2>/dev/null; then
+    echo "BCRYPT_ROUNDS=8" >> "$ROOT/.env"
+    echo ">>> 已追加 BCRYPT_ROUNDS=8（小内存机器减轻注册时 OOM/502）" >&2
+  fi
 }
 
 open_firewall_port() {

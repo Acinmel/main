@@ -66,6 +66,14 @@ export class AuthService implements OnModuleInit {
     }
   }
 
+  /** bcrypt 轮数：高则更安全但更吃 CPU/内存；2GB 小机 Docker 建议 .env 设 BCRYPT_ROUNDS=8 */
+  private bcryptRounds(): number {
+    const raw = this.config.get<string>('BCRYPT_ROUNDS')?.trim();
+    const n = raw ? Number(raw) : 10;
+    if (!Number.isFinite(n)) return 10;
+    return Math.min(12, Math.max(4, Math.floor(n)));
+  }
+
   async register(
     emailRaw: string,
     password: string,
@@ -86,7 +94,7 @@ export class AuthService implements OnModuleInit {
     }
 
     const id = randomUUID();
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(password, this.bcryptRounds());
     const now = new Date().toISOString();
     await this.db.execute(
       'INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)',

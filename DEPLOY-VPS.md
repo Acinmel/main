@@ -2,6 +2,34 @@
 
 本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + Whisper + MySQL** 的一体化部署。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
 
+## 国内服务器：拉镜像超时 `registry-1.docker.io`
+
+若出现 **`Client.Timeout exceeded`** / **`request canceled while waiting for connection`**，是 **访问 Docker Hub 不畅**，不是业务代码问题。
+
+1. 打开 [阿里云 容器镜像服务 → 镜像加速器](https://cr.console.aliyun.com/cn-hangzhou/instances/mirrors)（地域以控制台为准），复制 **专属加速地址**。
+2. 在 ECS 上执行（把 URL 换成你的；需要 **Python 3**，一般系统已带）：
+
+```bash
+cd /opt/shuziren   # 或你的项目路径
+sudo bash deploy/setup-docker-registry-mirror.sh https://你的ID.mirror.aliyuncs.com
+```
+
+也可临时加一个公共镜像（**不保证长期可用**）：
+
+```bash
+sudo bash deploy/setup-docker-registry-mirror.sh https://你的ID.mirror.aliyuncs.com https://docker.m.daocloud.io
+```
+
+3. 验证后重试：
+
+```bash
+docker info | grep -A5 'Registry Mirrors'
+docker pull hello-world
+cd /opt/shuziren && docker compose pull && docker compose up -d --build
+```
+
+脚本说明：[`deploy/setup-docker-registry-mirror.sh`](./deploy/setup-docker-registry-mirror.sh)。若暂无阿里云账号，可只试 `https://docker.m.daocloud.io`（稳定性因网络而异）。
+
 ## 最快：全新 ECS 一键部署（清空/空目录后）
 
 **默认安装目录**：`/opt/shuziren`（目录须不存在或为空，脚本会 `git clone`）。

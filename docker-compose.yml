@@ -60,9 +60,10 @@ services:
     # 连接宿主机上的 MySQL 时：.env 中设 MYSQL_HOST=host.docker.internal，并注释掉本文件中的 mysql 服务及 api 对 mysql 的 depends_on
     extra_hosts:
       - 'host.docker.internal:host-gateway'
-    # 根目录 .env 中其余变量（如 OPENAI_API_KEY）会注入容器，供 ConfigModule 读取
+    # 根目录 .env：可选；不存在时仅用 environment 与 compose 默认值（首次请 cp deploy/docker.env.example .env）
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       NODE_ENV: production
       PORT: '3000'
@@ -73,6 +74,8 @@ services:
       MYSQL_PASSWORD: ${MYSQL_PASSWORD:-koubo}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-koubo}
       JWT_SECRET: ${JWT_SECRET:-}
+      # 注册/登录 bcrypt 轮数；小内存 ECS 用 8 可降低 OOM 导致 Nginx 502
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-8}
       # Nginx 反代时识别 X-Forwarded-*（限流、审计等如需真实客户端 IP）
       TRUST_PROXY: '1'
       # 前后端分离部署时填写浏览器 Origin，逗号分隔；留空则与开发一致（origin: true）
