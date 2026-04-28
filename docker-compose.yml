@@ -98,7 +98,15 @@ services:
       FFMPEG_BIN: ${FFMPEG_BIN:-/usr/bin/ffmpeg}
       # 数字人形象落盘（与默认 data/digital-humans 一致，避免容器重建丢文件）
       DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
-      # 可选：OPENAI_API_KEY=...
+      # 数字人形象生成（与 deploy/docker.env.example 一致；不配则走 mock，仅提示配置）
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_BASE_URL: ${ARK_BASE_URL:-}
+      ARK_IMAGE_MODEL: ${ARK_IMAGE_MODEL:-}
+      SEEDREAM_HTTP_URL: ${SEEDREAM_HTTP_URL:-}
+      SEEDREAM_API_KEY: ${SEEDREAM_API_KEY:-}
+      DIGITAL_HUMAN_API_URL: ${DIGITAL_HUMAN_API_URL:-}
+      DIGITAL_HUMAN_API_KEY: ${DIGITAL_HUMAN_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
       - video_downloads:/data/download-video
       - digital_human_storage:/workspace/backend/data/digital-humans
