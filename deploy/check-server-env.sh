@@ -42,7 +42,8 @@ for f in "$ROOT/.env" "$ROOT/backend/.env"; do
     echo "[X] 缺失: $f"
     continue
   fi
-  lines=$(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | wc -l | tr -d ' ')
+  # grep 在无输出时 exit 1，pipefail 会导致脚本中断，故对 grep 使用 || true
+  lines=$( (grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null || true) | wc -l | tr -d ' ')
   if [[ "${lines}" -eq 0 ]]; then
     echo "[!] 空文件（无有效键）: $f"
   else
