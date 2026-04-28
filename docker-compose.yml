@@ -26,7 +26,10 @@ services:
       start_period: 30s
 
   whisper:
-    build: ./backend/whisper-python-service
+    build:
+      context: ./backend/whisper-python-service
+      args:
+        USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
     restart: unless-stopped
     environment:
       # 2GB 内存 ECS 建议 .env 保持 base；内存充足可设 medium
@@ -56,6 +59,8 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
     restart: unless-stopped
     # 连接宿主机上的 MySQL 时：.env 中设 MYSQL_HOST=host.docker.internal，并注释掉本文件中的 mysql 服务及 api 对 mysql 的 depends_on
     extra_hosts:
@@ -119,6 +124,7 @@ services:
       context: ./frontend
       args:
         VITE_API_BASE_URL: /api
+        USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
     ports:
       - '${WEB_PORT:-8080}:80'
     depends_on:

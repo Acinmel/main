@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Nest API：ffmpeg + yt-dlp（源码 pip）
 # 构建上下文应为仓库根目录：docker build -f backend/Dockerfile .
 
@@ -7,7 +8,9 @@ COPY backend/package.json backend/package-lock.json ./backend/
 # file:./DY-DOWNLOADER 本地依赖，npm ci 前必须存在
 COPY backend/DY-DOWNLOADER ./backend/DY-DOWNLOADER
 WORKDIR /workspace/backend
-RUN npm ci
+ARG USE_CN_MIRROR=1
+RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
+  && npm ci
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /workspace/backend
@@ -20,15 +23,34 @@ WORKDIR /workspace
 ENV NODE_ENV=production
 
 COPY yt-dlp-master /opt/yt-dlp-master
-RUN apt-get update \
+ARG USE_CN_MIRROR=1
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pip,sharing=locked \
+    set -eux; \
+  if [ "$USE_CN_MIRROR" = "1" ]; then \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources; \
+      sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+      sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+      sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+    fi; \
+  fi; \
+  apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg ca-certificates python3 python3-pip \
-  && pip3 install --no-cache-dir --break-system-packages -e /opt/yt-dlp-master \
+  && if [ "$USE_CN_MIRROR" = "1" ]; then \
+       pip3 install --break-system-packages -i https://pypi.tuna.tsinghua.edu.cn/simple -e /opt/yt-dlp-master; \
+     else \
+       pip3 install --break-system-packages -e /opt/yt-dlp-master; \
+     fi \
   && rm -rf /var/lib/apt/lists/*
 
 COPY backend/package.json backend/package-lock.json ./backend/
 COPY backend/DY-DOWNLOADER ./backend/DY-DOWNLOADER
 WORKDIR /workspace/backend
-RUN npm ci --omit=dev
+RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
+  && npm ci --omit=dev
 COPY --from=build /workspace/backend/dist ./dist
 
 EXPOSE 3000

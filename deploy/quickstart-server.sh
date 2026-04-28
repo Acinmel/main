@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# 服务器上一键：装 Docker（如需）→ 生成 .env 密钥 → 启动全部容器
-# 用法（在项目根目录，root 或 sudo）：
-#   sudo bash deploy/quickstart-server.sh
+# 服务器上一键：装 Docker（如需）→ 国内自动配镜像加速 → 生成 .env → 启动全部容器
+# 用法（必须在项目根目录，且建议 root，否则无法写镜像配置）：
+#   cd /opt/shuziren && sudo bash deploy/quickstart-server.sh
 #
-# 公网访问不了时，请看脚本结束处的「安全组」说明。
+# 跳过自动镜像：SKIP_AUTO_DOCKER_MIRROR=1 sudo bash deploy/quickstart-server.sh
+# 公网访问不了：看脚本末尾「安全组」说明。
 
 set -euo pipefail
 
@@ -14,6 +15,10 @@ else
   ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 fi
 cd "$ROOT"
+
+# BuildKit：层缓存与 RUN --mount 缓存，国内重复构建明显更快
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
 
 compose() {
   if docker compose version &>/dev/null 2>&1; then
@@ -43,6 +48,31 @@ ensure_docker() {
   else
     curl -fsSL https://get.docker.com | sh
     systemctl enable --now docker
+  fi
+}
+
+# 国内 ECS 直连 registry-1.docker.io 常超时；未配置过镜像时自动写入公共加速（可换阿里云专属地址）
+ensure_docker_hub_mirror() {
+  [[ "${SKIP_AUTO_DOCKER_MIRROR:-}" == "1" ]] && return 0
+  [[ "${EUID:-0}" -ne 0 ]] && {
+    echo ">>> 提示：请用 root 执行本脚本（sudo），否则无法自动配置 Docker 镜像加速，拉 mysql 等镜像易失败。" >&2
+    return 0
+  }
+  if [[ -f /etc/docker/daemon.json ]] && grep -q 'registry-mirrors' /etc/docker/daemon.json 2>/dev/null; then
+    return 0
+  fi
+  echo ">>> 未检测到 Docker 镜像加速，正在为国内网络自动配置（DaoCloud 公共源）…" >&2
+  if ! command -v python3 &>/dev/null; then
+    if command -v dnf &>/dev/null; then
+      dnf install -y python3 >/dev/null 2>&1 || true
+    elif command -v apt-get &>/dev/null; then
+      apt-get update -qq && apt-get install -y python3 >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ -f "$ROOT/deploy/setup-docker-registry-mirror.sh" ]] && command -v python3 &>/dev/null; then
+    bash "$ROOT/deploy/setup-docker-registry-mirror.sh" https://docker.m.daocloud.io || true
+  else
+    echo ">>> 无法自动写 daemon.json（缺 python3 或脚本）。请手动执行：sudo bash deploy/setup-docker-registry-mirror.sh <你的镜像地址>" >&2
   fi
 }
 
@@ -85,13 +115,19 @@ if [[ ! -f "$ROOT/docker-compose.yml" ]] || [[ ! -f "$ROOT/deploy/docker.env.exa
 fi
 
 ensure_docker
+ensure_docker_hub_mirror
 ensure_env
 
 WEB_PORT=$(grep -E '^WEB_PORT=' "$ROOT/.env" | head -1 | cut -d= -f2 | tr -d '\r' || true)
 WEB_PORT=${WEB_PORT:-8080}
 open_firewall_port "$WEB_PORT"
 
-echo ">>> 构建并启动容器（首次较慢，请等待）…" >&2
+if [[ -f "$ROOT/backend/whisper-python-service/Dockerfile" ]] && ! grep -q 'mirrors.aliyun.com' "$ROOT/backend/whisper-python-service/Dockerfile" 2>/dev/null; then
+  echo ">>> 【重要】当前 Whisper Dockerfile 仍是旧版（无阿里云 apt 换源），在国内 ECS 上 apt 可能卡 1 小时以上。" >&2
+  echo ">>> 请先 git pull / 同步仓库后再构建；正确文件约 1.2KB+，且含 mirrors.aliyun.com。" >&2
+fi
+
+echo ">>> 构建并启动容器（首次需拉基础镜像 + 装依赖；已启用 BuildKit。仅当日志里 apt 仍显示 deb.debian.org 说明未更新 Dockerfile）…" >&2
 compose up -d --build
 
 echo ""

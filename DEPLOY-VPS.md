@@ -30,6 +30,21 @@ cd /opt/shuziren && docker compose pull && docker compose up -d --build
 
 脚本说明：[`deploy/setup-docker-registry-mirror.sh`](./deploy/setup-docker-registry-mirror.sh)。若暂无阿里云账号，可只试 `https://docker.m.daocloud.io`（稳定性因网络而异）。
 
+### 国内：`docker compose build` 极慢（半小时～数小时）
+
+构建慢通常有 **两类**原因，需分别排除：
+
+1. **拉基础镜像慢**（日志里长时间停在 `FROM python:` / `FROM node:` / `pull`）  
+   → 与访问 **Docker Hub** 有关：务必配置 **`registry-mirrors`**（见上一节），并确认 `docker info` 里已生效。
+
+2. **容器内 `apt-get` 慢**（日志里出现 `deb.debian.org` 且长时间不结束）  
+   → 说明 **Whisper / API 的 Dockerfile 仍是旧版**（未把 Debian 源换成国内镜像）。请在项目根执行：
+   - `wc -c backend/whisper-python-service/Dockerfile`（国内加速版通常 **远大于 531 字节**）
+   - `grep -n mirrors.aliyun backend/whisper-python-service/Dockerfile`（应有匹配行）  
+   若无：先 **`git pull`** 或从主线同步该文件，再 **`docker compose build --no-cache whisper`**。
+
+仓库内 Dockerfile 已默认 **`USE_CN_MIRROR=1`**（阿里云 apt + 清华 pip + npmmirror npm），`deploy/quickstart-server.sh` 会开启 **BuildKit** 并提示旧 Dockerfile。**海外构建**可在执行前导出：`export USE_CN_MIRROR=0`。
+
 ## 最快：全新 ECS 一键部署（清空/空目录后）
 
 **默认安装目录**：`/opt/shuziren`（目录须不存在或为空，脚本会 `git clone`）。
@@ -61,14 +76,20 @@ sudo bash /opt/shuziren/deploy/oneclick-fresh-install.sh --no-clone --purge-volu
 
 ---
 
-## 已有代码：只启动容器
+## 已有代码：只启动容器（推荐，不要只敲 `docker compose`）
+
+**原因说明**：设计上是「项目到服务器 → 一条命令」。若你**跳过脚本、直接 `docker compose up`**，在国内 ECS 上往往会 **拉不动 Docker Hub 镜像**（超时），或 **没有 `.env`**，所以会感觉「跑不起来」——这不是业务代码坏了，而是 **缺镜像加速 / 缺环境文件**。
+
+**正确最小操作（复制即用）**：
 
 ```bash
-cd /opt/shuziren          # 改成你的项目路径
+cd /opt/shuziren          # 你的项目根目录，内含 docker-compose.yml
 sudo bash deploy/quickstart-server.sh
 ```
 
-脚本会：**按需安装 Docker**、**自动生成** `.env` 密钥、尝试放行 `firewalld`、`docker compose up -d --build`，并打印访问说明。
+脚本会：**安装 Docker（如需）**、**未配置时自动写入国内镜像加速**、**生成 `.env`**、**放行 firewalld（如有）**、**`docker compose up -d --build`**，并打印访问说明。
+
+若你已**手动配好** `/etc/docker/daemon.json` 的 `registry-mirrors`，脚本会跳过镜像步骤。不想用自动公共源可：`SKIP_AUTO_DOCKER_MIRROR=1 sudo bash deploy/quickstart-server.sh`。
 
 **公网打不开时**：安全组放行 **`TCP 8080`**（与 `.env` 中 `WEB_PORT` 一致），浏览器使用 **`http://公网IP:8080/`**。
 
