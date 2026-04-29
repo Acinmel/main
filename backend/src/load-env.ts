@@ -15,7 +15,9 @@ const inDocker = existsSync('/.dockerenv');
 
 if (inDocker) {
   if (existsSync(repoRootEnv)) config({ path: repoRootEnv });
-  if (existsSync(backendEnv)) config({ path: backendEnv, override: true });
+  // 不得 override：docker compose 已把 WHISPER_HTTP_URL、FFMPEG_BIN 等注入 process.env；
+  // backend/.env 里常见的 127.0.0.1、Windows 路径会覆盖容器内正确的 whisper:8010、/usr/bin/ffmpeg。
+  if (existsSync(backendEnv)) config({ path: backendEnv, override: false });
 } else if (existsSync(backendEnv)) {
   config({ path: backendEnv });
 }

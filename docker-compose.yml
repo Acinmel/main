@@ -105,7 +105,8 @@ services:
       DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-120000}
       # Linux 容器内落盘目录（与源码包内默认 Windows 路径无关）
       VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/data/download-video}
-      FFMPEG_BIN: ${FFMPEG_BIN:-/usr/bin/ffmpeg}
+      # 固定为镜像内 apt 安装的 ffmpeg；勿用 ${FFMPEG_BIN:-} — 宿主 .env 里 Windows 路径会误入容器导致「FFmpeg 不可用」
+      FFMPEG_BIN: /usr/bin/ffmpeg
       # 数字人形象落盘（与默认 data/digital-humans 一致，避免容器重建丢文件）
       DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
       # ARK_API_KEY / SEEDREAM_* / DIGITAL_HUMAN_* / OPENAI_* / DY_DOWNLOADER_COOKIE：

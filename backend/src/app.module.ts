@@ -25,7 +25,12 @@ const envFilePath = [
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
-      ...(envFilePath.length > 0 ? { envFilePath } : {}),
+      // Docker 下只用进程环境（compose environment / env_file 已在启动时注入），避免 .env 再次覆盖
+      ...(inDocker
+        ? { ignoreEnvFile: true }
+        : envFilePath.length > 0
+          ? { envFilePath }
+          : {}),
     }),
     DatabaseModule,
     AuthModule,
