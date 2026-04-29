@@ -11,6 +11,9 @@ WORKDIR /workspace/backend
 ARG USE_CN_MIRROR=1
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
   && npm ci
+# 与子依赖 dy-downloader（file:）：须产出 dist/*.js（与 backend/dist 同源，供 runner COPY）
+WORKDIR /workspace/backend/DY-DOWNLOADER
+RUN npm run build
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /workspace/backend
@@ -47,16 +50,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 COPY backend/package.json backend/package-lock.json ./backend/
 COPY backend/DY-DOWNLOADER ./backend/DY-DOWNLOADER
-
-# dy-downloader 为 file: 本地依赖，入口为 dist/*.js（tsup 产出）；源码树常不含 dist/.gitignored，须在镜像内先构建
-WORKDIR /workspace/backend/DY-DOWNLOADER
-RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
-  && npm ci \
-  && npm run build
+# deps 阶段已构建的 dist 覆盖上下文（宿主常无 dist/），避免只靠 runner 缓存导致运行时缺入口
+COPY --from=deps /workspace/backend/DY-DOWNLOADER/dist ./backend/DY-DOWNLOADER/dist
 
 WORKDIR /workspace/backend
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
-  && npm ci --omit=dev
+  && npm ci --omit=dev \
+  && node --input-type=module -e \
+  "import('dy-downloader').then(()=>console.log('[Dockerfile] dy-downloader import ok')).catch(e=>{console.error(e);process.exit(1);})"
 COPY --from=build /workspace/backend/dist ./dist
 
 EXPOSE 3000
