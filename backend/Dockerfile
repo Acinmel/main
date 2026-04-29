@@ -47,6 +47,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 COPY backend/package.json backend/package-lock.json ./backend/
 COPY backend/DY-DOWNLOADER ./backend/DY-DOWNLOADER
+
+# dy-downloader 为 file: 本地依赖，入口为 dist/*.js（tsup 产出）；源码树常不含 dist/.gitignored，须在镜像内先构建
+WORKDIR /workspace/backend/DY-DOWNLOADER
+RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
+  && npm ci \
+  && npm run build
+
 WORKDIR /workspace/backend
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
   && npm ci --omit=dev
