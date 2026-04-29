@@ -52,8 +52,12 @@ COPY backend/package.json backend/package-lock.json ./backend/
 COPY backend/DY-DOWNLOADER ./backend/DY-DOWNLOADER
 # deps 阶段已构建的 dist 覆盖上下文（宿主常无 dist/），避免只靠 runner 缓存导致运行时缺入口
 COPY --from=deps /workspace/backend/DY-DOWNLOADER/dist ./backend/DY-DOWNLOADER/dist
+# 须先有完整子包（含 package.json），再覆盖 dist；否则 node_modules 里 file: 链接会指向残缺目录 → ENOENT
+RUN test -f /workspace/backend/DY-DOWNLOADER/package.json \
+  && test -f /workspace/backend/DY-DOWNLOADER/dist/index.js
 
 WORKDIR /workspace/backend
+# 禁止在此阶段 npm run build：Nest 已在上方 build 阶段编译；若误加会拉全量 devDependencies 且易缺 DY-DOWNLOADER 源码
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
   && npm ci --omit=dev \
   && node --input-type=module -e \
