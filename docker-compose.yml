@@ -51,17 +51,18 @@ services:
       - '127.0.0.1:8010:8010'
     networks: [kb_net]
     healthcheck:
+      # CPU 转写或与首次拉模型并行时 /health 可能 >5s 才响应，urllib 太短会 TimeoutError → 容器误判 unhealthy
       test:
         [
           'CMD',
           'python',
           '-c',
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=5)",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=30)",
         ]
-      interval: 15s
-      timeout: 8s
-      retries: 6
-      start_period: 120s
+      interval: 20s
+      timeout: 35s
+      retries: 8
+      start_period: 180s
 
   api:
     build:
@@ -99,11 +100,12 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       WHISPER_HTTP_URL: http://whisper:8010/transcribe
       WHISPER_HTTP_HEALTH_URL: http://whisper:8010/health
+      WHISPER_HTTP_HEALTH_TIMEOUT_MS: ${WHISPER_HTTP_HEALTH_TIMEOUT_MS:-60000}
       WHISPER_HTTP_TIMEOUT_MS: '600000'
       YTDLP_BIN: /usr/local/bin/yt-dlp
       YTDLP_TIMEOUT_MS: '300000'
       # 抖音 Cookie 仅由根目录 env_file .env 注入（勿用 ${} 展开，避免值中含 $ 被 compose 误解析）
-      DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-120000}
+      DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-300000}
       # Linux 容器内落盘目录（与源码包内默认 Windows 路径无关）
       VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/data/download-video}
       # 固定为镜像内 apt 安装的 ffmpeg；勿用 ${FFMPEG_BIN:-} — 宿主 .env 里 Windows 路径会误入容器导致「FFmpeg 不可用」
