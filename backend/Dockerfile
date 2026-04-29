@@ -3,17 +3,43 @@
 # 构建上下文应为仓库根目录：docker build -f backend/Dockerfile .
 
 FROM node:22-bookworm-slim AS deps
+# slim 镜像无 Python：better-sqlite3 在 prebuild 下载超时后会走 node-gyp，需 python3 + 编译工具 + sqlite 头文件
+ARG USE_CN_MIRROR=1
 WORKDIR /workspace
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+  set -eux; \
+  if [ "$USE_CN_MIRROR" = "1" ]; then \
+    if [ -f /etc/apt/sources.list.d/debian.sources ]; then \
+      sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources; \
+      sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources; \
+    elif [ -f /etc/apt/sources.list ]; then \
+      sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+      sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list; \
+    fi; \
+  fi; \
+  apt-get update \
+  && apt-get install -y --no-install-recommends \
+       python3 make g++ \
+       libsqlite3-dev \
+  && ln -sf /usr/bin/python3 /usr/bin/python \
+  && rm -rf /var/lib/apt/lists/*
+
 COPY backend/package.json backend/package-lock.json ./backend/
-# file:./DY-DOWNLOADER 本地依赖，npm ci 前必须存在
 COPY backend/DY-DOWNLOADER ./backend/DY-DOWNLOADER
+# 构建上下文必须为仓库根；若报错 ENOENT 表示上下文里缺子包——请 git status 确认已提交并推送 backend/DY-DOWNLOADER/package.json
+RUN test -f /workspace/backend/DY-DOWNLOADER/package.json
+
 WORKDIR /workspace/backend
 ARG USE_CN_MIRROR=1
 RUN if [ "$USE_CN_MIRROR" = "1" ]; then npm config set registry https://registry.npmmirror.com; fi \
   && npm ci
-# 与子依赖 dy-downloader（file:）：须产出 dist/*.js（与 backend/dist 同源，供 runner COPY）
-WORKDIR /workspace/backend/DY-DOWNLOADER
-RUN npm run build
+# 与子依赖 dy-downloader（file:）：须在子目录内产出 dist（显式 cd + set -e，避免静默 cd 失败后 npm 误判 cwd）
+RUN set -eux \
+  && test -f /workspace/backend/DY-DOWNLOADER/package.json \
+  && cd /workspace/backend/DY-DOWNLOADER \
+  && npm run build \
+  && test -f ./dist/index.js
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /workspace/backend
@@ -41,6 +67,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   fi; \
   apt-get update \
   && apt-get install -y --no-install-recommends ffmpeg ca-certificates python3 python3-pip \
+     make g++ libsqlite3-dev \
+  && ln -sf /usr/bin/python3 /usr/bin/python \
   && if [ "$USE_CN_MIRROR" = "1" ]; then \
        pip3 install --break-system-packages -i https://pypi.tuna.tsinghua.edu.cn/simple 'yt-dlp>=2024.1.0'; \
      else \
