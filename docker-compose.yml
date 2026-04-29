@@ -8,6 +8,13 @@ services:
   mysql:
     image: mysql:8.0
     restart: unless-stopped
+    # 小内存 ECS 上 InnoDB 默认池较大易 OOM，进程被内核杀（容器 exit 137）→ unhealthy
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb_buffer_pool_size=64M
+      - --performance_schema=OFF
+      - --table_open_cache=200
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-koubo}
@@ -24,7 +31,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s
+      start_period: 90s
 
   whisper:
     build:
