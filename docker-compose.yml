@@ -65,8 +65,9 @@ services:
 
   api:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
+      # 上下文为 backend/，Dockerfile 内 COPY package.json、DY-DOWNLOADER（勿用仓库根上下文 + COPY backend/...，否则在仅含 backend 的目录构建会 ENOENT）
+      context: ./backend
+      dockerfile: Dockerfile
       args:
         USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
     restart: unless-stopped
