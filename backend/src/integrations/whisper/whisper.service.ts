@@ -256,7 +256,10 @@ export class WhisperService {
       throw new BadRequestException('文件为空');
     }
     if (file.size > max) {
-      throw new BadRequestException(`文件过大（当前上限 25MB），当前 ${file.size} 字节`);
+      const mb = Math.round(max / (1024 * 1024));
+      throw new BadRequestException(
+        `文件过大（当前上限约 ${mb}MB），当前 ${file.size} 字节`,
+      );
     }
 
     const mt = (file.mimetype || '').toLowerCase();

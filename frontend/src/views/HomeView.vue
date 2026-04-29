@@ -173,7 +173,8 @@ const pipelineProgress = ref(0)
 const pipelineBarProcessing = ref(false)
 const pipelineStatusLabel = computed(() => {
   if (!douyinPipeline.value) return ''
-  if (pipelinePhase.value === 'download') return '① 正在下载源视频到本机…'
+  if (pipelinePhase.value === 'download')
+    return '① 正在将源视频下载到服务端保存目录…'
   if (pipelinePhase.value === 'transcribe') return '② 正在抽取音轨并由 Whisper 转写口播（耗时因时长而异，请稍候）…'
   return ''
 })
@@ -332,7 +333,7 @@ async function onFetchVideoMeta() {
 
     pipelineProgress.value = 48
     pipelineBarProcessing.value = true
-    message.info('视频已保存，开始 Whisper 转写…')
+    message.info('服务端已保存视频文件，开始 Whisper 转写…')
 
     const r = await transcribeSavedVideo({ fileName: basename })
 
@@ -357,7 +358,7 @@ async function onFetchVideoMeta() {
     message.success(parts.join(''))
     if (r.transcriptionError) {
       message.warning(
-        `视频已保存到本机目录；口播转写未完成：${r.transcriptionError}`,
+        `视频已保存到服务端目录；口播转写未完成：${r.transcriptionError}`,
       )
     }
   } catch (de: unknown) {
@@ -915,8 +916,8 @@ async function onGenerateVideo() {
             </n-button>
             <n-text depth="3" style="font-size: 12px">
               先解析 HTML 渲染资料；抖音链接会在展示完成后继续：拉取源视频→提取音轨→Whisper
-              填入「口播文案」。保存目录见 Windows 默认 C:\downloadVideo 或服务端 VIDEO_SAVE_DIR（需
-              DY_DOWNLOADER_COOKIE）。
+              填入「口播文案」。文件保存在后端服务器（Docker 内多为
+              /data/download-video 卷；本地开发 Windows 常为 C:\downloadVideo），不会出现在你电脑的下载文件夹。
             </n-text>
             <n-space align="center" :size="8" style="flex-wrap: wrap">
               <n-text depth="3" style="font-size: 12px">服务端 Cookie：</n-text>
@@ -935,7 +936,7 @@ async function onGenerateVideo() {
               </n-button>
             </n-space>
             <n-space align="center" :size="8" style="flex-wrap: wrap; margin-top: 4px">
-              <n-text depth="3" style="font-size: 12px">口播转写（下载→本地文件→FFmpeg 抽音轨→Whisper）：</n-text>
+              <n-text depth="3" style="font-size: 12px">口播转写（服务端下载落盘→FFmpeg 抽音轨→Whisper）：</n-text>
               <n-tag v-if="pipelineLoading" size="small" :bordered="false">检测中…</n-tag>
               <template v-else-if="pipelineHealth">
                 <n-tag
