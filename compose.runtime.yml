@@ -1,0 +1,101 @@
+name: shuziren
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --innodb_buffer_pool_size=64M
+      - --performance_schema=OFF
+      - --table_open_cache=200
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-koubo}
+      MYSQL_USER: ${MYSQL_USER:-koubo}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-koubo}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - '127.0.0.1:${MYSQL_HOST_PORT:-3306}:3306'
+    networks: [kb_net]
+    healthcheck:
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 90s
+
+  api:
+    image: shuziren-api:${APP_VERSION:?APP_VERSION is required}
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      args:
+        USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
+    restart: unless-stopped
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    env_file:
+      - path: ${SHUZIREN_ENV_FILE:-/opt/shuziren-runtime/.env}
+        required: false
+      - path: ${SHUZIREN_BACKEND_ENV_FILE:-/opt/shuziren-runtime/backend.env}
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      MYSQL_HOST: ${MYSQL_HOST:-mysql}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER:-koubo}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-koubo}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-koubo}
+      JWT_SECRET: ${JWT_SECRET:-}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-8}
+      TRUST_PROXY: '1'
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      YTDLP_BIN: /usr/local/bin/yt-dlp
+      YTDLP_TIMEOUT_MS: '300000'
+      DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-300000}
+      VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/data/download-video}
+      FFMPEG_BIN: /usr/bin/ffmpeg
+      DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
+    volumes:
+      - video_downloads:/data/download-video
+      - digital_human_storage:/workspace/backend/data/digital-humans
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          "node -e \"fetch('http://127.0.0.1:3000/api').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\"",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 6
+      start_period: 90s
+    networks: [kb_net]
+
+  web:
+    image: shuziren-web:${APP_VERSION:?APP_VERSION is required}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - '${WEB_PORT:-8080}:80'
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [kb_net]
+
+volumes:
+  mysql_data:
+  video_downloads:
+  digital_human_storage:
+
+networks:
+  kb_net:
+    driver: bridge

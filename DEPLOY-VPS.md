@@ -1,5 +1,7 @@
 # VPS 部署说明（Docker Compose）
 
+> **生产环境建议使用制品化部署。** 本文档中的 `git pull`、`docker compose up -d --build`、`quickstart-server.sh` 属于源码部署方式，适合开发、测试或临时环境。生产服务器不应保留源码；请优先使用 [`docs/production-artifact-deployment.md`](./docs/production-artifact-deployment.md) 和 [`docs/development-to-server-release-flow.md`](./docs/development-to-server-release-flow.md)。
+
 本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + MySQL** 的一体化部署；口播转写在 API 容器内通过 **FFmpeg 抽轨 + 外部 ASR HTTP** 完成（在 `.env` 中配置 `ASR_TRANSCRIBE_URL`、`OPENAI_API_KEY` 等，见 `backend/.env.example`）。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
 
 ## 国内服务器：拉镜像超时 `registry-1.docker.io`
@@ -209,7 +211,9 @@ docker compose logs --tail=40 web
 - **本机 `curl` 正常、公网不行**：查云安全组是否放行 **`WEB_PORT`**（及宿主机 Nginx 若占 80 则放行 80）。
 - **`GET /api` 需匿名探活**：后端已为根路由加了 **`@Public()`**，返回 200 + `Hello World!` 即表示 API 进程正常。
 
-## 8. 更新发布
+## 8. 更新发布（源码部署方式，仅限开发/临时环境）
+
+生产环境不要使用本节方式。生产发布应在开发机或 CI 构建产物 zip，再上传服务器解压并执行运行期 Compose 的 `--build` 部署，详见 [`docs/development-to-server-release-flow.md`](./docs/development-to-server-release-flow.md)。
 
 ```bash
 cd shuziren
