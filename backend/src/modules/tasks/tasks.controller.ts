@@ -13,6 +13,7 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Express, Request } from 'express';
 import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
+import { AuditService } from '../audit/audit.service';
 import { TasksService } from './tasks.service';
 import type {
   RenderOptionsDto,
@@ -46,7 +47,10 @@ class RewriteSuggestDto {
  */
 @Controller('v1/tasks')
 export class TasksController {
-  constructor(private readonly tasks: TasksService) {}
+  constructor(
+    private readonly tasks: TasksService,
+    private readonly audit: AuditService,
+  ) {}
 
   @Post()
   async create(@Body() body: CreateTaskDto, @Req() req: Request) {
@@ -65,7 +69,9 @@ export class TasksController {
     }
     const initial = initialRaw && initialRaw.length > 0 ? initialRaw : undefined;
     const userId = req.userId!;
-    return this.tasks.createTask(userId, normalized, initial);
+    const out = await this.tasks.createTask(userId, normalized, initial);
+    void this.audit.log(userId, 'task_create', `task_id=${out.id}`, req);
+    return out;
   }
 
   /** 更具体的路径优先注册，避免被 :id 误匹配 */
@@ -157,7 +163,9 @@ export class TasksController {
       throw new BadRequestException('mode/aspect/voiceStyleId/subtitleStyleId 均为必填');
     }
     const userId = req.userId!;
-    return this.tasks.submitRender(userId, id, body);
+    const out = await this.tasks.submitRender(userId, id, body);
+    void this.audit.log(userId, 'render_submit', `task_id=${id}`, req);
+    return out;
   }
 
   @Get(':id')

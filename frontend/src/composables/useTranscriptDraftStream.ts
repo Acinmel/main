@@ -3,10 +3,9 @@ import type { TranscriptSegment } from '@/types/domain'
 import { useTaskDraftStore } from '@/stores/taskDraft'
 
 /**
- * Whisper 转写结果写入「口播文案」可编辑框：打字机式逐段输出（非模型 token 流式，便于用户感知进度）。
- * 任意长度均做分块动画；极长文自动加大步长以在数秒内完成。
+ * ASR 转写结果写入「口播文案」可编辑框：打字机式逐段输出（非模型 token 流式，便于用户感知进度）。
  */
-export function useWhisperTranscriptStream() {
+export function useTranscriptDraftStream() {
   const draft = useTaskDraftStore()
   const isStreamingToScript = ref(false)
   /** 当前正在流式写入的完整目标文本（用于用户点击中断时一次性补全） */
@@ -35,7 +34,7 @@ export function useWhisperTranscriptStream() {
   /**
    * 先写入 store 中的 transcript/分段（供后续任务流），再向 manualScriptDraft 流式填充。
    */
-  function applyWhisperToEditableScript(payload: {
+  function applyTranscriptToEditableScript(payload: {
     fullText: string
     segments: TranscriptSegment[]
     transcriptId?: string
@@ -43,7 +42,7 @@ export function useWhisperTranscriptStream() {
   }) {
     cancelStream()
     const fullText = (payload.fullText ?? '').trim()
-    draft.setWhisperTranscript(fullText, payload.segments, {
+    draft.setTranscriptFromApi(fullText, payload.segments, {
       transcriptId: payload.transcriptId,
       rewriteSuggestion: payload.rewriteSuggestion,
     })
@@ -85,7 +84,7 @@ export function useWhisperTranscriptStream() {
 
   return {
     isStreamingToScript,
-    applyWhisperToEditableScript,
+    applyTranscriptToEditableScript,
     cancelStream,
     interruptStreamWithFullText,
   }

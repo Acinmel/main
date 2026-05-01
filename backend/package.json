@@ -6,7 +6,6 @@
   "private": true,
   "license": "UNLICENSED",
   "scripts": {
-    "whisper": "npm --prefix ./whisper-python-service run start",
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
@@ -19,9 +18,12 @@
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
+    "test:e2e:deploy": "node ./scripts/run-deploy-e2e.cjs",
     "test:pipeline": "jest --config ./test/jest-e2e.json --testPathPatterns=tools-pipeline",
     "test:seedream": "node scripts/test-seedream-api.cjs",
-    "test:ark-image": "node scripts/test-ark-image-api.cjs"
+    "test:ark-image": "node scripts/test-ark-image-api.cjs",
+    "rebuild:sqlite": "npm rebuild better-sqlite3",
+    "rebuild:sqlite:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rebuild-sqlite.ps1"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

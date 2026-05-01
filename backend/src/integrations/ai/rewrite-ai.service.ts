@@ -2,6 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { RewriteStyle } from '../../modules/tasks/tasks.types';
 import { mockSuggest } from './ai-mock.util';
+import {
+  resolveChatCompletionsUrl,
+  resolveRewriteApiKey,
+  resolveRewriteModel,
+} from './openai-ark-compat.util';
 
 type ChatCompletionMessage = {
   role: 'system' | 'user';
@@ -9,12 +14,8 @@ type ChatCompletionMessage = {
 };
 
 /**
- * 文案改写 / 一键增强：优先调用 OpenAI 兼容的 Chat Completions。
- *
- * 请求形态（便于后续切换任意兼容网关）：
- * POST ${OPENAI_BASE_URL}/chat/completions
- * Headers: Authorization: Bearer ${OPENAI_API_KEY}
- * Body: { model, temperature, messages: [{role, content}] }
+ * 文案改写 / 一键增强：OpenAI 兼容 Chat Completions。
+ * 未配 OPENAI_* 时自动走火山方舟：ARK_BASE_URL + ARK_API_KEY（与 Python OpenAI 客户端改 base_url 一致）。
  */
 @Injectable()
 export class RewriteAiService {
@@ -27,20 +28,17 @@ export class RewriteAiService {
     style: RewriteStyle;
     sourceVideoUrl: string;
   }): Promise<string> {
-    const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
+    const apiKey = resolveRewriteApiKey(this.config);
     if (!apiKey) {
-      this.logger.warn('OPENAI_API_KEY 未配置，改写使用本地 mock');
+      this.logger.warn('OPENAI_API_KEY / ARK_API_KEY 均未配置，改写使用本地 mock');
       return mockSuggest(params.source, params.style, params.sourceVideoUrl);
     }
 
-    const baseUrl = (
-      this.config.get<string>('OPENAI_BASE_URL') ?? 'https://api.openai.com/v1'
-    ).replace(/\/$/, '');
-    const model = this.config.get<string>('OPENAI_MODEL') ?? 'gpt-4o-mini';
+    const url = resolveChatCompletionsUrl(this.config);
+    const model = resolveRewriteModel(this.config);
     const timeoutMs = Number(this.config.get('OPENAI_TIMEOUT_MS') ?? 60_000);
 
     const messages = this.buildMessages(params);
-    const url = `${baseUrl}/chat/completions`;
     const body = {
       model,
       temperature: 0.7,

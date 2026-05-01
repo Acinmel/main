@@ -1,0 +1,17 @@
+-- -----------------------------------------------------------------------------
+-- 直接在库里把某用户设为管理员并开通（不必写 ADMIN_EMAILS、不必重启 api）
+-- 前提：该邮箱已在 users 里（先通过前端注册一次）
+--
+-- MySQL 示例（宿主机 / 容器内，按你实际库名、用户改）：
+--   docker compose exec mysql mysql -ukoubo -pkoubo koubo -e "UPDATE users SET role='admin', account_status='active' WHERE email='你的邮箱@example.com';"
+--
+-- SQLite 示例（仅本地未用 MySQL 时）：
+--   sqlite3 backend/data/app.db "UPDATE users SET role='admin', account_status='active' WHERE email='你的邮箱@example.com';"
+-- -----------------------------------------------------------------------------
+
+UPDATE users
+SET role = 'admin', account_status = 'active'
+WHERE email = '你的邮箱@example.com';
+
+-- 验证：应显示 role=admin, account_status=active
+-- SELECT id, email, role, account_status FROM users WHERE email = '你的邮箱@example.com';

@@ -1,12 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  resolveChatCompletionsApiKey,
+  resolveChatCompletionsUrl,
+  resolveChatModel,
+} from './openai-ark-compat.util';
 
 /**
  * 第二步「生成视频」：用大模型优化口播稿（OpenAI 兼容 Chat Completions）。
  *
- * 环境变量（优先独立配置，便于接入任意兼容网关）：
- * - LLM_API_BASE_URL / LLM_API_KEY / LLM_MODEL / LLM_TIMEOUT_MS
- * 未配置 LLM_* 时回退到 OPENAI_*；均无密钥时返回原文案，不抛错。
+ * 环境变量：LLM_* 优先；否则 OPENAI_*；再否则火山方舟 ARK_API_KEY + ARK_BASE_URL。
+ * 均无密钥时返回原文案，不抛错。
  */
 @Injectable()
 export class VideoGenerateLlmService {
@@ -23,24 +27,19 @@ export class VideoGenerateLlmService {
       return { text: '', usedLlm: false };
     }
 
-    const apiKey =
-      this.config.get<string>('LLM_API_KEY')?.trim() ||
-      this.config.get<string>('OPENAI_API_KEY')?.trim() ||
-      '';
+    const apiKey = resolveChatCompletionsApiKey(this.config);
     if (!apiKey) {
-      this.logger.warn('LLM_API_KEY / OPENAI_API_KEY 均未配置，口播优化跳过模型，返回原文');
+      this.logger.warn(
+        'LLM_API_KEY / OPENAI_API_KEY / ARK_API_KEY 均未配置，口播优化跳过模型，返回原文',
+      );
       return { text: trimmed, usedLlm: false };
     }
 
-    const baseUrl = (
-      this.config.get<string>('LLM_API_BASE_URL')?.trim() ||
-      this.config.get<string>('OPENAI_BASE_URL')?.trim() ||
-      'https://api.openai.com/v1'
-    ).replace(/\/$/, '');
-    const model =
-      this.config.get<string>('LLM_MODEL')?.trim() ||
-      this.config.get<string>('OPENAI_MODEL')?.trim() ||
-      'gpt-4o-mini';
+    const llmBase = this.config.get<string>('LLM_API_BASE_URL')?.trim();
+    const url = llmBase
+      ? `${llmBase.replace(/\/+$/, '')}/chat/completions`
+      : resolveChatCompletionsUrl(this.config);
+    const model = resolveChatModel(this.config);
     const timeoutMs = Number(
       this.config.get('LLM_TIMEOUT_MS') ?? this.config.get('OPENAI_TIMEOUT_MS') ?? 120_000,
     );
@@ -51,7 +50,6 @@ export class VideoGenerateLlmService {
       userParts.push(`【参考视频页链接】${sourceVideoUrl.trim()}`);
     }
 
-    const url = `${baseUrl}/chat/completions`;
     const body = {
       model,
       temperature: 0.5,

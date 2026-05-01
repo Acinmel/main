@@ -1,6 +1,6 @@
 # VPS 部署说明（Docker Compose）
 
-本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + Whisper + MySQL** 的一体化部署。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
+本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + MySQL** 的一体化部署；口播转写在 API 容器内通过 **FFmpeg 抽轨 + 外部 ASR HTTP** 完成（在 `.env` 中配置 `ASR_TRANSCRIBE_URL`、`OPENAI_API_KEY` 等，见 `backend/.env.example`）。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
 
 ## 国内服务器：拉镜像超时 `registry-1.docker.io`
 
@@ -34,16 +34,13 @@ cd /opt/shuziren && docker compose pull && docker compose up -d --build
 
 构建慢通常有 **两类**原因，需分别排除：
 
-1. **拉基础镜像慢**（日志里长时间停在 `FROM python:` / `FROM node:` / `pull`）  
+1. **拉基础镜像慢**（日志里长时间停在 `FROM node:` / `pull`）  
    → 与访问 **Docker Hub** 有关：务必配置 **`registry-mirrors`**（见上一节），并确认 `docker info` 里已生效。
 
 2. **容器内 `apt-get` 慢**（日志里出现 `deb.debian.org` 且长时间不结束）  
-   → 说明 **Whisper / API 的 Dockerfile 仍是旧版**（未把 Debian 源换成国内镜像）。请在项目根执行：
-   - `wc -c backend/whisper-python-service/Dockerfile`（国内加速版通常 **远大于 531 字节**）
-   - `grep -n mirrors.aliyun backend/whisper-python-service/Dockerfile`（应有匹配行）  
-   若无：先 **`git pull`** 或从主线同步该文件，再 **`docker compose build --no-cache whisper`**。
+   → 说明 **`backend/Dockerfile`（API 镜像）仍是旧版**（未把 Debian 源换成国内镜像）。请先 **`git pull`** 同步主线，再 **`docker compose build --no-cache api`**。
 
-仓库内 Dockerfile 已默认 **`USE_CN_MIRROR=1`**（阿里云 apt + 清华 pip + npmmirror npm），`deploy/quickstart-server.sh` 会开启 **BuildKit** 并提示旧 Dockerfile。**海外构建**可在执行前导出：`export USE_CN_MIRROR=0`。
+仓库内 Dockerfile 已默认 **`USE_CN_MIRROR=1`**（阿里云 apt + npmmirror npm 等），`deploy/quickstart-server.sh` 会开启 **BuildKit**。**海外构建**可在执行前导出：`export USE_CN_MIRROR=0`。
 
 ## 最快：全新 ECS 一键部署（清空/空目录后）
 
@@ -128,7 +125,7 @@ sudo bash deploy/quickstart-server.sh
    sudo bash deploy/setup-docker-alinux.sh
    ```
    若 `dnf install` 报 GPG 或源错误，请到阿里云文档「安装 Docker」按当前地域/版本核对源地址。
-2. **内存**：默认 Compose 已将 Whisper 模型默认设为 **`base`**，并在 `deploy/docker.env.example` 中写明；勿在 2GB 机器上使用 `medium` 除非已加 Swap 或升配。
+2. **内存**：2GB 机型上建议保持 `deploy/docker.env.example` 中的 **`BCRYPT_ROUNDS`** 偏低（如 `8`），并避免在 API 容器内并行大量重任务；口播转写为**外链式 ASR**，不在本机加载大模型。
 3. **安全组**：入方向放行 **TCP 8080**（与 `.env` 中 `WEB_PORT` 一致）。
 
 ## 2. 获取代码
@@ -145,7 +142,7 @@ cp deploy/docker.env.example .env
 nano .env   # 或 vim：至少修改 MYSQL_*、JWT_SECRET
 ```
 
-将 **大模型、抖音 Cookie、Whisper 模型** 等按 `backend/.env.example` 的说明，把需要的变量**追加**到根目录 `.env` 中（Compose 会把在 `api.environment` 里引用到的变量传入容器；若你新增了自定义键，需在 `docker-compose.yml` 的 `api.environment` 中增加一行 `${VAR}` 映射）。
+将 **大模型、抖音 Cookie、ASR（`ASR_TRANSCRIBE_URL` / `OPENAI_API_KEY` 等）** 按 `backend/.env.example` 的说明，把需要的变量**追加**到根目录 `.env` 或 `backend/.env` 中（本仓库 `docker-compose.yml` 通过 `env_file` 注入；若你新增了自定义键且 Compose 不会自动带入，再在 `api.environment` 中增加一行 `${VAR}` 映射）。
 
 **生产环境必须设置强随机 `JWT_SECRET`**，例如：
 
@@ -180,7 +177,7 @@ docker compose logs -f api
 1. 在 MySQL 中创建数据库与用户，并授权（库名与 `MYSQL_DATABASE` 一致）。
 2. 编辑 `docker-compose.yml`：
    - 注释或删除 **`mysql`** 整个服务；
-   - 在 **`api.depends_on`** 中去掉对 `mysql` 的依赖，仅保留 `whisper`；
+   - 在 **`api.depends_on`** 中去掉对 `mysql` 的依赖（若无其它前置服务可删除整段 `depends_on`）；
 3. 在 `.env` 中设置例如：
    - `MYSQL_HOST=host.docker.internal`
    - `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` 与宿主机实例一致。

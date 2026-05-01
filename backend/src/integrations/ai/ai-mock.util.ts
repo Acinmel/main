@@ -7,7 +7,7 @@ export function mockAsrText(videoUrl: string): string {
     '原视频链接占位：',
     videoUrl,
     '',
-    '后续接入：下载视频 → FFmpeg 抽音轨 → 调用 Whisper/云厂商 ASR → 回填本段文案。',
+    '后续接入：下载视频 → FFmpeg 抽音轨 → 调用云厂商 ASR → 回填本段文案。',
   ].join('\n');
 }
 
@@ -24,7 +24,7 @@ export function mockSuggest(
     knowledge: '【知识分享】结构化讲解，补充一个记忆点或小清单：',
   };
   const tail =
-    '\n\n（以上为本地 mock：配置 OPENAI_API_KEY 后将改为真实模型输出；失败时也会回退到此占位。）';
+    '\n\n（以上为本地 mock：配置 ARK_API_KEY 或 OPENAI_API_KEY 后将改为真实模型输出；失败时也会回退到此占位。）';
   return `${head[style]}\n${source.slice(0, 400)}\n\n来源占位：${videoUrl.slice(0, 120)}${tail}`;
 }
 

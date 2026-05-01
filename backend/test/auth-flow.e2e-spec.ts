@@ -36,7 +36,7 @@ describe('Auth flow (e2e)', () => {
     }
   });
 
-  it('register → login → me → digital-human-template（空）', async () => {
+  it('register → login → me；待审核用户不可访问 digital-human-template', async () => {
     const email = `u${Date.now()}@test.local`;
     const password = 'password12';
 
@@ -64,8 +64,7 @@ describe('Auth flow (e2e)', () => {
     const tmpl = await request(app.getHttpServer())
       .get('/api/v1/tools/digital-human-template')
       .set('Authorization', `Bearer ${login.body.token}`)
-      .expect(200);
-    expect(tmpl.body.hasTemplate).toBe(false);
+      .expect(403);
   });
 
   it('重复注册同一邮箱返回 409', async () => {

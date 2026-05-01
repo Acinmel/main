@@ -10,7 +10,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 /** 与 VideoMediaDownloadService 下载结果一致 */
-export type WhisperMediaInput = {
+export type TranscribeMediaInput = {
   buffer: Buffer;
   originalname: string;
   mimetype: string;
@@ -18,7 +18,7 @@ export type WhisperMediaInput = {
 };
 
 /**
- * 视频 → FFmpeg 抽音轨（16kHz mono WAV）再送 Whisper，减轻 Python 侧解码压力、统一格式。
+ * 视频 → FFmpeg 抽音轨（16kHz mono WAV）再送 ASR API，减轻上游解码压力、统一格式。
  * 可执行文件：FFMPEG_BIN → backend/ffmpeg/bin（Windows/Linux）→ PATH 中的 ffmpeg。
  */
 @Injectable()
@@ -31,11 +31,11 @@ export class FfmpegAudioService {
    * 对疑似视频：抽音轨为 WAV；纯音频或抽轨失败则原样返回。
    * @param persistedVideoPath 若已将视频落盘（如 source-video-file），直接作 FFmpeg 输入，避免再写临时文件。
    */
-  async prepareForWhisper(
-    media: WhisperMediaInput,
+  async prepareForTranscription(
+    media: TranscribeMediaInput,
     opts?: { persistedVideoPath?: string },
-  ): Promise<WhisperMediaInput> {
-    // 纯音频等：transcribeFromDisk 时 buffer 为空，需从 persistedVideoPath 读入再送 Whisper
+  ): Promise<TranscribeMediaInput> {
+    // 纯音频等：transcribeFromDisk 时 buffer 为空，需从 persistedVideoPath 读入再送 ASR
     if (!this.isLikelyVideo(media.originalname, media.mimetype)) {
       const loaded = await this.ensureBufferFromDiskIfNeeded(media, opts);
       const buf = loaded.buffer;
@@ -45,7 +45,7 @@ export class FfmpegAudioService {
     const bin = this.resolveFfmpegBinary();
 
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-'));
-    const outWav = path.join(tmpDir, 'for-whisper.wav');
+    const outWav = path.join(tmpDir, 'for-transcription.wav');
 
     try {
       const inputPath =
@@ -56,7 +56,7 @@ export class FfmpegAudioService {
       await this.runExtract(bin, inputPath, outWav);
       const wav = await fs.readFile(outWav);
       if (wav.length < 64) {
-        this.logger.warn('FFmpeg 输出音轨过小，回退为原视频送 Whisper');
+        this.logger.warn('FFmpeg 输出音轨过小，回退为原媒体直送 ASR');
         return this.ensureBufferFromDiskIfNeeded(media, opts);
       }
       const base = path.basename(media.originalname, path.extname(media.originalname)) || 'audio';
@@ -70,7 +70,7 @@ export class FfmpegAudioService {
       const err = e as Error & { stderr?: Buffer };
       const stderr = err.stderr?.toString?.()?.trim() ?? '';
       this.logger.warn(
-        `FFmpeg 抽音轨失败，回退为原视频送 Whisper：${err.message ?? e}${stderr ? ` | ${stderr.slice(0, 800)}` : ''}`,
+        `FFmpeg 抽音轨失败，回退为原媒体直送 ASR：${err.message ?? e}${stderr ? ` | ${stderr.slice(0, 800)}` : ''}`,
       );
       return this.ensureBufferFromDiskIfNeeded(media, opts);
     } finally {
@@ -83,12 +83,12 @@ export class FfmpegAudioService {
   }
 
   /**
-   * 从磁盘补全 buffer（transcribeFromDisk 初始 buffer 为空；FFmpeg 回退时需整文件送 Python）。
+   * 从磁盘补全 buffer（transcribeFromDisk 初始 buffer 为空；FFmpeg 回退时需整文件上传）。
    */
   private async ensureBufferFromDiskIfNeeded(
-    media: WhisperMediaInput,
+    media: TranscribeMediaInput,
     opts?: { persistedVideoPath?: string },
-  ): Promise<WhisperMediaInput> {
+  ): Promise<TranscribeMediaInput> {
     if (media.buffer?.length) return media;
     const p = opts?.persistedVideoPath;
     if (p && existsSync(p)) {
@@ -147,7 +147,7 @@ export class FfmpegAudioService {
     return exe;
   }
 
-  private async writeTempInput(dir: string, media: WhisperMediaInput): Promise<string> {
+  private async writeTempInput(dir: string, media: TranscribeMediaInput): Promise<string> {
     const ext = path.extname(media.originalname) || '.bin';
     const p = path.join(dir, `input${ext}`);
     await fs.writeFile(p, media.buffer);

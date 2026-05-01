@@ -113,7 +113,7 @@ export function validateSourceVideoInput(raw: string): SourceVideoValidation {
   return { ok: true, normalizedUrl: normalized, kind }
 }
 
-/** 归一化后的链接是否指向抖音域名（用于选择 yt-dlp + Whisper + 改写流水线） */
+/** 归一化后的链接是否指向抖音域名（用于选择 dy-downloader + 转写 + 改写流水线） */
 export function isDouyinNormalizedUrl(url: string): boolean {
   try {
     return new URL(url).hostname.toLowerCase().includes('douyin.com')

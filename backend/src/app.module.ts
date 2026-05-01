@@ -12,6 +12,9 @@ import { WorksModule } from './modules/works/works.module';
 import { DatabaseModule } from './database/database.module';
 import { AuthModule } from './modules/auth/auth.module';
 import { JwtAuthGuard } from './modules/auth/jwt-auth.guard';
+import { AuditModule } from './modules/audit/audit.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { AccountActiveGuard } from './modules/governance/account-active.guard';
 
 const inDocker = existsSync('/.dockerenv');
 const rootEnvPath = join(__dirname, '..', '..', '.env');
@@ -33,7 +36,9 @@ const envFilePath = [
           : {}),
     }),
     DatabaseModule,
+    AuditModule,
     AuthModule,
+    AdminModule,
     TasksModule,
     ToolsModule,
     WorksModule,
@@ -42,6 +47,7 @@ const envFilePath = [
   providers: [
     AppService,
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: AccountActiveGuard },
   ],
 })
 export class AppModule {}

@@ -7,7 +7,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { load } from 'cheerio';
-import { DEFAULT_WHISPER_MEDIA_MAX_BYTES } from '../../common/media.constants';
+import { DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES } from '../../common/media.constants';
 import { assertUrlSafeForServerFetch } from '../../common/url-safety.util';
 
 const execFileAsync = promisify(execFile);
@@ -16,7 +16,7 @@ type YtdlpInvoker =
   | { kind: 'binary'; executable: string }
   | { kind: 'python'; python: string; pythonpath: string; pythonPrefixArgs: string[] };
 
-/** 链接拉媒体给 Whisper；抖音失败码沿用历史命名（douyin_no_ytdlp / douyin_ytdlp_failed） */
+/** 链接拉媒体供口播转写（ASR）；抖音失败码沿用历史命名（douyin_no_ytdlp / douyin_ytdlp_failed） */
 export type TranscriptionMediaDownloadOutcome =
   | { ok: true; media: DownloadedMediaBuffer }
   | {
@@ -32,7 +32,7 @@ export interface DownloadedMediaBuffer {
 }
 
 /**
- * 为 Whisper 准备本地媒体字节：
+ * 为口播转写准备本地媒体字节：
  * 1) **抖音**：仅使用仓库内 **dy-downloader**（backend/DY-DOWNLOADER），需 **DY_DOWNLOADER_COOKIE**；
  * 2) **非抖音**：**YTDLP_BIN** / **yt-dlp-master** 调用 yt-dlp，失败则回退 HTML 直链解析。
  */
@@ -54,7 +54,7 @@ export class VideoMediaDownloadService {
     assertUrlSafeForServerFetch(pageUrl);
 
     const maxBytes = Number(
-      this.config.get('VIDEO_MEDIA_MAX_BYTES') ?? DEFAULT_WHISPER_MEDIA_MAX_BYTES,
+      this.config.get('VIDEO_MEDIA_MAX_BYTES') ?? DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES,
     );
     const douyin = this.isDouyinUrl(canonicalUrl);
     const invoker = this.resolveYtdlpInvoker();
@@ -216,7 +216,7 @@ export class VideoMediaDownloadService {
 
       const awemeType = aweme.awemeType ?? 0;
       if (awemeType === 68) {
-        this.logger.warn('dy-downloader：当前为图集作品，暂不按图集拉流给 Whisper');
+        this.logger.warn('dy-downloader：当前为图集作品，暂不按图集拉流给转写');
         return null;
       }
 

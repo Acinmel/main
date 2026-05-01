@@ -32,10 +32,10 @@ import {
   getDyDownloaderCookieConfigured,
   getTranscribePipelineHealth,
   transcribeSavedVideo,
-  transcribeWithWhisper,
-  transcribeWithWhisperFromUrl,
+  transcribeUploadFile,
+  transcribeFromUrl,
 } from '@/api/task'
-import { useWhisperTranscriptStream } from '@/composables/useWhisperTranscriptStream'
+import { useTranscriptDraftStream } from '@/composables/useTranscriptDraftStream'
 import { isDouyinNormalizedUrl, validateSourceVideoInput } from '@/utils/douyinShareUrl'
 import { formatStatCount } from '@/utils/formatDisplay'
 import {
@@ -158,16 +158,16 @@ function confirmDeleteStudioDh() {
     },
   })
 }
-const { applyWhisperToEditableScript, isStreamingToScript, cancelStream, interruptStreamWithFullText } =
-  useWhisperTranscriptStream()
+const { applyTranscriptToEditableScript, isStreamingToScript, cancelStream, interruptStreamWithFullText } =
+  useTranscriptDraftStream()
 
 /** ① 拉取 HTML 元信息（先出「视频信息」卡片） */
 const loadingMeta = ref(false)
-/** ② 抖音：保存视频 + FFmpeg + Whisper（再填入「口播文案」） */
+/** ② 抖音：保存视频 + FFmpeg + ASR（再填入「口播文案」） */
 const douyinPipeline = ref(false)
 const fetchBusy = computed(() => loadingMeta.value || douyinPipeline.value)
 
-/** 抖音：分阶段（下载 → Whisper） */
+/** 抖音：分阶段（下载 → ASR 转写） */
 const pipelinePhase = ref<'idle' | 'download' | 'transcribe'>('idle')
 const pipelineProgress = ref(0)
 const pipelineBarProcessing = ref(false)
@@ -175,25 +175,25 @@ const pipelineStatusLabel = computed(() => {
   if (!douyinPipeline.value) return ''
   if (pipelinePhase.value === 'download')
     return '① 正在将源视频下载到服务端保存目录…'
-  if (pipelinePhase.value === 'transcribe') return '② 正在抽取音轨并由 Whisper 转写口播（耗时因时长而异，请稍候）…'
+  if (pipelinePhase.value === 'transcribe') return '② 正在抽取音轨并调用 ASR 转写口播（耗时因时长而异，请稍候）…'
   return ''
 })
 
 /** 最近一次成功保存到服务端的视频文件名（仅文件名），用于「从本地文件转写口播」 */
 const lastSavedVideoBasename = ref<string | null>(null)
 const retranscribingLocal = ref(false)
-/** 本地上传 → POST transcribe-whisper */
-const whisperLocalLoading = ref(false)
-/** 非抖音链接 → POST transcribe-whisper-url */
-const whisperUrlLoading = ref(false)
+/** 本地上传 → POST /v1/tools/transcribe */
+const transcribeUploadLoading = ref(false)
+/** 非抖音链接 → POST /v1/tools/transcribe-url */
+const transcribeUrlLoading = ref(false)
 /** 服务端 Cookie 检测：loading 仅表示请求中；error 表示连不上或接口异常 */
 type DyCookieUi = 'loading' | 'yes' | 'no' | 'error'
 const dyCookieUi = ref<DyCookieUi>('loading')
 
-/** 口播链路：FFmpeg + Whisper + 保存目录（下载成功后转写依赖） */
+/** 口播链路：FFmpeg + ASR + 保存目录（下载成功后转写依赖） */
 const pipelineLoading = ref(false)
 const pipelineHealth = ref<Awaited<ReturnType<typeof getTranscribePipelineHealth>> | null>(null)
-/** 请求链路接口失败时（后端未起、代理、超时等），非子项 Whisper/FFmpeg 未就绪 */
+/** 请求链路接口失败时（后端未起、代理、超时等），非子项 ASR/FFmpeg 未就绪 */
 const pipelineHealthError = ref('')
 
 async function refreshPipelineHealth() {
@@ -264,7 +264,7 @@ const scriptBlockHint = computed(() =>
 
 /**
  * 非抖音：用页面「内容」预填口播框。
- * 抖音：口播以保存视频后 Whisper 转写为准（见 onFetchVideoMeta），避免 HTML 占位文案覆盖转写结果。
+ * 抖音：口播以保存视频后 ASR 转写为准（见 onFetchVideoMeta），避免 HTML 占位文案覆盖转写结果。
  */
 watch(
   () => draft.videoMeta,
@@ -333,7 +333,7 @@ async function onFetchVideoMeta() {
 
     pipelineProgress.value = 48
     pipelineBarProcessing.value = true
-    message.info('服务端已保存视频文件，开始 Whisper 转写…')
+    message.info('服务端已保存视频文件，开始 ASR 转写…')
 
     const r = await transcribeSavedVideo({ fileName: basename })
 
@@ -341,7 +341,7 @@ async function onFetchVideoMeta() {
     pipelineBarProcessing.value = false
 
     if (r.transcript) {
-      applyWhisperToEditableScript({
+      applyTranscriptToEditableScript({
         fullText: r.transcript.fullText,
         segments: r.transcript.segments,
         transcriptId: r.transcript.transcriptId,
@@ -353,7 +353,7 @@ async function onFetchVideoMeta() {
       saved.message,
     ]
     if (r.transcript) {
-      parts.push('已用 Whisper 从口播音轨填入下方口播文案。')
+      parts.push('已用 ASR 从口播音轨填入下方口播文案。')
     }
     message.success(parts.join(''))
     if (r.transcriptionError) {
@@ -389,7 +389,7 @@ function onUseScript() {
   message.success(`已写入后续流程（${t.length} 字）`)
 }
 
-/** 不重新下载，仅根据保存目录里已有文件做 FFmpeg + Whisper，写入口播框 */
+/** 不重新下载，仅根据保存目录里已有文件做 FFmpeg + ASR，写入口播框 */
 async function onRetranscribeFromLocal() {
   const name = lastSavedVideoBasename.value?.trim()
   if (!name) {
@@ -400,7 +400,7 @@ async function onRetranscribeFromLocal() {
   try {
     const r = await transcribeSavedVideo({ fileName: name })
     if (r.transcript) {
-      applyWhisperToEditableScript({
+      applyTranscriptToEditableScript({
         fullText: r.transcript.fullText,
         segments: r.transcript.segments,
         transcriptId: r.transcript.transcriptId,
@@ -417,14 +417,14 @@ async function onRetranscribeFromLocal() {
   }
 }
 
-async function onWhisperUploadTranscribe(options: { fileList: UploadFileInfo[] }) {
+async function onTranscribeUpload(options: { fileList: UploadFileInfo[] }) {
   const raw = options.fileList[0]?.file
   const file = raw instanceof File ? raw : null
   if (!file?.size) return
-  whisperLocalLoading.value = true
+  transcribeUploadLoading.value = true
   try {
-    const data = await transcribeWithWhisper(file)
-    applyWhisperToEditableScript({
+    const data = await transcribeUploadFile(file)
+    applyTranscriptToEditableScript({
       fullText: data.fullText,
       segments: data.segments,
       transcriptId: data.transcriptId,
@@ -433,7 +433,7 @@ async function onWhisperUploadTranscribe(options: { fileList: UploadFileInfo[] }
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
   } finally {
-    whisperLocalLoading.value = false
+    transcribeUploadLoading.value = false
   }
 }
 
@@ -443,10 +443,10 @@ async function onTranscribeNonDouyinFromUrl() {
     message.error(link.message ?? '请先填写可解析的视频链接')
     return
   }
-  whisperUrlLoading.value = true
+  transcribeUrlLoading.value = true
   try {
-    const data = await transcribeWithWhisperFromUrl({ sourceVideoUrl: link.normalizedUrl })
-    applyWhisperToEditableScript({
+    const data = await transcribeFromUrl({ sourceVideoUrl: link.normalizedUrl })
+    applyTranscriptToEditableScript({
       fullText: data.fullText,
       segments: data.segments,
       transcriptId: data.transcriptId,
@@ -455,7 +455,7 @@ async function onTranscribeNonDouyinFromUrl() {
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
   } finally {
-    whisperUrlLoading.value = false
+    transcribeUrlLoading.value = false
   }
 }
 
@@ -915,7 +915,7 @@ async function onGenerateVideo() {
               获取视频信息
             </n-button>
             <n-text depth="3" style="font-size: 12px">
-              先解析 HTML 渲染资料；抖音链接会在展示完成后继续：拉取源视频→提取音轨→Whisper
+              先解析 HTML 渲染资料；抖音链接会在展示完成后继续：拉取源视频→提取音轨→ASR
               填入「口播文案」。文件保存在后端服务器（Docker 内多为
               /data/download-video 卷；本地开发 Windows 常为 C:\downloadVideo），不会出现在你电脑的下载文件夹。
             </n-text>
@@ -936,7 +936,7 @@ async function onGenerateVideo() {
               </n-button>
             </n-space>
             <n-space align="center" :size="8" style="flex-wrap: wrap; margin-top: 4px">
-              <n-text depth="3" style="font-size: 12px">口播转写（服务端下载落盘→FFmpeg 抽音轨→Whisper）：</n-text>
+              <n-text depth="3" style="font-size: 12px">口播转写（服务端下载落盘→FFmpeg 抽音轨→ASR API）：</n-text>
               <n-tag v-if="pipelineLoading" size="small" :bordered="false">检测中…</n-tag>
               <template v-else-if="pipelineHealth">
                 <n-tag
@@ -949,8 +949,8 @@ async function onGenerateVideo() {
                 <n-tag size="small" :bordered="false" :type="pipelineHealth.ffmpeg.ok ? 'success' : 'error'">
                   FFmpeg {{ pipelineHealth.ffmpeg.ok ? '可用' : '不可用' }}
                 </n-tag>
-                <n-tag size="small" :bordered="false" :type="pipelineHealth.whisper.ok ? 'success' : 'warning'">
-                  Whisper {{ pipelineHealth.whisper.ok ? '已连接' : '未就绪' }}
+                <n-tag size="small" :bordered="false" :type="pipelineHealth.asr.ok ? 'success' : 'warning'">
+                  ASR {{ pipelineHealth.asr.ok ? '已连接' : '未就绪' }}
                 </n-tag>
                 <n-tag
                   size="small"
@@ -975,29 +975,27 @@ async function onGenerateVideo() {
               3000；3）若用独立前端域名，请配置 <code>VITE_API_BASE_URL</code>）
             </n-text>
             <n-text
-              v-if="pipelineHealth && !pipelineHealth.whisper.transcribeUrlConfigured"
+              v-if="pipelineHealth && !pipelineHealth.asr.transcribeUrlConfigured"
               depth="3"
               style="font-size: 11px; display: block; margin-top: 4px"
             >
-              请在 backend/.env 配置 WHISPER_HTTP_URL（如 http://127.0.0.1:8010/transcribe），并启动
-              <code>backend/whisper-python-service</code>（仓库根目录 <code>npm run whisper:dev</code>）。
+              请在 backend/.env 配置口播转写：例如 <code>ASR_TRANSCRIBE_URL</code>、<code>OPENAI_API_KEY</code>（详见
+              <code>backend/.env.example</code>）。
             </n-text>
             <n-text
               v-else-if="
                 pipelineHealth &&
-                pipelineHealth.whisper.transcribeUrlConfigured &&
-                !pipelineHealth.whisper.ok
+                pipelineHealth.asr.transcribeUrlConfigured &&
+                !pipelineHealth.asr.ok
               "
               depth="3"
               style="font-size: 11px; display: block; margin-top: 4px"
             >
-              Whisper 健康检查未通过：{{ pipelineHealth.whisper.error || '未知原因' }}
-              <template v-if="pipelineHealth.whisper.healthUrl">
-                （探测 {{ pipelineHealth.whisper.healthUrl }}）
+              ASR 健康检查未通过：{{ pipelineHealth.asr.error || '未知原因' }}
+              <template v-if="pipelineHealth.asr.healthUrl">
+                （探测 {{ pipelineHealth.asr.healthUrl }}）
               </template>
-              。请在 <code>backend/whisper-python-service</code> 目录执行
-              <code>python -m uvicorn server:app --host 127.0.0.1 --port 8010</code>
-              或仓库根目录 <code>npm run whisper:dev</code>，端口需与 WHISPER_HTTP_URL 一致。
+              。请确认密钥与网络可访问转写服务。
             </n-text>
             <n-text
               v-if="pipelineHealth && !pipelineHealth.ffmpeg.ok"
@@ -1051,9 +1049,9 @@ async function onGenerateVideo() {
                 :show-file-list="false"
                 :default-upload="false"
                 accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.webm,.mov,.mkv"
-                @change="onWhisperUploadTranscribe"
+                @change="onTranscribeUpload"
               >
-                <n-button :loading="whisperLocalLoading" size="small" secondary>
+                <n-button :loading="transcribeUploadLoading" size="small" secondary>
                   上传音视频转写
                 </n-button>
               </n-upload>
@@ -1061,7 +1059,7 @@ async function onGenerateVideo() {
                 v-if="canTranscribeNonDouyinUrl"
                 size="small"
                 secondary
-                :loading="whisperUrlLoading"
+                :loading="transcribeUrlLoading"
                 @click="onTranscribeNonDouyinFromUrl"
               >
                 从当前链接转写（非抖音）

@@ -12,7 +12,7 @@
 | 当前实现 | 位置 | 落库后 |
 |----------|------|--------|
 | 任务列表与详情 | `TasksService` 内存 `Map` | `tasks` + 关联表 |
-| Whisper 转写暂存 | `WhisperTranscriptStore` 内存 `Map` | `whisper_transcripts`（可先仅工具链，后续与任务关联） |
+| ASR 转写暂存（工具链） | `TranscriptStore` 内存 `Map` | `whisper_transcripts`（历史表名，可先仅工具链，后续与任务关联；新实现见 `backend/src/integrations/transcription/`） |
 | 用户 ID | `readUserIdFromAuth` 派生字符串 | `users` 或仅存 `user_id` 外键（匿名 `anonymous` 可保留） |
 | 照片上传 | 仅存元数据，buffer 丢弃 | `task_photos` 元数据 + 对象存储 key（后续） |
 
@@ -96,7 +96,7 @@ erDiagram
 - **tasks**：与现有 `TaskInternal` 一致；`photo` 拆为 `photo_meta` JSONB（`originalName`、`mimeType`、`byteLength`）。
 - **task_transcripts**：与 `TranscriptDto` 对齐；`segments` 为 `TranscriptSegment[]` 的 JSON。
 - **task_rewrites / task_render_configs / task_outputs**：对应 `rewrite`、`renderConfig`、`output`；也可合并为单表 `task_snapshots` + `kind` 枚举，首版拆分更清晰。
-- **whisper_transcripts**：替代 `WhisperTranscriptStore`；`task_id` 可空——首页/工具链先产生转写、尚未创建任务时只写本表；创建任务后可关联更新。
+- **whisper_transcripts**：落库后替代内存 `TranscriptStore`；`task_id` 可空——首页/工具链先产生转写、尚未创建任务时只写本表；创建任务后可关联更新。（表名沿用历史命名，与是否使用 OpenAI `whisper-1` 等模型无关。）
 
 ---
 
@@ -261,7 +261,7 @@ CREATE INDEX idx_whisper_created ON whisper_transcripts (created_at DESC);
 
 ## 6. 接入策略（不改功能前提下的迁移顺序）
 
-1. **引入 ORM**（TypeORM / Prisma 等）与迁移脚本，仅新增表，**不替换** `TasksService` / `WhisperTranscriptStore` 调用。
+1. **引入 ORM**（TypeORM / Prisma 等）与迁移脚本，仅新增表，**不替换** `TasksService` / `TranscriptStore` 调用。
 2. **双写**：写内存同时写 DB；读仍以内存为准，验证一致。
 3. **读切换**：读主库，内存作降级或删除。
 4. **工具链**：`GET /v1/tools/transcripts/:id` 优先从 `whisper_transcripts` 读取。
@@ -276,4 +276,4 @@ CREATE INDEX idx_whisper_created ON whisper_transcripts (created_at DESC);
 
 ---
 
-*文档版本：与当前仓库「定版」功能对齐；实现迁移时以 `backend/src/modules/tasks` 与 `whisper-transcript.store` 为准再核对字段。*
+*文档版本：与当前仓库「定版」功能对齐；实现迁移时以 `backend/src/modules/tasks` 与 `backend/src/integrations/transcription/transcript.store.ts` 为准再核对字段。*

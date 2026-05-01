@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { NButton, NCard, NForm, NFormItem, NInput, NSpace, useMessage } from 'naive-ui'
+import {
+  NButton,
+  NCard,
+  NForm,
+  NFormItem,
+  NInput,
+  NSpace,
+  NText,
+  useMessage,
+} from 'naive-ui'
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { registerAuth } from '@/api/auth'
@@ -62,6 +71,9 @@ async function handleSubmit() {
           <n-button type="primary" block size="large" :loading="loading" @click="handleSubmit">
             注册并登录
           </n-button>
+        <n-text depth="3" style="display: block; font-size: 12px; line-height: 1.45">
+          新账号默认待管理员审核，开通后方可使用专属数字人、口播与任务等功能。
+        </n-text>
           <router-link :to="{ name: 'login', query: route.query }" class="link">已有账号？去登录</router-link>
         </n-space>
       </n-form>

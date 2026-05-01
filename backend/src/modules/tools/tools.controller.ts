@@ -23,7 +23,7 @@ import * as path from 'path';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Express, Request, Response } from 'express';
 import { createReadStream, existsSync } from 'fs';
-import { getWhisperMediaMaxBytes } from '../../common/media.constants';
+import { getTranscribeMediaMaxBytes } from '../../common/media.constants';
 import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
 import { RewriteAiService } from '../../integrations/ai/rewrite-ai.service';
 import { DigitalHumanImageService } from '../../integrations/ai/digital-human-image.service';
@@ -39,13 +39,12 @@ import {
 import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.service';
 import {
   FfmpegAudioService,
-  type WhisperMediaInput,
+  type TranscribeMediaInput,
 } from '../../integrations/media/ffmpeg-audio.service';
 import { VideoMediaDownloadService } from '../../integrations/video/video-media-download.service';
 import { VideoMetaService } from '../../integrations/video/video-meta.service';
-import { WhisperTranscriptStore } from '../../integrations/whisper/whisper-transcript.store';
-import { WhisperService } from '../../integrations/whisper/whisper.service';
-import type { WhisperTranscribeResultDto } from '../../integrations/whisper/whisper.types';
+import { TranscriptStore } from '../../integrations/transcription/transcript.store';
+import type { TranscribeResultDto } from '../../integrations/transcription/transcript.types';
 import type { RewriteStyle } from '../tasks/tasks.types';
 import { DigitalHumanPersistenceService } from '../digital-human/digital-human-persistence.service';
 import { Public } from '../auth/public.decorator';
@@ -64,7 +63,7 @@ class SourceVideoFileDto {
   /** 支持抖音整段分享文案或纯 URL */
   sourceVideoUrl!: string;
   /**
-   * 默认 true。为 false 时仅下载并保存到本机目录，不调用 Whisper；
+   * 默认 true。为 false 时仅下载并保存到本机目录，不调用 ASR；
    * 前端可随后调用 `transcribe-saved-video` 以展示分阶段进度。
    */
   transcribe?: boolean;
@@ -143,8 +142,7 @@ export class ToolsController {
     private readonly videoMeta: VideoMetaService,
     private readonly videoMediaDownload: VideoMediaDownloadService,
     private readonly ffmpegAudio: FfmpegAudioService,
-    private readonly whisper: WhisperService,
-    private readonly whisperTranscripts: WhisperTranscriptStore,
+    private readonly transcriptStore: TranscriptStore,
     private readonly rewriteAi: RewriteAiService,
     private readonly videoGenerateLlm: VideoGenerateLlmService,
     private readonly digitalHumanImage: DigitalHumanImageService,
@@ -390,22 +388,22 @@ export class ToolsController {
     };
   }
 
-  /** 下载媒体 → FFmpeg 视频则抽 16k 单声道 WAV → 送 Whisper */
+  /** 下载媒体 → FFmpeg 视频则抽 16k 单声道 WAV → 送 ASR API */
   private async transcribeAfterDownload(
-    media: WhisperMediaInput,
+    media: TranscribeMediaInput,
     opts?: { persistedVideoPath?: string },
-  ): Promise<WhisperTranscribeResultDto> {
-    const prepared = await this.ffmpegAudio.prepareForWhisper(media, opts);
-    return this.whisper.transcribeUpload(prepared);
+  ): Promise<TranscribeResultDto> {
+    const prepared = await this.ffmpegAudio.prepareForTranscription(media, opts);
+    return this.transcription.transcribeMedia(prepared);
   }
 
   /**
-   * 仅从本地磁盘上的已保存文件解析口播（FFmpeg 抽轨 → Whisper），不依赖内存中的下载 buffer。
+   * 仅从本地磁盘上的已保存文件解析口播（FFmpeg 抽轨 → ASR），不依赖内存中的下载 buffer。
    */
-  private async transcribeFromDisk(absPath: string): Promise<WhisperTranscribeResultDto> {
+  private async transcribeFromDisk(absPath: string): Promise<TranscribeResultDto> {
     const st = await fs.stat(absPath);
     const name = path.basename(absPath);
-    const media: WhisperMediaInput = {
+    const media: TranscribeMediaInput = {
       buffer: Buffer.alloc(0),
       originalname: name,
       mimetype: guessMimeFromFilename(name),
@@ -415,9 +413,9 @@ export class ToolsController {
   }
 
   /**
-   * 转写偶发失败（Whisper 冷启动/网络抖动）时静默重试一次，不改变下载与落盘逻辑。
+   * 转写偶发失败（网络/冷启动）时静默重试一次，不改变下载与落盘逻辑。
    */
-  private async transcribeFromDiskWithRetry(absPath: string): Promise<WhisperTranscribeResultDto> {
+  private async transcribeFromDiskWithRetry(absPath: string): Promise<TranscribeResultDto> {
     try {
       return await this.transcribeFromDisk(absPath);
     } catch (first: unknown) {
@@ -464,15 +462,15 @@ export class ToolsController {
     return { configured };
   }
 
-  /** 第三步：检查 Python Whisper HTTP 服务是否可达（不消耗模型推理） */
-  @Get('whisper-health')
-  async whisperHealth() {
-    return this.whisper.checkHealth();
+  /** 第三步：检查 ASR API 是否可达（不消耗模型推理） */
+  @Get('asr-health')
+  async asrHealth() {
+    return this.transcription.checkHealth();
   }
 
   /**
-   * 口播转写全链路自检：保存目录可写、FFmpeg 可用、Whisper HTTP 可达、抖音 Cookie 是否配置（不返回密钥）。
-   * 供首页在下载成功后展示「抽音轨 → Whisper」前置条件。
+   * 口播转写全链路自检：保存目录可写、FFmpeg 可用、ASR HTTP 可达、抖音 Cookie 是否配置（不返回密钥）。
+   * 供首页在下载成功后展示「抽音轨 → ASR」前置条件。
    */
   @Get('transcribe-pipeline-health')
   async transcribePipelineHealth() {
@@ -488,21 +486,21 @@ export class ToolsController {
     }
 
     const ffmpeg = await this.ffmpegAudio.probeBinary();
-    const whisper = await this.whisper.checkHealth();
+    const asr = await this.transcription.checkHealth();
     const dyCookieConfigured = !!this.config.get<string>('DY_DOWNLOADER_COOKIE')?.trim();
 
     return {
       videoSaveDir: { path: dir, writable, error: dirError },
       ffmpeg,
-      whisper,
+      asr,
       dyCookieConfigured,
     };
   }
 
-  /** 取回主后端已保存的某次转写（与 transcribe-whisper 返回的 transcriptId 对应） */
+  /** 取回主后端已保存的某次转写（与 POST /transcribe 返回的 transcriptId 对应） */
   @Get('transcripts/:transcriptId')
   getSavedTranscript(@Param('transcriptId') transcriptId: string) {
-    const row = this.whisperTranscripts.get(transcriptId);
+    const row = this.transcriptStore.get(transcriptId);
     if (!row) {
       throw new NotFoundException('未找到该 transcriptId，可能已过期或服务已重启');
     }
@@ -510,19 +508,19 @@ export class ToolsController {
   }
 
   /**
-   * 第四步：接收上传 → 转发 WHISPER_HTTP_URL → 归一化 fullText/language/segments → 保存 transcript → 返回
+   * 第四步：接收上传 → ASR HTTP → 归一化 fullText/language/segments → 保存 transcript → 返回
    */
-  @Post('transcribe-whisper')
+  @Post('transcribe')
   @UseInterceptors(
     FileInterceptor('file', {
-      limits: { fileSize: getWhisperMediaMaxBytes() },
+      limits: { fileSize: getTranscribeMediaMaxBytes() },
     }),
   )
-  async transcribeWhisper(@UploadedFile() file: Express.Multer.File | undefined) {
+  async transcribeUpload(@UploadedFile() file: Express.Multer.File | undefined) {
     if (!file?.buffer?.length) {
       throw new BadRequestException('请上传音视频文件（multipart 字段名：file）');
     }
-    const media: WhisperMediaInput = {
+    const media: TranscribeMediaInput = {
       buffer: file.buffer,
       originalname: file.originalname,
       mimetype: file.mimetype,
@@ -532,10 +530,10 @@ export class ToolsController {
   }
 
   /**
-   * 根据作品页链接拉取 HTML → 解析媒体直链 → 下载字节 → 转发 Python Whisper（与 transcribe-whisper 同一套归一化与保存）。
+   * 根据作品页链接… 下载字节 → ASR（与 transcribe 同一套归一化与保存）。
    */
   /**
-   * 抖音专用流水线：dy-downloader 拉取媒体 → 读入并 multipart 转发 Python Whisper（WHISPER_HTTP_URL）→
+   * 抖音专用流水线：dy-downloader 拉取媒体 → ASR →
    * 拿到全文后再调用改写建议（与任务内 `suggestRewrite` 同源），便于用户直接进入「改写」心智。
    */
   @Post('douyin-transcribe-rewrite')
@@ -571,23 +569,23 @@ export class ToolsController {
       );
     }
 
-    const whisperResult = await this.transcribeAfterDownload(dl.media);
+    const transcribeResult = await this.transcribeAfterDownload(dl.media);
     const style = body.rewriteStyle ?? 'conservative';
     const rewriteSuggestion = await this.rewriteAi.suggest({
-      source: whisperResult.fullText,
+      source: transcribeResult.fullText,
       style,
       sourceVideoUrl: normalized,
     });
 
     return {
-      ...whisperResult,
+      ...transcribeResult,
       rewriteSuggestion,
       rewriteStyle: style,
     };
   }
 
-  @Post('transcribe-whisper-url')
-  async transcribeWhisperFromUrl(@Body() body: SourceVideoUrlDto) {
+  @Post('transcribe-url')
+  async transcribeFromUrl(@Body() body: SourceVideoUrlDto) {
     if (!body?.sourceVideoUrl?.trim()) {
       throw new BadRequestException('sourceVideoUrl 不能为空');
     }
@@ -653,7 +651,7 @@ export class ToolsController {
 
   /**
    * 下载源视频并保存到本机目录（默认 Windows：C:\\downloadVideo；见 VIDEO_SAVE_DIR），
-   * 并以同一份媒体调用 Whisper（WHISPER_HTTP_URL），供首页「口播文案」使用。
+   * 并以同一份媒体调用 ASR，供首页「口播文案」使用。
    * 抖音侧仅 dy-downloader + DY_DOWNLOADER_COOKIE。
    */
   @Post('source-video-file')
@@ -663,7 +661,7 @@ export class ToolsController {
     ok: true;
     savedPath: string;
     message: string;
-    transcript: WhisperTranscribeResultDto | null;
+    transcript: TranscribeResultDto | null;
     transcriptionError?: string;
   }> {
     if (!body?.sourceVideoUrl?.trim()) {
@@ -707,7 +705,7 @@ export class ToolsController {
       );
     }
 
-    let transcript: WhisperTranscribeResultDto | null = null;
+    let transcript: TranscribeResultDto | null = null;
     let transcriptionError: string | undefined;
     if (shouldTranscribe) {
       try {
@@ -761,11 +759,11 @@ export class ToolsController {
   }
 
   /**
-   * 对已保存到本地目录的视频文件做 FFmpeg 抽音轨 + Whisper，返回口播全文（与 source-video-file 转写环节一致）。
+   * 对已保存到本地目录的视频文件做 FFmpeg 抽音轨 + ASR，返回口播全文（与 source-video-file 转写环节一致）。
    */
   @Post('transcribe-saved-video')
   async transcribeSavedVideo(@Body() body: { fileName?: string }): Promise<{
-    transcript: WhisperTranscribeResultDto | null;
+    transcript: TranscribeResultDto | null;
     transcriptionError?: string;
   }> {
     if (!body?.fileName?.trim()) {

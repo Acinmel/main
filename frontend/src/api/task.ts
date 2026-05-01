@@ -32,8 +32,8 @@ export async function previewTranscript(body: { sourceVideoUrl: string }) {
   return data
 }
 
-/** 第三步：主后端探测 Python Whisper 是否存活 */
-export interface WhisperHealthResponse {
+/** 第三步：探测 ASR（转写 HTTP）是否配置并可连通 */
+export interface AsrHealthResponse {
   ok: boolean
   transcribeUrlConfigured: boolean
   healthUrl: string
@@ -41,24 +41,24 @@ export interface WhisperHealthResponse {
   error?: string
 }
 
-export async function checkWhisperHealth() {
-  const { data } = await http.get<WhisperHealthResponse>('v1/tools/whisper-health', {
+export async function checkAsrHealth() {
+  const { data } = await http.get<AsrHealthResponse>('v1/tools/asr-health', {
     timeout: 15_000,
   })
   return data
 }
 
-/** 口播转写链路：保存目录 + FFmpeg + Whisper（与 /transcribe-pipeline-health 对齐） */
+/** 口播转写链路：保存目录 + FFmpeg + ASR（与 /transcribe-pipeline-health 对齐） */
 export interface TranscribePipelineHealth {
   videoSaveDir: { path: string; writable: boolean; error?: string }
   ffmpeg: { ok: boolean; path: string; versionHint?: string; error?: string }
-  whisper: WhisperHealthResponse
+  asr: AsrHealthResponse
   dyCookieConfigured: boolean
 }
 
 export async function getTranscribePipelineHealth() {
   const { data } = await http.get<TranscribePipelineHealth>('v1/tools/transcribe-pipeline-health', {
-    /** 后端会串行探测目录、FFmpeg、Whisper 健康；略放宽避免慢机误判 */
+    /** 后端会串行探测目录、FFmpeg、ASR；略放宽避免慢机误判 */
     timeout: 30_000,
   })
   return data
@@ -175,7 +175,7 @@ export async function deleteDigitalHumanTemplate() {
 }
 
 /** 主后端内存中已保存的转写（GET transcripts/:id） */
-export interface SavedWhisperTranscriptResponse {
+export interface SavedTranscriptResponse {
   transcriptId: string
   createdAt: string
   fullText: string
@@ -185,44 +185,36 @@ export interface SavedWhisperTranscriptResponse {
 }
 
 export async function getSavedTranscript(transcriptId: string) {
-  const { data } = await http.get<SavedWhisperTranscriptResponse>(
+  const { data } = await http.get<SavedTranscriptResponse>(
     `v1/tools/transcripts/${encodeURIComponent(transcriptId)}`,
   )
   return data
 }
 
-/** multipart 字段名 `file`：经后端转发至本地 Python，并返回已保存的 transcriptId */
-export interface WhisperTranscribeResponse {
+/** multipart 字段名 `file`：服务端 FFmpeg 预处理后调用 ASR，返回 transcriptId */
+export interface TranscribeApiResponse {
   transcriptId: string
   fullText: string
   language: string
   segments: TranscriptSegment[]
-  provider: 'python-whisper-http'
+  provider: 'asr-api'
 }
 
-export async function transcribeWithWhisper(file: File) {
+export async function transcribeUploadFile(file: File) {
   const form = new FormData()
   form.append('file', file)
-  const { data } = await http.post<WhisperTranscribeResponse>(
-    'v1/tools/transcribe-whisper',
-    form,
-    { timeout: 300_000 },
-  )
+  const { data } = await http.post<TranscribeApiResponse>('v1/tools/transcribe', form, { timeout: 300_000 })
   return data
 }
 
-/** 作品页链接 → 后端拉取媒体 → Python Whisper（需配置 WHISPER_HTTP_URL） */
-export async function transcribeWithWhisperFromUrl(body: { sourceVideoUrl: string }) {
-  const { data } = await http.post<WhisperTranscribeResponse>(
-    'v1/tools/transcribe-whisper-url',
-    body,
-    { timeout: 600_000 },
-  )
+/** 作品页链接 → 后端拉取媒体 → ASR（需配置 ASR / OpenAI 等） */
+export async function transcribeFromUrl(body: { sourceVideoUrl: string }) {
+  const { data } = await http.post<TranscribeApiResponse>('v1/tools/transcribe-url', body, { timeout: 600_000 })
   return data
 }
 
-/** 抖音：yt-dlp 下载 → Whisper → 返回文案并生成改写建议（与任务改写同源） */
-export interface DouyinTranscribeRewriteResponse extends WhisperTranscribeResponse {
+/** 抖音：dy-downloader 下载 → ASR → 返回文案并生成改写建议（与任务改写同源） */
+export interface DouyinTranscribeRewriteResponse extends TranscribeApiResponse {
   rewriteSuggestion: string
   rewriteStyle: RewriteStyle
 }
@@ -239,9 +231,11 @@ export async function douyinTranscribeRewrite(body: {
   return data
 }
 
-/** 抓取视频页元信息（HTML/Open Graph，不调用 AI） */
+/** 抓取视频页元信息（HTML/Open Graph，不调用 AI）；外链抓取可能较慢，勿用默认 30s */
 export async function fetchVideoMeta(body: { sourceVideoUrl: string }) {
-  const { data } = await http.post<VideoMetaPreview>('v1/tools/video-meta', body)
+  const { data } = await http.post<VideoMetaPreview>('v1/tools/video-meta', body, {
+    timeout: 120_000,
+  })
   return data
 }
 
@@ -257,14 +251,14 @@ export interface SourceVideoFileResponse {
   ok: true
   savedPath: string
   message: string
-  /** 与下载同源媒体经 Whisper 转写的口播全文；未配置 WHISPER_HTTP_URL 或转写失败时为 null */
-  transcript: WhisperTranscribeResponse | null
+  /** 与下载同源媒体经 ASR 转写的口播全文；未配置转写 API 或失败时为 null */
+  transcript: TranscribeApiResponse | null
   transcriptionError?: string
 }
 
 /**
  * 下载源视频并由服务端保存到本机目录（默认 Windows：C:\\downloadVideo，见后端 VIDEO_SAVE_DIR）。
- * `transcribe: false` 时仅落盘，不调用 Whisper（首页抖音流程会先下载再单独调 transcribe-saved-video 以展示进度）。
+ * `transcribe: false` 时仅落盘，不调用 ASR（首页抖音流程会先下载再单独调 transcribe-saved-video 以展示进度）。
  * 默认 `transcribe: true` 时与旧行为一致：保存后同一次请求内完成转写。
  */
 export async function downloadSourceVideoFile(
@@ -285,10 +279,10 @@ export async function listSavedVideos() {
   return data
 }
 
-/** 对已保存到本地的视频文件做 FFmpeg + Whisper，生成口播（不重新下载） */
+/** 对已保存到本地的视频文件做 FFmpeg + ASR，生成口播（不重新下载） */
 export async function transcribeSavedVideo(body: { fileName: string }) {
   const { data } = await http.post<{
-    transcript: WhisperTranscribeResponse | null
+    transcript: TranscribeApiResponse | null
     transcriptionError?: string
   }>('v1/tools/transcribe-saved-video', body, { timeout: 600_000 })
   return data

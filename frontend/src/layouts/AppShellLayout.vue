@@ -1,10 +1,19 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
-import { NButton, NText } from 'naive-ui'
+import { computed, onMounted } from 'vue'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { NAlert, NButton, NText } from 'naive-ui'
 import { useUserStore } from '@/stores/user'
 
+const route = useRoute()
 const user = useUserStore()
+
+const isPendingNonAdmin = computed(
+  () => user.profile?.accountStatus === 'pending' && user.profile?.role !== 'admin',
+)
+
+const brandTo = computed(() =>
+  isPendingNonAdmin.value ? { name: 'account-pending' as const } : '/',
+)
 
 function logout() {
   user.clearSession()
@@ -18,7 +27,7 @@ onMounted(() => {
 <template>
   <div class="shell">
     <header class="shell__header">
-      <RouterLink to="/" class="shell__brand">
+      <RouterLink :to="brandTo" class="shell__brand">
         <span class="shell__logo" aria-hidden="true" />
         <span class="shell__title-stack">
           <n-text strong>口播重制</n-text>
@@ -27,9 +36,14 @@ onMounted(() => {
       </RouterLink>
 
       <nav class="shell__nav">
-        <RouterLink to="/" class="shell__nav-link">专属数字人</RouterLink>
-        <RouterLink to="/studio" class="shell__nav-link">口播制作</RouterLink>
-        <RouterLink to="/works">我的作品</RouterLink>
+        <template v-if="isPendingNonAdmin">
+          <RouterLink :to="{ name: 'account-pending' }" class="shell__nav-link">账号审核</RouterLink>
+        </template>
+        <template v-else>
+          <RouterLink to="/" class="shell__nav-link">专属数字人</RouterLink>
+          <RouterLink to="/studio" class="shell__nav-link">口播制作</RouterLink>
+          <RouterLink to="/works">我的作品</RouterLink>
+        </template>
         <template v-if="user.isLoggedIn">
           <n-button quaternary size="small" @click="logout">退出</n-button>
         </template>
@@ -43,6 +57,15 @@ onMounted(() => {
         </template>
       </nav>
     </header>
+
+    <n-alert
+      v-if="isPendingNonAdmin && route.name !== 'account-pending'"
+      type="warning"
+      show-icon
+      class="shell__banner"
+    >
+      账号待管理员审核，开通后方可使用专属数字人、口播制作、任务与作品功能。
+    </n-alert>
 
     <main class="shell__main">
       <RouterView />

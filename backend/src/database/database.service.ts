@@ -46,6 +46,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         charset: 'utf8mb4',
       });
       await this.migrateMysql();
+      await this.ensureGovernanceMysql();
       this.logger.log(`MySQL 已就绪：${user}@${host}:${port}/${database}`);
       return;
     }
@@ -58,6 +59,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     this.sqlite.pragma('journal_mode = WAL');
     this.sqlite.pragma('foreign_keys = ON');
     this.migrateSqlite();
+    this.ensureGovernanceSqlite();
     this.logger.log(`SQLite 已就绪：${dbPath}`);
   }
 
@@ -138,7 +140,32 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_user_works_user ON user_works(user_id);
+
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        detail TEXT,
+        ip TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
     `);
+  }
+
+  private ensureGovernanceSqlite(): void {
+    const db = this.sqlite!;
+    const cols = db.prepare(`PRAGMA table_info(users)`).all() as { name: string }[];
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('role')) {
+      db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`);
+    }
+    if (!names.has('account_status')) {
+      db.exec(
+        `ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'`,
+      );
+    }
   }
 
   private async migrateMysql(): Promise<void> {
@@ -180,6 +207,47 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         updated_at VARCHAR(64) NOT NULL,
         INDEX idx_user_works_user (user_id),
         CONSTRAINT fk_user_works_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  }
+
+  private async ensureGovernanceMysql(): Promise<void> {
+    const pool = this.mysqlPool!;
+    const hasCol = async (table: string, column: string): Promise<boolean> => {
+      const [pkt] = await pool.query<any[]>(
+        `SELECT COUNT(1) AS c FROM INFORMATION_SCHEMA.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+        [table, column],
+      );
+      const first = pkt[0];
+      const c =
+        typeof first?.c === 'number'
+          ? first.c
+          : typeof first?.C === 'number'
+            ? first.C
+            : 0;
+      return c > 0;
+    };
+
+    if (!(await hasCol('users', 'role'))) {
+      await pool.query(`ALTER TABLE users ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'user'`);
+    }
+    if (!(await hasCol('users', 'account_status'))) {
+      await pool.query(
+        `ALTER TABLE users ADD COLUMN account_status VARCHAR(16) NOT NULL DEFAULT 'active'`,
+      );
+    }
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id VARCHAR(36) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        action VARCHAR(64) NOT NULL,
+        detail VARCHAR(8192) NULL,
+        ip VARCHAR(64) NULL,
+        created_at VARCHAR(64) NOT NULL,
+        INDEX idx_audit_logs_user (user_id),
+        INDEX idx_audit_logs_created (created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
   }

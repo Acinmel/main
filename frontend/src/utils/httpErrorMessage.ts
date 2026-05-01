@@ -19,9 +19,17 @@ export function describeHttpOrNetworkError(error: unknown): string {
     (!err.response && err.message?.includes('timeout'))
       ? '无法连接后端或请求超时（请确认 backend 已启动且 Vite 代理 /api 正确）'
       : ''
+  /** Nginx/反代常见：上游 api 未监听、容器反复退出、MySQL 连不上导致进程挂掉 */
+  const gateway =
+    status === 502 || status === 503 || status === 504
+      ? '网关无可用后端（HTTP ' +
+        String(status) +
+        '）：Docker 请执行 docker compose ps 与 docker compose logs api；核对 .env 中 MySQL 密码与库是否一致。本地开发请单独启动 backend（如监听 3000）并确认可访问 /api'
+      : ''
   return (
-    [net, detail, err.message, status ? `HTTP ${status}` : ''].filter(Boolean).join(' · ') ||
-    '获取视频信息失败'
+    [gateway, net, detail, err.message, status ? `HTTP ${status}` : '']
+      .filter(Boolean)
+      .join(' · ') || '获取视频信息失败'
   )
 }
 

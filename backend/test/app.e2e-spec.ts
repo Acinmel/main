@@ -18,8 +18,11 @@ describe('AppController (e2e)', () => {
     await app.init();
   });
 
-  it('/api (GET) 未带 JWT 时返回 401', () => {
-    return request(app.getHttpServer()).get('/api').expect(401);
+  it('/api (GET) 健康页为公开 @Public()', () => {
+    return request(app.getHttpServer())
+      .get('/api')
+      .expect(200)
+      .expect('Hello World!');
   });
 
   afterEach(async () => {

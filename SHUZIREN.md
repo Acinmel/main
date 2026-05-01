@@ -23,8 +23,7 @@
 | 模块 | 技术栈 | 说明 |
 |------|--------|------|
 | **frontend** | Vue 3 + Vite + Naive UI + Pinia | 用户站点；开发时通过 Vite 将 `/api` 代理到后端 |
-| **backend** | NestJS 11 | REST API；集成视频元信息抓取、yt-dlp 下载、Whisper HTTP 转发等 |
-| **backend/whisper-python-service** | FastAPI + openai-whisper | 可选本地/容器内转写服务（与 Nest 同仓，HTTP 集成） |
+| **backend** | NestJS 11 | REST API；视频元信息、dy-downloader/yt-dlp、FFmpeg 抽轨、外部 ASR HTTP 转写等 |
 | **deploy** | Nginx 配置、`compose.env` 示例 | 与根目录 `docker-compose.yml` 配合一体化部署 |
 
 **线上一体化**：产品与场景说明见 [`DEPLOY.md`](./DEPLOY.md)；服务编排与镜像见 [`docker-compose.yml`](./docker-compose.yml)。
@@ -37,7 +36,7 @@
 shuziren/
 ├── DEPLOY.md                 # 产品功能、场景与价值（面向销售/客户）
 ├── SHUZIREN.md               # 本文件：目录与接口说明
-├── docker-compose.yml        # web + api + whisper 编排
+├── docker-compose.yml        # web + api（+ compose 内 mysql）编排
 ├── yt-dlp-master/            # 可选：内置 yt-dlp 源码；Docker 镜像内 pip -e 安装，本地可不配 YTDLP_BIN 时用 Python 调用
 ├── .gitignore
 ├── deploy/
@@ -55,12 +54,11 @@ shuziren/
 │   │   ├── integrations/
 │   │   │   ├── ai/           # 改写 / 占位 ASR / TTS 等
 │   │   │   ├── video/        # video-meta、media-download（yt-dlp/HTML）
-│   │   │   └── whisper/      # Whisper HTTP、转写内存存储
+│   │   │   ├── transcription/ # 转写结果 DTO、进程内 TranscriptStore
 │   │   └── modules/
 │   │       ├── tasks/        # 任务域
 │   │       ├── tools/        # 工具域（视频信息、转写）
 │   │       └── works/        # 作品列表
-│   ├── whisper-python-service/  # Python Whisper HTTP（与 Nest 经 WHISPER_HTTP_URL）
 │   └── package.json
 ├── frontend/                 # Vue 前端
 │   ├── Dockerfile
@@ -103,17 +101,18 @@ shuziren/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/v1/tools/whisper-health` | 探测配置的 Python Whisper HTTP 服务是否可达 |
+| `GET` | `/v1/tools/asr-health` | 探测配置的 ASR（OpenAI 兼容 HTTP）是否可达 |
+| `GET` | `/v1/tools/transcribe-pipeline-health` | 保存目录、FFmpeg、ASR、抖音 Cookie 一站式自检 |
 | `GET` | `/v1/tools/transcripts/:transcriptId` | 取回主后端内存中已保存的一次转写结果 |
-| `POST` | `/v1/tools/transcribe-whisper` | **multipart** 字段 `file`：上传音视频 → 转发 Whisper → 保存并返回 `transcriptId`、全文与分段 |
-| `POST` | `/v1/tools/transcribe-whisper-url` | **JSON** `{ "sourceVideoUrl": "…" }`：拉取/下载链接媒体 → Whisper → 保存并返回（非抖音可用 HTML 猜链兜底） |
-| `POST` | `/v1/tools/douyin-transcribe-rewrite` | **JSON** `{ "sourceVideoUrl", "rewriteStyle?" }`：**仅抖音域名**；**yt-dlp** 下载临时文件 → multipart 转发 Whisper → 再调用改写 `suggest` 同源逻辑，返回转写 + `rewriteSuggestion` |
-| `POST` | `/v1/tools/transcript-preview` | **JSON** `{ "sourceVideoUrl": "…" }`：占位 ASR 预览（非真实 Whisper） |
+| `POST` | `/v1/tools/transcribe` | **multipart** 字段 `file`：上传音视频 → FFmpeg 预处理 → ASR → 保存并返回 `transcriptId` 等 |
+| `POST` | `/v1/tools/transcribe-url` | **JSON** `{ "sourceVideoUrl": "…" }`：下载链接媒体 → ASR → 保存并返回 |
+| `POST` | `/v1/tools/douyin-transcribe-rewrite` | **JSON** `{ "sourceVideoUrl", "rewriteStyle?" }`：**仅抖音**；dy-downloader 拉流 → ASR → 改写 `suggest` |
+| `POST` | `/v1/tools/transcript-preview` | **JSON** `{ "sourceVideoUrl": "…" }`：占位 ASR 预览 |
 | `POST` | `/v1/tools/video-meta` | **JSON** `{ "sourceVideoUrl": "…" }`：抓取作品页 HTML，解析标题/内容/封面等 |
 
 **鉴权**：当前 Tools 路由**未强制** Bearer；生产可按需加守卫。
 
-**相关环境变量（节选）**：`WHISPER_HTTP_URL`、`WHISPER_HTTP_HEALTH_URL`、`WHISPER_HTTP_TOKEN`、`YTDLP_BIN`（或仓库根 `yt-dlp-master` + `PYTHON_BIN` / `YT_DLP_SOURCE_DIR`）、`VIDEO_FETCH_*`、`VIDEO_MEDIA_MAX_BYTES` 等（详见 `backend/.env.example`）。
+**相关环境变量（节选）**：`ASR_TRANSCRIBE_URL`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`ASR_MODE`、`YTDLP_BIN`、`DY_DOWNLOADER_COOKIE`、`VIDEO_MEDIA_MAX_BYTES` 等（详见 `backend/.env.example`）。
 
 ---
 
@@ -152,7 +151,7 @@ shuziren/
 | 文档 / 文件 | 用途 |
 |-------------|------|
 | [`DEPLOY.md`](./DEPLOY.md) | 产品功能、使用场景与交付说明（非技术运维手册） |
-| [`docker-compose.yml`](./docker-compose.yml) | `web` / `api` / `whisper` 服务定义 |
+| [`docker-compose.yml`](./docker-compose.yml) | `web` / `api` / `mysql` 服务定义 |
 | [`backend/.env.example`](./backend/.env.example) | 后端环境变量说明 |
 | [`deploy/compose.env.example`](./deploy/compose.env.example) | Compose 层可选变量示例 |
 
@@ -164,19 +163,17 @@ shuziren/
 |------|----------|------|
 | **前端**（Vite） | `5173`（被占用时会顺延，如 `5174`） | 浏览器访问控制台里打印的 Local URL；`/api` 代理到后端 |
 | **后端**（Nest） | `3000` | 全局前缀 `/api`；改 **`backend/.env` 后必须重启** 才生效 |
-| **Whisper**（Python） | `8010` | 与 `WHISPER_HTTP_URL` 一致；转写前需保持进程运行 |
 
 **仓库根目录快捷命令**（需在仓库根执行）：
 
 ```bash
 npm run dev:frontend    # 前端开发
 npm run dev:backend     # 后端 watch 模式
-npm run dev:whisper     # 与 npm run whisper:dev 相同，Whisper HTTP
 ```
 
-**重启**：在对应终端按 **Ctrl+C** 结束进程，再执行上表同一命令。**修改 `backend/.env`（含 Whisper 体积上限、Cookie、URL）后，只需重启后端**；前端一般无需重启，除非改了 `frontend` 依赖或 `vite.config.ts`。
+**重启**：在对应终端按 **Ctrl+C** 结束进程，再执行上表同一命令。**修改 `backend/.env`（含 ASR、抖音 Cookie、体积上限等）后，只需重启后端**；前端一般无需重启，除非改了 `frontend` 依赖或 `vite.config.ts`。
 
-**推荐开发时开 3 个终端**：Whisper（`backend/whisper-python-service`）→ 后端 → 前端（顺序可互换，但转写前 Whisper 与后端须已就绪）。
+**推荐开发时开 2 个终端**：后端 → 前端（先起后端可避免 Vite 代理短暂连不上）。
 
 ---
 

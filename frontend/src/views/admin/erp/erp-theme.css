@@ -1,0 +1,195 @@
+/* ERP 后台共享视觉（由 AdminErpLayout 引入，子页 class 与此配套） */
+.erp-app .adm__policy {
+  margin-bottom: 18px;
+}
+.erp-app .adm__brand {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.erp-app .adm__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.erp-app .adm__muted {
+  opacity: 0.78;
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+.erp-app .adm__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.erp-app .glass {
+  background: rgba(15, 23, 42, 0.55);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.erp-app .adm__kpi {
+  margin-bottom: 16px;
+}
+.erp-app .adm__kpi--sub {
+  margin-bottom: 14px;
+}
+.erp-app .kpi {
+  min-height: 96px;
+}
+.erp-app .kpi__inner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.erp-app .kpi__ico {
+  width: 48px;
+  height: 48px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  color: #e2e8f0;
+}
+.erp-app .kpi__ico--a {
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.35), rgba(56, 189, 248, 0.05));
+}
+.erp-app .kpi__ico--b {
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.4), rgba(167, 139, 250, 0.06));
+}
+.erp-app .kpi__ico--c {
+  background: linear-gradient(135deg, rgba(52, 211, 153, 0.35), rgba(52, 211, 153, 0.05));
+}
+.erp-app .kpi__lbl {
+  display: block;
+  font-size: 12px;
+  opacity: 0.82;
+}
+.erp-app .kpi__val {
+  display: block;
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  margin-top: 2px;
+}
+.erp-app .kpi--ring .ring-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 72px;
+}
+.erp-app .ring {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+}
+.erp-app .ring__donut {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+.erp-app .ring__hole {
+  position: absolute;
+  inset: 18px;
+  border-radius: 50%;
+  background: #0f172a;
+}
+.erp-app .ring__caption {
+  flex: 1;
+  min-width: 0;
+}
+
+.erp-app .chart-card {
+  margin-bottom: 20px;
+}
+.erp-app .bars {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.erp-app .bar-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 140px) 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+}
+@media (max-width: 640px) {
+  .erp-app .bar-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+}
+.erp-app .bar-row__lbl {
+  font-size: 13px;
+  white-space: nowrap;
+}
+.erp-app .bar-row__track {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  overflow: hidden;
+}
+.erp-app .bar-row__fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #38bdf8, #a78bfa);
+  transition: width 0.25s ease;
+}
+.erp-app .bar-row__pct {
+  font-size: 12px;
+  opacity: 0.85;
+  width: 48px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.erp-app .glass-table .n-data-table-wrapper {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.erp-app .usage-cap {
+  font-size: 11px;
+  opacity: 0.85;
+}
+.erp-app .timeline-card .n-card__content {
+  padding-bottom: 8px;
+}
+.erp-app .tl-body {
+  padding: 4px 0 12px;
+  max-width: 720px;
+}
+.erp-app .tl-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.erp-app .tl-detail {
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.erp-app .erp-quick {
+  margin-bottom: 18px;
+}
+.erp-app .erp-quick__link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-decoration: none;
+  color: inherit;
+}
+.erp-app .erp-quick__link strong {
+  font-size: 15px;
+}
+.erp-app .erp-quick__hint {
+  font-size: 12px;
+  opacity: 0.75;
+  margin-top: 4px;
+}

@@ -8,7 +8,7 @@ import type {
   VideoMetaPreview,
 } from '@/types/domain'
 
-/** 下一功能直接读取的口播数据（与首页「口播文案」输入框、`setWhisperTranscript` 同步） */
+/** 下一功能直接读取的口播数据（与首页「口播文案」输入框、`setTranscriptFromApi` 同步） */
 export type ScriptSnapshotForNext = {
   fullText: string
   segments: TranscriptSegment[]
@@ -16,7 +16,7 @@ export type ScriptSnapshotForNext = {
   sourceVideoUrl: string
 }
 
-/** 首页草稿 → 任务流；`transcriptDraft` 为口播正文出口（与 Whisper /「使用文案」共用） */
+/** 首页草稿 → 任务流；`transcriptDraft` 为口播正文出口（与 ASR 转写 /「使用文案」共用） */
 export const useTaskDraftStore = defineStore('taskDraft', () => {
   const videoUrl = ref('')
   /** 用户选中的原始照片文件（不上传到 store 持久化，仅存内存） */
@@ -39,10 +39,10 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
   const manualScriptDraft = ref('')
   const scriptPipelineCommittedAt = ref<number | null>(null)
 
-  /** Whisper 转写分段（毫秒时间轴），供首页展示 */
-  const whisperSegments = ref<TranscriptSegment[]>([])
+  /** ASR 转写分段（毫秒时间轴），供首页展示 */
+  const transcriptSegments = ref<TranscriptSegment[]>([])
 
-  /** 最近一次 transcribe-whisper 在主后端保存的 ID（内存，重启丢失） */
+  /** 最近一次 POST /v1/tools/transcribe 在主后端保存的 ID（内存，重启丢失） */
   const lastTranscriptId = ref<string | null>(null)
 
   /** 抖音流水线返回的改写建议（可编辑；创建任务后可在改写页继续调整） */
@@ -107,13 +107,13 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
     scriptPipelineCommittedAt.value = Date.now()
   }
 
-  function setWhisperTranscript(
+  function setTranscriptFromApi(
     fullText: string,
     segments: TranscriptSegment[],
     opts?: { transcriptId?: string; rewriteSuggestion?: string },
   ) {
     transcriptDraft.value = fullText
-    whisperSegments.value = segments
+    transcriptSegments.value = segments
     lastTranscriptId.value = opts?.transcriptId ?? null
     rewriteSuggestionDraft.value = opts?.rewriteSuggestion ?? ''
   }
@@ -123,7 +123,7 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
     transcriptDraft.value = ''
     manualScriptDraft.value = ''
     scriptPipelineCommittedAt.value = null
-    whisperSegments.value = []
+    transcriptSegments.value = []
     lastTranscriptId.value = null
     rewriteSuggestionDraft.value = ''
     videoMeta.value = null
@@ -135,7 +135,7 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
   /** 供后续功能调用：口播正文 = 当前输入框内容；分段 / transcriptId / 链接为同源快照 */
   const scriptSnapshotForNext = computed<ScriptSnapshotForNext>(() => ({
     fullText: manualScriptDraft.value.trim(),
-    segments: whisperSegments.value,
+    segments: transcriptSegments.value,
     transcriptId: lastTranscriptId.value,
     sourceVideoUrl: videoUrl.value.trim(),
   }))
@@ -148,7 +148,7 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
     transcriptDraft,
     manualScriptDraft,
     scriptPipelineCommittedAt,
-    whisperSegments,
+    transcriptSegments,
     lastTranscriptId,
     rewriteSuggestionDraft,
     videoMeta,
@@ -163,7 +163,7 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
     setVideoMeta,
     prefillManualScriptFromMeta,
     commitManualScriptToPipeline,
-    setWhisperTranscript,
+    setTranscriptFromApi,
     reset,
     scriptSnapshotForNext,
   }

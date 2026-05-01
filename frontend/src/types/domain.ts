@@ -27,6 +27,10 @@ export interface UserProfile {
   id: string
   email: string
   displayName?: string
+  /** 后端 auth/me；非管理员为 user */
+  role?: 'user' | 'admin'
+  /** pending=待审核 active=已开通 disabled=停用 */
+  accountStatus?: 'pending' | 'active' | 'disabled'
 }
 
 export interface TaskFlags {

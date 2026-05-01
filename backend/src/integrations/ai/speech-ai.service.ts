@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { resolveOpenAiStyleV1Base, resolveSpeechApiKey } from './openai-ark-compat.util';
 
 export type OpenAiSpeechRequest = {
   /** POST ${OPENAI_BASE_URL}/audio/speech */
@@ -33,10 +34,8 @@ export class SpeechAiService {
   }
 
   buildOpenAiSpeechRequest(text: string, voiceStyleId: string): OpenAiSpeechRequest {
-    const baseUrl = (
-      this.config.get<string>('OPENAI_BASE_URL') ?? 'https://api.openai.com/v1'
-    ).replace(/\/$/, '');
-    const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim() ?? '';
+    const baseUrl = resolveOpenAiStyleV1Base(this.config);
+    const apiKey = resolveSpeechApiKey(this.config);
     return {
       url: `${baseUrl}/audio/speech`,
       headers: {
@@ -61,15 +60,15 @@ export class SpeechAiService {
     text: string;
     voiceStyleId: string;
   }): Promise<{ ok: boolean; note: string }> {
-    const apiKey = this.config.get<string>('OPENAI_API_KEY')?.trim();
+    const apiKey = resolveSpeechApiKey(this.config);
     const req = this.buildOpenAiSpeechRequest(params.text, params.voiceStyleId);
     if (!apiKey) {
       this.logger.log(
-        `task=${params.taskId} TTS 跳过：未配置 OPENAI_API_KEY。请求预览=${JSON.stringify(
+        `task=${params.taskId} TTS 跳过：未配置 OPENAI_API_KEY / ARK_API_KEY。请求预览=${JSON.stringify(
           { url: req.url, body: { ...req.body, input: `${req.body.input.slice(0, 80)}…` } },
         )}`,
       );
-      return { ok: false, note: '未配置 OPENAI_API_KEY，跳过真实 TTS' };
+      return { ok: false, note: '未配置 OPENAI_API_KEY / ARK_API_KEY，跳过真实 TTS' };
     }
 
     this.logger.log(

@@ -140,11 +140,6 @@ else
   echo ">>> 提示：尚无 $ROOT/.env，本次将由 ensure_env 从 docker.env.example 生成（需再自行追加 ARK_API_KEY 等）。 " >&2
 fi
 
-if [[ -f "$ROOT/backend/whisper-python-service/Dockerfile" ]] && ! grep -q 'mirrors.aliyun.com' "$ROOT/backend/whisper-python-service/Dockerfile" 2>/dev/null; then
-  echo ">>> 【重要】当前 Whisper Dockerfile 仍是旧版（无阿里云 apt 换源），在国内 ECS 上 apt 可能卡 1 小时以上。" >&2
-  echo ">>> 请先 git pull / 同步仓库后再构建；正确文件约 1.2KB+，且含 mirrors.aliyun.com。" >&2
-fi
-
 echo ">>> 构建并启动容器（首次需拉基础镜像 + 装依赖；已启用 BuildKit。仅当日志里 apt 仍显示 deb.debian.org 说明未更新 Dockerfile）…" >&2
 compose up -d --build
 

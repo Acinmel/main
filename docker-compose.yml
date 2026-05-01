@@ -1,8 +1,9 @@
-# 线上/内网一体化：Web（Nginx+静态）→ API（Nest + yt-dlp + ffmpeg）→ Whisper（Python）
+# 线上/内网一体化：Web（Nginx+静态）→ API（Nest + yt-dlp + ffmpeg + 外部 ASR）
 # 使用：在项目根目录执行  docker compose up -d --build
 # 访问：http://localhost:8080  （API 经同域 /api 反代，浏览器无需单独配后端地址）
 #
 # 数据：MySQL 8（用户 / 数字人元数据）；任务流水线仍为内存态（见 TasksService）。
+# 口播转写：在 .env / backend/.env 配置 ASR_TRANSCRIBE_URL、OPENAI_API_KEY 等（见 backend/.env.example）。
 
 services:
   mysql:
@@ -32,37 +33,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 90s
-
-  whisper:
-    build:
-      context: ./backend/whisper-python-service
-      args:
-        USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
-    restart: unless-stopped
-    environment:
-      # 2GB 内存 ECS 建议 .env 保持 base；内存充足可设 medium
-      WHISPER_MODEL: ${WHISPER_MODEL:-base}
-      # 设为 1 时启动即加载模型，首包慢但首用户转写更快（健康检查会等服务监听后再通过）
-      WHISPER_PRELOAD: ${WHISPER_PRELOAD:-0}
-    # 本机直接跑 Nest（npm run start:dev）时，宿主机可经此端口访问 Whisper，与 backend/.env 中
-    # WHISPER_HTTP_URL=http://127.0.0.1:8010/transcribe 对齐；纯容器内联调时 api 仍用服务名 whisper:8010
-    # 仅绑定本机回环，避免 Whisper 端口对公网直连暴露（容器内 api → whisper 不受影响）
-    ports:
-      - '127.0.0.1:8010:8010'
-    networks: [kb_net]
-    healthcheck:
-      # CPU 转写或与首次拉模型并行时 /health 可能 >5s 才响应，urllib 太短会 TimeoutError → 容器误判 unhealthy
-      test:
-        [
-          'CMD',
-          'python',
-          '-c',
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=30)",
-        ]
-      interval: 20s
-      timeout: 35s
-      retries: 8
-      start_period: 180s
 
   api:
     build:
@@ -98,10 +68,6 @@ services:
       TRUST_PROXY: '1'
       # 前后端分离部署时填写浏览器 Origin，逗号分隔；留空则与开发一致（origin: true）
       CORS_ORIGINS: ${CORS_ORIGINS:-}
-      WHISPER_HTTP_URL: http://whisper:8010/transcribe
-      WHISPER_HTTP_HEALTH_URL: http://whisper:8010/health
-      WHISPER_HTTP_HEALTH_TIMEOUT_MS: ${WHISPER_HTTP_HEALTH_TIMEOUT_MS:-60000}
-      WHISPER_HTTP_TIMEOUT_MS: '600000'
       YTDLP_BIN: /usr/local/bin/yt-dlp
       YTDLP_TIMEOUT_MS: '300000'
       # 抖音 Cookie 仅由根目录 env_file .env 注入（勿用 ${} 展开，避免值中含 $ 被 compose 误解析）
@@ -112,15 +78,13 @@ services:
       FFMPEG_BIN: /usr/bin/ffmpeg
       # 数字人形象落盘（与默认 data/digital-humans 一致，避免容器重建丢文件）
       DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
-      # ARK_API_KEY / SEEDREAM_* / DIGITAL_HUMAN_* / OPENAI_* / DY_DOWNLOADER_COOKIE：
+      # ARK_API_KEY / OPENAI_API_KEY / ASR_* / SEEDREAM_* / DY_DOWNLOADER_COOKIE：
       # 写在根 .env 或 backend/.env（见上方 env_file）；勿在此用 ${VAR:-} 覆盖成空
     volumes:
       - video_downloads:/data/download-video
       - digital_human_storage:/workspace/backend/data/digital-humans
     depends_on:
       mysql:
-        condition: service_healthy
-      whisper:
         condition: service_healthy
     healthcheck:
       test:
