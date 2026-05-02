@@ -979,7 +979,8 @@ async function onGenerateVideo() {
               depth="3"
               style="font-size: 11px; display: block; margin-top: 4px"
             >
-              请在 backend/.env 配置口播转写：例如 <code>ASR_TRANSCRIBE_URL</code>、<code>OPENAI_API_KEY</code>（详见
+              请在 backend/.env 配置千问 ASR：<code>DASHSCOPE_API_KEY</code>、<code>DASHSCOPE_BASE_URL</code>、
+              <code>QWEN_ASR_MODEL</code>（详见
               <code>backend/.env.example</code>）。
             </n-text>
             <n-text

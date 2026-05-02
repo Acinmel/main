@@ -67,7 +67,7 @@ yt-dlp-master/
 .env.*
 *.log
 
-# Whisper 等模型目录（若克隆在仓库内）
+# 历史本地 ASR 模型目录（若克隆在仓库内）
 whisper_models/
 **/.whisper/
 

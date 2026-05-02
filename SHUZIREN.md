@@ -52,7 +52,7 @@ shuziren/
 │   │   ├── app.controller.ts
 │   │   ├── common/           # 抖音链接归一化、URL 安全等
 │   │   ├── integrations/
-│   │   │   ├── ai/           # 改写 / 占位 ASR / TTS 等
+│   │   │   ├── ai/           # 改写 / 千问 ASR / TTS 等
 │   │   │   ├── video/        # video-meta、media-download（yt-dlp/HTML）
 │   │   │   ├── transcription/ # 转写结果 DTO、进程内 TranscriptStore
 │   │   └── modules/
@@ -101,18 +101,18 @@ shuziren/
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/v1/tools/asr-health` | 探测配置的 ASR（OpenAI 兼容 HTTP）是否可达 |
+| `GET` | `/v1/tools/asr-health` | 探测千问 ASR 配置是否完整 |
 | `GET` | `/v1/tools/transcribe-pipeline-health` | 保存目录、FFmpeg、ASR、抖音 Cookie 一站式自检 |
 | `GET` | `/v1/tools/transcripts/:transcriptId` | 取回主后端内存中已保存的一次转写结果 |
-| `POST` | `/v1/tools/transcribe` | **multipart** 字段 `file`：上传音视频 → FFmpeg 预处理 → ASR → 保存并返回 `transcriptId` 等 |
-| `POST` | `/v1/tools/transcribe-url` | **JSON** `{ "sourceVideoUrl": "…" }`：下载链接媒体 → ASR → 保存并返回 |
-| `POST` | `/v1/tools/douyin-transcribe-rewrite` | **JSON** `{ "sourceVideoUrl", "rewriteStyle?" }`：**仅抖音**；dy-downloader 拉流 → ASR → 改写 `suggest` |
-| `POST` | `/v1/tools/transcript-preview` | **JSON** `{ "sourceVideoUrl": "…" }`：占位 ASR 预览 |
+| `POST` | `/v1/tools/transcribe` | **multipart** 字段 `file`：上传音视频 → FFmpeg 预处理 → 千问3-ASR-Flash-Filetrans → 保存并返回 `transcriptId` 等 |
+| `POST` | `/v1/tools/transcribe-url` | **JSON** `{ "sourceVideoUrl": "…" }`：下载链接媒体 → 千问 ASR 转写 → 保存并返回 |
+| `POST` | `/v1/tools/douyin-transcribe-rewrite` | **JSON** `{ "sourceVideoUrl", "rewriteStyle?" }`：**仅抖音**；dy-downloader 拉流 → 千问 ASR 转写 → 改写 `suggest` |
+| `POST` | `/v1/tools/transcript-preview` | **JSON** `{ "sourceVideoUrl": "…" }`：按 URL 调用千问 ASR 预览 |
 | `POST` | `/v1/tools/video-meta` | **JSON** `{ "sourceVideoUrl": "…" }`：抓取作品页 HTML，解析标题/内容/封面等 |
 
 **鉴权**：当前 Tools 路由**未强制** Bearer；生产可按需加守卫。
 
-**相关环境变量（节选）**：`ASR_TRANSCRIBE_URL`、`OPENAI_API_KEY`、`OPENAI_BASE_URL`、`ASR_MODE`、`YTDLP_BIN`、`DY_DOWNLOADER_COOKIE`、`VIDEO_MEDIA_MAX_BYTES` 等（详见 `backend/.env.example`）。
+**相关环境变量（节选）**：`DASHSCOPE_API_KEY`、`DASHSCOPE_BASE_URL`、`QWEN_ASR_MODEL`、`YTDLP_BIN`、`DY_DOWNLOADER_COOKIE`、`VIDEO_MEDIA_MAX_BYTES` 等（详见 `backend/.env.example`）。
 
 ---
 

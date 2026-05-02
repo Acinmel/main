@@ -3,7 +3,7 @@
 # 访问：http://localhost:8080  （API 经同域 /api 反代，浏览器无需单独配后端地址）
 #
 # 数据：MySQL 8（用户 / 数字人元数据）；任务流水线仍为内存态（见 TasksService）。
-# 口播转写：在 .env / backend/.env 配置 ASR_TRANSCRIBE_URL、OPENAI_API_KEY 等（见 backend/.env.example）。
+# 口播转写：在 .env / backend/.env 配置 DASHSCOPE_API_KEY（见 backend/.env.example）。
 
 services:
   mysql:
@@ -78,7 +78,7 @@ services:
       FFMPEG_BIN: /usr/bin/ffmpeg
       # 数字人形象落盘（与默认 data/digital-humans 一致，避免容器重建丢文件）
       DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
-      # ARK_API_KEY / OPENAI_API_KEY / ASR_* / SEEDREAM_* / DY_DOWNLOADER_COOKIE：
+      # DASHSCOPE_API_KEY / ARK_API_KEY / OPENAI_API_KEY / ASR_* / SEEDREAM_* / DY_DOWNLOADER_COOKIE：
       # 写在根 .env 或 backend/.env（见上方 env_file）；勿在此用 ${VAR:-} 覆盖成空
     volumes:
       - video_downloads:/data/download-video

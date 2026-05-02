@@ -1,39 +1,50 @@
 import {
   BadRequestException,
-  HttpException,
   Injectable,
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { mockAsrText } from './ai-mock.util';
-import { normalizeArkApiV3Base } from './openai-ark-compat.util';
 import { DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES } from '../../common/media.constants';
 import type {
-  TranscriptSegmentDto,
   TranscribeResultDto,
+  TranscriptSegmentDto,
 } from '../transcription/transcript.types';
 import { TranscriptStore } from '../transcription/transcript.store';
+import * as path from 'node:path';
 
-interface RemoteSegment {
-  startMs?: number;
-  endMs?: number;
-  start?: number;
-  end?: number;
-  text?: string;
+interface QwenAsrChatCompletionJson {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
 }
 
-interface RemoteTranscribeJson {
-  fullText?: string;
-  text?: string;
-  language?: string;
-  segments?: RemoteSegment[];
+interface QwenAsrTaskJson {
+  output?: {
+    task_id?: string;
+    task_status?: string;
+    result?: {
+      transcription_url?: string;
+    };
+  };
+  message?: string;
+  code?: string;
+}
+
+interface QwenFileTransResultJson {
+  transcripts?: Array<{
+    text?: string;
+    sentences?: Array<{
+      begin_time?: number;
+      end_time?: number;
+      text?: string;
+    }>;
+  }>;
 }
 
 /**
- * 语音转写（ASR）：OpenAI 兼容 multipart（POST model + file → JSON 含 text）。
- * - 方舟 api/v3「兼容 OpenAI」文档未提供与官方一致的 `/audio/transcriptions` HTTP，拼该 URL 常见 404；对话仍用 ARK_API_KEY。
- * - 默认：有 OPENAI/ASR 密钥 → OpenAI 系地址；否则同上地址（需自行配密钥或 ASR_TRANSCRIBE_URL）。
- * - 仅显式 `ASR_TRANSCRIBE_URL` 或 `ASR_PROVIDER=ark` 会指向方舟转写路径（易 404，自负兼容）。
+ * 语音转写：唯一入口为百炼千问 ASR。
  */
 @Injectable()
 export class TranscriptionAiService {
@@ -48,17 +59,8 @@ export class TranscriptionAiService {
     taskId: string;
     sourceVideoUrl: string;
   }): Promise<{ fullText: string; language: string }> {
-    const mode = this.getMode();
-    if (mode !== 'mock') {
-      this.logger.warn(
-        `task=${params.taskId} 当前任务阶段仅有 sourceVideoUrl，未携带可上传的音频二进制；转写回退 mock。`,
-      );
-    }
-
-    return {
-      fullText: mockAsrText(params.sourceVideoUrl),
-      language: 'zh-CN',
-    };
+    const result = await this.transcribeWithQwenAsr(params.sourceVideoUrl);
+    return { fullText: result.fullText, language: result.language };
   }
 
   async transcribeMedia(file: {
@@ -68,121 +70,19 @@ export class TranscriptionAiService {
     size: number;
   }): Promise<TranscribeResultDto> {
     this.assertAcceptableMedia(file);
-    const mode = this.getMode();
-    if (mode === 'mock') {
-      const fullText = mockAsrText(file.originalname || 'upload');
-      const transcriptId = this.transcriptStore.save({
-        fullText,
-        language: 'zh-CN',
-        segments: [],
-        sourceFilename: file.originalname,
-      });
-      return {
-        transcriptId,
-        fullText,
-        language: 'zh-CN',
-        segments: [],
-        provider: 'asr-api',
-      };
-    }
-
-    const url = this.resolveTranscribeUrl();
-    const apiKey = this.getTranscribeApiKey(url);
-    if (!apiKey) {
-      throw new BadRequestException(
-        this.buildMissingKeyHint(url),
-      );
-    }
-    const model = this.config.get<string>('ASR_MODEL')?.trim() || 'whisper-1';
-    const timeoutMs = Number(
-      this.config.get('ASR_TIMEOUT_MS') ?? this.config.get('OPENAI_TIMEOUT_MS') ?? 600_000,
-    );
-
-    const form = new FormData();
-    form.append('model', model);
-    const payload = new Uint8Array(file.buffer.length);
-    payload.set(file.buffer);
-    const blob = new Blob([payload], {
-      type: file.mimetype || 'application/octet-stream',
-    });
-    form.append('file', blob, this.safeMultipartFilename(file.originalname));
-
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), timeoutMs);
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-        signal: ac.signal,
-      });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.error(`ASR API 请求失败: ${msg}`);
-      throw new BadRequestException(`ASR API 不可达：${msg}`);
-    } finally {
-      clearTimeout(timer);
-    }
-
-    const raw = await res.text();
-    if (!res.ok) {
-      this.logger.warn(`ASR API HTTP ${res.status} url=${url}: ${raw.slice(0, 800)}`);
-      let hint = '';
-      if (res.status === 404) {
-        try {
-          const host = new URL(url).hostname.toLowerCase();
-          if (this.isArkTranscribeHost(host)) {
-            hint =
-              '（404：方舟 api/v3 通常无 OpenAI 式 /audio/transcriptions。请配置 OPENAI_API_KEY 走 Whisper，或设 ASR_TRANSCRIBE_URL 为实际提供 multipart 转写的地址；勿仅指望 ARK 密钥与本路径）';
-          } else {
-            hint =
-              '（404：请核对 ASR_TRANSCRIBE_URL、网关是否支持 multipart 转写及 ASR_MODEL）';
-          }
-        } catch {
-          hint = '';
-        }
-      }
-      throw new BadRequestException(
-        `ASR API 返回错误（${res.status}）${hint}；请求：${url}；响应摘录：${raw.slice(0, 400)}`,
-      );
-    }
-
-    let json: RemoteTranscribeJson;
-    try {
-      json = JSON.parse(raw) as RemoteTranscribeJson;
-    } catch {
-      throw new BadRequestException('ASR API 返回非 JSON，无法解析');
-    }
-
-    const language = String(json.language ?? 'und').trim() || 'und';
-    const segments = this.normalizeSegments(json.segments ?? []);
-    const fullTextRaw = (json.fullText ?? json.text ?? '').trim();
-    const fullText =
-      fullTextRaw ||
-      segments
-        .map((s) => s.text)
-        .filter(Boolean)
-        .join(' ')
-        .trim();
-
-    if (!fullText && segments.length === 0) {
-      throw new BadRequestException('ASR API 未返回有效文本');
-    }
-
-    const resolvedFullText = fullText || segments.map((s) => s.text).join('\n');
+    const result = await this.transcribeWithQwenAsr(this.toAudioDataUrl(file));
     const transcriptId = this.transcriptStore.save({
-      fullText: resolvedFullText,
-      language,
-      segments,
+      fullText: result.fullText,
+      language: result.language,
+      segments: result.segments,
       sourceFilename: file.originalname,
     });
 
     return {
       transcriptId,
-      fullText: resolvedFullText,
-      language,
-      segments,
+      fullText: result.fullText,
+      language: result.language,
+      segments: result.segments,
       provider: 'asr-api',
     };
   }
@@ -194,234 +94,100 @@ export class TranscriptionAiService {
     latencyMs: number;
     error?: string;
   }> {
-    let transcribeUrl: string;
+    const t0 = Date.now();
     try {
-      transcribeUrl = this.resolveTranscribeUrl();
+      const config = this.getQwenAsrConfig();
+      return {
+        ok: true,
+        transcribeUrlConfigured: true,
+        healthUrl: this.isFileTransModel(config.model)
+          ? config.asyncSubmitUrl
+          : config.chatCompletionsUrl,
+        latencyMs: Date.now() - t0,
+      };
     } catch (e) {
       return {
         ok: false,
         transcribeUrlConfigured: false,
         healthUrl: '',
-        latencyMs: 0,
-        error: this.formatConfigError(e),
+        latencyMs: Date.now() - t0,
+        error: e instanceof Error ? e.message : String(e),
       };
     }
+  }
 
-    const healthUrl = this.resolveHealthUrl(transcribeUrl);
-    if (!healthUrl) {
-      return {
-        ok: false,
-        transcribeUrlConfigured: true,
-        healthUrl: '',
-        latencyMs: 0,
-        error: '无法推导 ASR 健康检查地址',
-      };
+  private async transcribeWithQwenAsr(audioData: string): Promise<{
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  }> {
+    const config = this.getQwenAsrConfig();
+    if (this.isFileTransModel(config.model)) {
+      return this.transcribeWithQwenFileTrans(audioData, config);
     }
 
-    const apiKey = this.getTranscribeApiKey(transcribeUrl);
-    if (!apiKey) {
-      return {
-        ok: false,
-        transcribeUrlConfigured: true,
-        healthUrl,
-        latencyMs: 0,
-        error: this.buildMissingKeyHint(transcribeUrl),
-      };
-    }
-
-    const timeoutMs = Number(this.config.get('ASR_HEALTH_TIMEOUT_MS') ?? 10_000);
-    const t0 = Date.now();
+    const timeoutMs = Number(this.config.get('ASR_TIMEOUT_MS') ?? 600_000);
+    let res: Response;
     try {
-      const res = await fetch(healthUrl, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${apiKey}` },
+      res = await fetch(config.chatCompletionsUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'input_audio',
+                  input_audio: {
+                    data: audioData,
+                  },
+                },
+              ],
+            },
+          ],
+          stream: false,
+          asr_options: {
+            enable_itn: this.getAsrEnableItn(),
+            ...this.getOptionalAsrLanguage(),
+          },
+        }),
         signal: AbortSignal.timeout(timeoutMs),
       });
-      const latencyMs = Date.now() - t0;
-      if (!res.ok) {
-        return {
-          ok: false,
-          transcribeUrlConfigured: true,
-          healthUrl,
-          latencyMs,
-          error: `HTTP ${res.status}`,
-        };
-      }
-      return {
-        ok: true,
-        transcribeUrlConfigured: true,
-        healthUrl,
-        latencyMs,
-      };
     } catch (e) {
-      const latencyMs = Date.now() - t0;
       const msg = e instanceof Error ? e.message : String(e);
-      this.logger.warn(`ASR health check failed: ${msg}`);
-      return {
-        ok: false,
-        transcribeUrlConfigured: true,
-        healthUrl,
-        latencyMs,
-        error: msg,
-      };
+      this.logger.error(`千问 ASR API 请求失败: ${msg}`);
+      throw new BadRequestException(`千问 ASR API 不可达：${msg}`);
     }
-  }
 
-  private getMode(): 'mock' | 'api' {
-    const mode = (this.config.get<string>('ASR_MODE') ?? 'api').toLowerCase();
-    return mode === 'mock' ? 'mock' : 'api';
-  }
-
-  private isArkTranscribeHost(host: string): boolean {
-    const h = host.toLowerCase();
-    return h.includes('volces.com') || h.includes('volcengine.com');
-  }
-
-  /** 转写用密钥：按目标 host 选择，避免把 ARK_KEY 误发到 OpenAI（或反过来）。 */
-  private getTranscribeApiKey(transcribeUrl: string): string {
-    let host = '';
-    try {
-      host = new URL(transcribeUrl).hostname.toLowerCase();
-    } catch {
-      return '';
-    }
-    if (host.includes('openai.com')) {
-      return (
-        this.config.get<string>('OPENAI_API_KEY')?.trim() ||
-        this.config.get<string>('ASR_API_KEY')?.trim() ||
-        ''
+    const raw = await res.text();
+    if (!res.ok) {
+      this.logger.warn(`千问 ASR API HTTP ${res.status}: ${raw.slice(0, 800)}`);
+      throw new BadRequestException(
+        `千问 ASR API 返回错误（${res.status}）：${raw.slice(0, 500)}`,
       );
     }
-    if (this.isArkTranscribeHost(host)) {
-      return (
-        this.config.get<string>('ARK_API_KEY')?.trim() ||
-        this.config.get<string>('ASR_API_KEY')?.trim() ||
-        this.config.get<string>('OPENAI_API_KEY')?.trim() ||
-        ''
-      );
-    }
-    return (
-      this.config.get<string>('ASR_API_KEY')?.trim() ||
-      this.config.get<string>('OPENAI_API_KEY')?.trim() ||
-      this.config.get<string>('ARK_API_KEY')?.trim() ||
-      ''
-    );
-  }
 
-  private buildMissingKeyHint(transcribeUrl: string): string {
-    let host = '';
+    let json: QwenAsrChatCompletionJson;
     try {
-      host = new URL(transcribeUrl).hostname.toLowerCase();
+      json = JSON.parse(raw) as QwenAsrChatCompletionJson;
     } catch {
-      return 'ASR：请配置 ARK_API_KEY、OPENAI_API_KEY 或 ASR_API_KEY（见 backend/.env.example）';
-    }
-    if (host.includes('openai.com')) {
-      const arkOnly =
-        !this.config.get<string>('OPENAI_API_KEY')?.trim() &&
-        !this.config.get<string>('ASR_API_KEY')?.trim() &&
-        !!this.config.get<string>('ARK_API_KEY')?.trim();
-      if (arkOnly) {
-        return '已配置 ARK_API_KEY，但口播转写走 OpenAI 兼容接口（非方舟对话网关）。请增加 OPENAI_API_KEY（Whisper），或设置 ASR_TRANSCRIBE_URL + ASR_API_KEY 指向提供转写的服务。';
-      }
-      return '口播转写目标为 OpenAI：请配置 OPENAI_API_KEY（或 ASR_API_KEY）；勿将 ARK_API_KEY 用于 api.openai.com。';
-    }
-    if (this.isArkTranscribeHost(host)) {
-      return '口播转写指向火山域名：请配置 ARK_API_KEY。若 HTTP 404，说明该路径在方舟侧不可用，请改用 OPENAI_API_KEY 或 ASR_TRANSCRIBE_URL。';
-    }
-    return '口播转写：请配置 ASR_API_KEY（专用转写密钥），或可接受的 OPENAI_API_KEY。';
-  }
-
-  /**
-   * - ASR_TRANSCRIBE_URL：最优先
-   * - ASR_PROVIDER=ark：方舟路径（常见 404，仅实验）
-   * - ASR_PROVIDER=openai 或默认：OpenAI 系 /audio/transcriptions（Whisper 或兼容网关）
-   */
-  private resolveTranscribeUrl(): string {
-    const direct = this.config.get<string>('ASR_TRANSCRIBE_URL')?.trim();
-    if (direct) return direct;
-
-    const provider = (this.config.get<string>('ASR_PROVIDER') ?? '')
-      .trim()
-      .toLowerCase();
-    if (provider === 'ark') {
-      const rawBase =
-        this.config.get<string>('ARK_BASE_URL')?.trim() ||
-        'https://ark.cn-beijing.volces.com/api/v3';
-      return `${normalizeArkApiV3Base(rawBase)}/audio/transcriptions`;
-    }
-    if (provider === 'openai') {
-      const base =
-        this.config.get<string>('OPENAI_BASE_URL')?.trim() ||
-        'https://api.openai.com/v1';
-      return `${base.replace(/\/+$/, '')}/audio/transcriptions`;
+      throw new BadRequestException('千问 ASR API 返回非 JSON，无法解析');
     }
 
-    const base =
-      this.config.get<string>('OPENAI_BASE_URL')?.trim() ||
-      'https://api.openai.com/v1';
-    return `${base.replace(/\/+$/, '')}/audio/transcriptions`;
-  }
-
-  private resolveHealthUrl(transcribeUrl?: string): string {
-    const fromEnv = this.config.get<string>('ASR_HEALTH_URL')?.trim();
-    if (fromEnv) return fromEnv;
-    const t = transcribeUrl ?? this.resolveTranscribeUrl();
-    if (!t) return '';
-    const u = new URL(t);
-    const host = u.hostname.toLowerCase();
-    if (host.includes('openai.com')) {
-      return `${u.origin}/v1/models`;
+    const fullText = json.choices?.[0]?.message?.content?.trim() ?? '';
+    if (!fullText) {
+      throw new BadRequestException('千问 ASR API 未返回有效转写文本');
     }
-    if (this.isArkTranscribeHost(host)) {
-      const m = u.pathname.match(/^(\/api\/v\d+)/);
-      const prefix = m?.[1] ?? '/api/v3';
-      return `${u.origin}${prefix}/models`;
-    }
-    const parts = u.pathname.replace(/\/+$/, '').split('/').filter(Boolean);
-    if (parts.length) {
-      parts[parts.length - 1] = 'health';
-    } else {
-      parts.push('health');
-    }
-    u.pathname = `/${parts.join('/')}`;
-    return u.toString();
-  }
-
-  private formatConfigError(e: unknown): string {
-    if (e instanceof HttpException) {
-      const r = e.getResponse();
-      if (typeof r === 'string') return r;
-      if (r && typeof r === 'object' && 'message' in r) {
-        const m = (r as { message: string | string[] }).message;
-        return Array.isArray(m) ? m.join('；') : String(m);
-      }
-    }
-    return e instanceof Error ? e.message : String(e);
-  }
-
-  private normalizeSegments(raw: RemoteSegment[]): TranscriptSegmentDto[] {
-    return raw.map((s) => {
-      let startMs = 0;
-      let endMs = 0;
-      if (typeof s.startMs === 'number' && typeof s.endMs === 'number') {
-        startMs = Math.max(0, Math.round(s.startMs));
-        endMs = Math.max(0, Math.round(s.endMs));
-      } else if (typeof s.start === 'number' && typeof s.end === 'number') {
-        startMs = Math.max(0, Math.round(s.start * 1000));
-        endMs = Math.max(0, Math.round(s.end * 1000));
-      }
-      return {
-        startMs,
-        endMs,
-        text: (s.text ?? '').trim(),
-      };
-    });
-  }
-
-  private safeMultipartFilename(originalname: string): string {
-    const base = (originalname || 'upload.bin').split(/[/\\]/).pop() || 'upload.bin';
-    const ascii = base.replace(/[^\x20-\x7E]/g, '_');
-    return ascii.length > 0 ? ascii : 'upload.bin';
+    return {
+      fullText,
+      language: 'zh-CN',
+      segments: this.buildSegments(fullText),
+    };
   }
 
   private assertAcceptableMedia(file: {
@@ -457,5 +223,255 @@ export class TranscriptionAiService {
         '不支持的文件类型，请上传常见音视频格式（如 mp3、wav、m4a、mp4、webm 等）',
       );
     }
+  }
+
+  private getQwenAsrConfig(): {
+    apiKey: string;
+    chatCompletionsUrl: string;
+    asyncSubmitUrl: string;
+    asyncTaskBaseUrl: string;
+    model: string;
+  } {
+    const apiKey = this.config.get<string>('DASHSCOPE_API_KEY')?.trim();
+    if (!apiKey) {
+      throw new BadRequestException('请配置千问 ASR 密钥：DASHSCOPE_API_KEY');
+    }
+    const compatibleBase = (
+      this.config.get<string>('DASHSCOPE_BASE_URL')?.trim() ||
+      'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    ).replace(/\/+$/, '');
+    const asyncBase = (
+      this.config.get<string>('DASHSCOPE_ASR_BASE_URL')?.trim() ||
+      this.resolveDashScopeAsyncBase(compatibleBase)
+    ).replace(/\/+$/, '');
+    return {
+      apiKey,
+      chatCompletionsUrl: `${compatibleBase}/chat/completions`,
+      asyncSubmitUrl: `${asyncBase}/services/audio/asr/transcription`,
+      asyncTaskBaseUrl: `${asyncBase}/tasks`,
+      model:
+        this.config.get<string>('QWEN_ASR_MODEL')?.trim() ||
+        'qwen3-asr-flash-filetrans',
+    };
+  }
+
+  private async transcribeWithQwenFileTrans(
+    audioData: string,
+    config: ReturnType<TranscriptionAiService['getQwenAsrConfig']>,
+  ): Promise<{
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  }> {
+    const timeoutMs = Number(this.config.get('ASR_TIMEOUT_MS') ?? 600_000);
+    const submit = await this.fetchQwenJson<QwenAsrTaskJson>(
+      config.asyncSubmitUrl,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json',
+          'X-DashScope-Async': 'enable',
+        },
+        body: JSON.stringify({
+          model: config.model,
+          input: {
+            file_url: audioData,
+          },
+          parameters: {
+            channel_id: [0],
+            enable_itn: this.getAsrEnableItn(),
+            enable_words: this.getAsrEnableWords(),
+            ...this.getOptionalAsrLanguage(),
+          },
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+      '千问 FileTrans ASR 提交任务',
+    );
+
+    const taskId = submit.output?.task_id;
+    if (!taskId) {
+      throw new BadRequestException(
+        `千问 FileTrans ASR 未返回 task_id：${JSON.stringify(submit).slice(0, 500)}`,
+      );
+    }
+
+    const task = await this.pollQwenFileTransTask(taskId, config);
+    const resultUrl = task.output?.result?.transcription_url;
+    if (!resultUrl) {
+      throw new BadRequestException(
+        `千问 FileTrans ASR 未返回 transcription_url：${JSON.stringify(task).slice(0, 500)}`,
+      );
+    }
+
+    const result = await this.fetchQwenJson<QwenFileTransResultJson>(
+      resultUrl,
+      {
+        method: 'GET',
+        signal: AbortSignal.timeout(timeoutMs),
+      },
+      '千问 FileTrans ASR 下载结果',
+    );
+    const normalized = this.normalizeFileTransResult(result);
+    if (!normalized.fullText) {
+      throw new BadRequestException('千问 FileTrans ASR 结果为空');
+    }
+    return normalized;
+  }
+
+  private async pollQwenFileTransTask(
+    taskId: string,
+    config: ReturnType<TranscriptionAiService['getQwenAsrConfig']>,
+  ): Promise<QwenAsrTaskJson> {
+    const timeoutMs = Number(this.config.get('ASR_TIMEOUT_MS') ?? 600_000);
+    const pollIntervalMs = Number(this.config.get('QWEN_ASR_POLL_INTERVAL_MS') ?? 2_000);
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      await this.sleep(pollIntervalMs);
+      const task = await this.fetchQwenJson<QwenAsrTaskJson>(
+        `${config.asyncTaskBaseUrl}/${encodeURIComponent(taskId)}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${config.apiKey}`,
+          },
+          signal: AbortSignal.timeout(Math.min(timeoutMs, 60_000)),
+        },
+        '千问 FileTrans ASR 查询任务',
+      );
+      const status = task.output?.task_status?.toUpperCase();
+      if (status === 'SUCCEEDED') return task;
+      if (status === 'FAILED' || status === 'CANCELED' || status === 'UNKNOWN') {
+        throw new BadRequestException(
+          `千问 FileTrans ASR 任务失败（${status}）：${JSON.stringify(task).slice(0, 500)}`,
+        );
+      }
+    }
+
+    throw new BadRequestException('千问 FileTrans ASR 转写超时，请稍后重试');
+  }
+
+  private async fetchQwenJson<T>(url: string, init: RequestInit, label: string): Promise<T> {
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`${label}请求失败: ${msg}`);
+      throw new BadRequestException(`${label}不可达：${msg}`);
+    }
+
+    const raw = await res.text();
+    if (!res.ok) {
+      this.logger.warn(`${label} HTTP ${res.status}: ${raw.slice(0, 800)}`);
+      throw new BadRequestException(`${label}返回错误（${res.status}）：${raw.slice(0, 500)}`);
+    }
+
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      throw new BadRequestException(`${label}返回非 JSON，无法解析`);
+    }
+  }
+
+  private normalizeFileTransResult(result: QwenFileTransResultJson): {
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  } {
+    const transcripts = result.transcripts ?? [];
+    const fullText = transcripts
+      .map((t) => t.text?.trim() ?? '')
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+    const segments = transcripts.flatMap((t) =>
+      (t.sentences ?? []).map((s) => ({
+        startMs: Math.max(0, Math.round(s.begin_time ?? 0)),
+        endMs: Math.max(0, Math.round(s.end_time ?? 0)),
+        text: (s.text ?? '').trim(),
+      })),
+    );
+
+    return {
+      fullText,
+      language: 'zh-CN',
+      segments: segments.length > 0 ? segments : this.buildSegments(fullText),
+    };
+  }
+
+  private resolveDashScopeAsyncBase(compatibleBase: string): string {
+    if (compatibleBase.includes('dashscope-intl.aliyuncs.com')) {
+      return 'https://dashscope-intl.aliyuncs.com/api/v1';
+    }
+    return 'https://dashscope.aliyuncs.com/api/v1';
+  }
+
+  private isFileTransModel(model: string): boolean {
+    return model.toLowerCase().includes('filetrans');
+  }
+
+  private getAsrEnableItn(): boolean {
+    const raw = this.config.get<string>('QWEN_ASR_ENABLE_ITN')?.trim().toLowerCase();
+    if (raw === '1' || raw === 'true') return true;
+    if (raw === '0' || raw === 'false') return false;
+    return false;
+  }
+
+  private getOptionalAsrLanguage(): { language?: string } {
+    const language = this.config.get<string>('QWEN_ASR_LANGUAGE')?.trim();
+    return language ? { language } : {};
+  }
+
+  private getAsrEnableWords(): boolean {
+    const raw = this.config.get<string>('QWEN_ASR_ENABLE_WORDS')?.trim().toLowerCase();
+    if (raw === '1' || raw === 'true') return true;
+    if (raw === '0' || raw === 'false') return false;
+    return false;
+  }
+
+  private toAudioDataUrl(file: { buffer: Buffer; originalname: string; mimetype: string }): string {
+    const mime = this.guessAudioMime(file.originalname, file.mimetype);
+    return `data:${mime};base64,${file.buffer.toString('base64')}`;
+  }
+
+  private guessAudioMime(originalname: string, mimetype: string): string {
+    const mt = mimetype.toLowerCase();
+    if (mt.startsWith('audio/')) return mt;
+
+    const ext = path.extname(originalname).replace('.', '').toLowerCase();
+    const byExt: Record<string, string> = {
+      aac: 'audio/aac',
+      flac: 'audio/flac',
+      m4a: 'audio/mp4',
+      mp3: 'audio/mpeg',
+      mp4: 'audio/mp4',
+      mpeg: 'audio/mpeg',
+      mpga: 'audio/mpeg',
+      ogg: 'audio/ogg',
+      wav: 'audio/wav',
+      webm: 'audio/webm',
+    };
+    return byExt[ext] ?? 'audio/wav';
+  }
+
+  private buildSegments(fullText: string): TranscriptSegmentDto[] {
+    const chunks = fullText
+      .split(/(?<=[。！？!?])|\n+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    let cursor = 0;
+    return chunks.slice(0, 100).map((text) => {
+      const duration = Math.max(1200, Math.min(8000, text.length * 180));
+      const segment = { startMs: cursor, endMs: cursor + duration, text };
+      cursor += duration;
+      return segment;
+    });
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

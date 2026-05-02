@@ -23,7 +23,7 @@ export async function createTask(body: CreateTaskBody) {
   return data
 }
 
-/** 仅根据视频链接预览口播文案（不创建任务；当前为占位 ASR） */
+/** 仅根据音视频 URL 预览口播文案（不创建任务；后端统一调用千问 ASR） */
 export async function previewTranscript(body: { sourceVideoUrl: string }) {
   const { data } = await http.post<{ fullText: string; language: string }>(
     'v1/tools/transcript-preview',
@@ -32,7 +32,7 @@ export async function previewTranscript(body: { sourceVideoUrl: string }) {
   return data
 }
 
-/** 第三步：探测 ASR（转写 HTTP）是否配置并可连通 */
+/** 第三步：探测千问 ASR（转写 HTTP）是否配置 */
 export interface AsrHealthResponse {
   ok: boolean
   transcribeUrlConfigured: boolean

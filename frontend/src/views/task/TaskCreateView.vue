@@ -85,7 +85,7 @@ async function submit() {
             {{
               draft.transcriptDraft.trim()
                 ? `已填写 ${draft.transcriptDraft.trim().length} 字（将作为 initialTranscript 提交）`
-                : '（空，后端将使用占位 ASR）'
+                : '（空，后端将调用千问 ASR 转写）'
             }}
           </n-descriptions-item>
         </n-descriptions>

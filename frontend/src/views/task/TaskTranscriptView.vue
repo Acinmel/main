@@ -60,7 +60,7 @@ function goNext() {
 
         <div v-if="loading" class="center">
           <n-spin size="large" />
-          <n-text depth="2" style="margin-top: 12px">正在抽取口播文案（模拟 ASR）…</n-text>
+          <n-text depth="2" style="margin-top: 12px">正在调用千问 ASR 抽取口播文案…</n-text>
         </div>
 
         <template v-else-if="transcript">

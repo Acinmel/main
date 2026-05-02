@@ -18,7 +18,7 @@ export type TranscribeMediaInput = {
 };
 
 /**
- * 视频 → FFmpeg 抽音轨（16kHz mono WAV）再送 ASR API，减轻上游解码压力、统一格式。
+ * 视频 → FFmpeg 抽音轨（16kHz mono MP3）再送 ASR API，减轻上游解码压力、统一格式。
  * 可执行文件：FFMPEG_BIN → backend/ffmpeg/bin（Windows/Linux）→ PATH 中的 ffmpeg。
  */
 @Injectable()
@@ -28,7 +28,7 @@ export class FfmpegAudioService {
   constructor(private readonly config: ConfigService) {}
 
   /**
-   * 对疑似视频：抽音轨为 WAV；纯音频或抽轨失败则原样返回。
+   * 对疑似视频：抽音轨为低码率 MP3；纯音频或抽轨失败则原样返回。
    * @param persistedVideoPath 若已将视频落盘（如 source-video-file），直接作 FFmpeg 输入，避免再写临时文件。
    */
   async prepareForTranscription(
@@ -45,7 +45,7 @@ export class FfmpegAudioService {
     const bin = this.resolveFfmpegBinary();
 
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-'));
-    const outWav = path.join(tmpDir, 'for-transcription.wav');
+    const outAudio = path.join(tmpDir, 'for-transcription.mp3');
 
     try {
       const inputPath =
@@ -53,18 +53,18 @@ export class FfmpegAudioService {
           ? opts.persistedVideoPath
           : await this.writeTempInput(tmpDir, media);
 
-      await this.runExtract(bin, inputPath, outWav);
-      const wav = await fs.readFile(outWav);
-      if (wav.length < 64) {
+      await this.runExtract(bin, inputPath, outAudio);
+      const audio = await fs.readFile(outAudio);
+      if (audio.length < 64) {
         this.logger.warn('FFmpeg 输出音轨过小，回退为原媒体直送 ASR');
         return this.ensureBufferFromDiskIfNeeded(media, opts);
       }
       const base = path.basename(media.originalname, path.extname(media.originalname)) || 'audio';
       return {
-        buffer: wav,
-        originalname: `${base}.wav`,
-        mimetype: 'audio/wav',
-        size: wav.length,
+        buffer: audio,
+        originalname: `${base}.mp3`,
+        mimetype: 'audio/mpeg',
+        size: audio.length,
       };
     } catch (e) {
       const err = e as Error & { stderr?: Buffer };
@@ -181,7 +181,7 @@ export class FfmpegAudioService {
   private async runExtract(
     ffmpegBin: string,
     inputPath: string,
-    outputWavPath: string,
+    outputAudioPath: string,
   ): Promise<void> {
     const args = [
       '-nostdin',
@@ -197,8 +197,10 @@ export class FfmpegAudioService {
       '-ar',
       '16000',
       '-c:a',
-      'pcm_s16le',
-      outputWavPath,
+      'libmp3lame',
+      '-b:a',
+      '24k',
+      outputAudioPath,
     ];
     await execFileAsync(ffmpegBin, args, {
       maxBuffer: 32 * 1024 * 1024,

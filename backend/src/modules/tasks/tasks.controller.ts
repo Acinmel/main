@@ -23,7 +23,7 @@ import type {
 
 class CreateTaskDto {
   sourceVideoUrl!: string;
-  /** 首页解析后用户编辑过的口播文案；有值时任务抽取阶段将跳过占位 ASR，直接使用该文本 */
+  /** 首页解析后用户编辑过的口播文案；有值时任务抽取阶段将跳过千问 ASR，直接使用该文本 */
   initialTranscript?: string;
 }
 

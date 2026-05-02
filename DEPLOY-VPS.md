@@ -2,7 +2,7 @@
 
 > **生产环境建议使用制品化部署。** 本文档中的 `git pull`、`docker compose up -d --build`、`quickstart-server.sh` 属于源码部署方式，适合开发、测试或临时环境。生产服务器不应保留源码；请优先使用 [`docs/production-artifact-deployment.md`](./docs/production-artifact-deployment.md) 和 [`docs/development-to-server-release-flow.md`](./docs/development-to-server-release-flow.md)。
 
-本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + MySQL** 的一体化部署；口播转写在 API 容器内通过 **FFmpeg 抽轨 + 外部 ASR HTTP** 完成（在 `.env` 中配置 `ASR_TRANSCRIBE_URL`、`OPENAI_API_KEY` 等，见 `backend/.env.example`）。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
+本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + MySQL** 的一体化部署；口播转写在 API 容器内通过 **FFmpeg 抽轨 + 千问3-ASR-Flash-Filetrans** 完成（在 `.env` 中配置 `DASHSCOPE_API_KEY`，见 `backend/.env.example`）。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
 
 ## 国内服务器：拉镜像超时 `registry-1.docker.io`
 
@@ -144,7 +144,7 @@ cp deploy/docker.env.example .env
 nano .env   # 或 vim：至少修改 MYSQL_*、JWT_SECRET
 ```
 
-将 **大模型、抖音 Cookie、ASR（`ASR_TRANSCRIBE_URL` / `OPENAI_API_KEY` 等）** 按 `backend/.env.example` 的说明，把需要的变量**追加**到根目录 `.env` 或 `backend/.env` 中（本仓库 `docker-compose.yml` 通过 `env_file` 注入；若你新增了自定义键且 Compose 不会自动带入，再在 `api.environment` 中增加一行 `${VAR}` 映射）。
+将 **大模型、抖音 Cookie、千问 ASR（`DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` / `QWEN_ASR_MODEL` 等）** 按 `backend/.env.example` 的说明，把需要的变量**追加**到根目录 `.env` 或 `backend/.env` 中（本仓库 `docker-compose.yml` 通过 `env_file` 注入；若你新增了自定义键且 Compose 不会自动带入，再在 `api.environment` 中增加一行 `${VAR}` 映射）。
 
 **生产环境必须设置强随机 `JWT_SECRET`**，例如：
 
