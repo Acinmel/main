@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton, NCard, NTag, NText } from 'naive-ui'
+import { NButton, NTag, NText } from 'naive-ui'
 import { RouterLink } from 'vue-router'
 
 type ShowcaseWork = {
