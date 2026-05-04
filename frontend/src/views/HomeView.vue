@@ -914,12 +914,7 @@ async function onGenerateVideo() {
             >
               获取视频信息
             </n-button>
-            <n-text depth="3" style="font-size: 12px">
-              先解析 HTML 渲染资料；抖音链接会在展示完成后继续：拉取源视频→提取音轨→ASR
-              填入「口播文案」。文件保存在后端服务器（Docker 内多为
-              /data/download-video 卷；本地开发 Windows 常为 C:\downloadVideo），不会出现在你电脑的下载文件夹。
-            </n-text>
-            <n-space align="center" :size="8" style="flex-wrap: wrap">
+            <!-- <n-space align="center" :size="8" style="flex-wrap: wrap">
               <n-text depth="3" style="font-size: 12px">服务端 Cookie：</n-text>
               <n-tag v-if="dyCookieUi === 'yes'" size="small" type="success" :bordered="false">
                 已配置
@@ -934,9 +929,8 @@ async function onGenerateVideo() {
               <n-button size="tiny" quaternary :loading="dyCookieUi === 'loading'" @click="refreshDyCookieStatus">
                 刷新
               </n-button>
-            </n-space>
-            <n-space align="center" :size="8" style="flex-wrap: wrap; margin-top: 4px">
-              <n-text depth="3" style="font-size: 12px">口播转写（服务端下载落盘→FFmpeg 抽音轨→ASR API）：</n-text>
+            </n-space> -->
+            <!-- <n-space align="center" :size="8" style="flex-wrap: wrap; margin-top: 4px">
               <n-tag v-if="pipelineLoading" size="small" :bordered="false">检测中…</n-tag>
               <template v-else-if="pipelineHealth">
                 <n-tag
@@ -964,7 +958,7 @@ async function onGenerateVideo() {
               <n-button size="tiny" quaternary :loading="pipelineLoading" @click="refreshPipelineHealth">
                 刷新转写环境
               </n-button>
-            </n-space>
+            </n-space> -->
             <n-text
               v-if="!pipelineLoading && pipelineHealthError"
               depth="3"
@@ -1159,12 +1153,13 @@ async function onGenerateVideo() {
 
       <section class="studio-panel studio-panel--output" aria-label="生成视频">
       <n-card title="第二步：生成视频" size="large" class="glass step-generate-card">
-        <n-space vertical :size="14">
-          <n-text depth="3" style="font-size: 12px">
-            请根据自己需要生成多少条视频，选择<strong>本批生成条数</strong>，再在各格中填写或载入口播内容；<strong>每格生成一条</strong>演示成片，单批至少 1 条、最多
+        <n-space vertical :size="14" class="generate-card-stack">
+          <n-text depth="3" class="generate-intro">
+            请根据自己的视频长度，需要生成多少条视频，选择<strong>本批生成条数</strong>，<strong>每格生成一条</strong>演示成片，单批至少 1 条、最多
             {{ VIDEO_SEGMENT_MAX }} 条。
+            推荐：视频长度 15 秒以内，生成 1 条；视频长度 15-30 秒，生成 2 条；视频长度 30-45 秒，生成 3 条；视频长度 45-60 秒，生成 4 条；
           </n-text>
-          <n-space align="center" style="flex-wrap: wrap" :size="12">
+          <n-space align="center" class="segment-count-bar" :size="12">
             <n-text strong>本批生成条数</n-text>
             <n-input-number
               v-model:value="videoSegmentCount"
@@ -1175,16 +1170,16 @@ async function onGenerateVideo() {
             />
             <n-text depth="3" style="font-size: 12px">（1～{{ VIDEO_SEGMENT_MAX }} 条）</n-text>
           </n-space>
-          <n-space vertical :size="10" style="width: 100%">
-            <n-space align="center" style="flex-wrap: wrap" :size="12">
+          <n-space vertical :size="10" class="segment-editor">
+            <n-space align="center" class="segment-toolbar" :size="12">
               <n-text strong>口播分段（{{ safeSegmentCount }} 格）</n-text>
               <n-button size="small" secondary :disabled="generateVideoLoading" @click="importSegmentsFromManualDraft">
                 从上方口播载入
               </n-button>
             </n-space>
-            <n-alert type="default" :show-icon="false" style="background: rgba(30, 41, 59, 0.65); font-size: 12px">
-              每段最多 {{ VIDEO_SEGMENT_MAX_CHARS }} 字；可按句号或意群拆分整段口播，便于单条成片节奏。
-            </n-alert>
+            <!-- <n-alert type="default" :show-icon="false" style="background: rgba(30, 41, 59, 0.65); font-size: 12px">
+              每段最多 {{ VIDEO_SEGMENT_MAX_CHARS }} 字；
+            </n-alert> -->
             <div
               v-for="idx in safeSegmentCount"
               :key="idx"
@@ -1207,7 +1202,7 @@ async function onGenerateVideo() {
           <div>
             <n-text strong style="display: block; margin-bottom: 8px">口播形象照片</n-text>
             <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">
-              默认使用你在「专属数字人」中保存的形象作为本步口播照片；也可改用本机其他照片。
+              默认使用你在「专属数字人」中的形象；也可改用本机其他照片。
             </n-text>
             <n-radio-group
               v-model:value="draft.portraitMode"
@@ -1250,7 +1245,7 @@ async function onGenerateVideo() {
               :loading="generateVideoLoading"
               @click="onGenerateVideo"
             >
-              生成视频（本批 {{ safeSegmentCount }} 条，逐条请求）
+              生成视频（本批 {{ safeSegmentCount }} 条）
             </n-button>
             <n-button
               v-if="generateVideoLoading"
@@ -1270,7 +1265,7 @@ async function onGenerateVideo() {
             未填「原视频」有效链接时也可生成；填写并校验通过后，大模型会多一层原片上下文。获取视频信息、抖音转写仍需要上方有效链接。
           </n-text>
           <n-text v-if="generateVideoLoading" depth="3" style="font-size: 12px; display: block; margin-top: 6px">
-            当前为<strong>串行队列</strong>：上一条完成后再请求下一条；点「停止生成」会中断当前请求并跳过余下片段，不浪费接口。
+            当前为<strong>串行队列</strong>
           </n-text>
           <n-text v-if="generateVideoLoading || generateVideoEstimatedTotalSec > 0" depth="3" style="font-size: 12px">
             本批合计预估约 <n-text tag="span" strong>{{ generateVideoEstimatedTotalSec }}</n-text> 秒（本批各段累加，仅供参考）
@@ -1335,14 +1330,34 @@ async function onGenerateVideo() {
 
 <style scoped>
 .page {
-  padding: 12px 24px 40px;
+  position: relative;
+  overflow: hidden;
   min-height: 100%;
+  padding: 12px 24px 48px;
   box-sizing: border-box;
   color: inherit;
+  background:
+    radial-gradient(circle at 12% 4%, rgba(168, 85, 247, 0.2), transparent 28%),
+    radial-gradient(circle at 86% 12%, rgba(56, 189, 248, 0.16), transparent 26%),
+    radial-gradient(circle at 70% 70%, rgba(236, 72, 153, 0.12), transparent 28%);
+}
+
+.page::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: '';
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.78), transparent 82%);
 }
 
 /* 与下方双栏同宽，避免头尾窄、内容宽的割裂感 */
 .studio-wide-canvas {
+  position: relative;
+  z-index: 1;
   max-width: min(1680px, 100%);
   margin-left: auto;
   margin-right: auto;
@@ -1352,10 +1367,16 @@ async function onGenerateVideo() {
   font-size: 15px;
   padding: 5px;
   margin: 0 auto 18px;
+  border-color: rgba(251, 191, 36, 0.34);
+  border-radius: 22px;
+  background:
+    linear-gradient(90deg, rgba(251, 191, 36, 0.12), rgba(236, 72, 153, 0.08)),
+    rgba(15, 23, 42, 0.68);
 }
 
 .studio-dh-strip {
   margin: 0 auto 18px;
+  border-radius: 26px;
 }
 
 .studio-dh-thumb {
@@ -1363,20 +1384,24 @@ async function onGenerateVideo() {
   height: 120px;
   max-width: 100%;
   object-fit: cover;
-  border-radius: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.4);
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  border-radius: 18px;
+  box-shadow:
+    0 18px 44px rgba(0, 0, 0, 0.34),
+    0 0 36px rgba(56, 189, 248, 0.16);
 }
 
 /* 未创建数字人时整区不可点；略提亮度避免在部分屏幕上像「白屏/内容消失」 */
 .studio-body--locked {
   pointer-events: none;
   user-select: none;
-  opacity: 0.78;
+  opacity: 0.72;
   filter: grayscale(0.12);
 }
 
 .page__content {
+  position: relative;
+  z-index: 1;
   max-width: 1080px;
   margin: 0 auto;
 }
@@ -1391,7 +1416,7 @@ async function onGenerateVideo() {
 .studio-workspace {
   display: grid;
   grid-template-columns: 1fr;
-  gap: 20px;
+  gap: 22px;
   align-items: start;
   width: 100%;
 }
@@ -1399,7 +1424,7 @@ async function onGenerateVideo() {
 @media (min-width: 1180px) {
   .studio-workspace {
     grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.88fr);
-    gap: 24px;
+    gap: 26px;
   }
 
   /* 仅做轻微吸顶，避免 max-height+overflow 在部分环境下造成布局/滚动异常；双栏已减少纵向长度 */
@@ -1420,6 +1445,59 @@ async function onGenerateVideo() {
   margin-top: 0;
 }
 
+.step-generate-card :deep(.n-card__content),
+.step-generate-card :deep(.n-card-content) {
+  color: #dbeafe;
+}
+
+.generate-card-stack {
+  width: 100%;
+}
+
+.generate-intro {
+  display: block;
+  padding: 14px 16px;
+  border: 1px solid rgba(168, 85, 247, 0.18);
+  border-radius: 18px;
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.85;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(236, 72, 153, 0.1), transparent 32%),
+    rgba(15, 23, 42, 0.46);
+}
+
+.generate-intro strong {
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+.segment-count-bar {
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.62), rgba(30, 12, 55, 0.46)),
+    rgba(15, 23, 42, 0.44);
+}
+
+.segment-count-bar :deep(.n-text--strong),
+.segment-toolbar :deep(.n-text--strong) {
+  color: #f8fafc;
+  letter-spacing: 0.02em;
+}
+
+.segment-editor {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(125, 211, 252, 0.14);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(56, 189, 248, 0.08), transparent 32%),
+    rgba(2, 6, 23, 0.24);
+}
+
 /* Hero 在宽屏时压缩纵向占位 */
 .home-hero-slot {
   max-width: min(1680px, 100%);
@@ -1431,11 +1509,30 @@ async function onGenerateVideo() {
   align-items: center;
   gap: 12px;
   width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.segment-toolbar {
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(56, 189, 248, 0.13), rgba(168, 85, 247, 0.1)),
+    rgba(15, 23, 42, 0.58);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 14px 34px rgba(2, 6, 23, 0.28);
 }
 
 .video-segment-label {
   flex: 0 0 52px;
+  color: #a5b4fc;
   font-size: 12px;
+  font-weight: 600;
 }
 
 .video-segment-input {
@@ -1458,10 +1555,11 @@ async function onGenerateVideo() {
 
 .dh-portrait-preview {
   margin-top: 10px;
-  border-radius: 12px;
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.35);
   max-width: 280px;
+  border: 1px solid rgba(125, 211, 252, 0.26);
+  border-radius: 18px;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.3);
 }
 
 .dh-portrait-preview img {
@@ -1477,13 +1575,18 @@ async function onGenerateVideo() {
 .video-preview {
   width: 100%;
   max-width: 420px;
-  border-radius: 10px;
+  border: 1px solid rgba(125, 211, 252, 0.26);
+  border-radius: 18px;
   background: #0f172a;
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
 }
 
 .meta-feature-card {
   margin-top: 4px;
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(56, 189, 248, 0.08), transparent 30%),
+    rgba(15, 23, 42, 0.48);
 }
 
 .meta-hint-line {
@@ -1500,11 +1603,12 @@ async function onGenerateVideo() {
 .meta-cover {
   width: 200px;
   max-width: 100%;
-  border-radius: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: 18px;
   object-fit: cover;
   aspect-ratio: 3 / 4;
   background: #0f172a;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.3);
 }
 
 .meta-readonly {
@@ -1519,8 +1623,12 @@ async function onGenerateVideo() {
 
 .script-block {
   margin-top: 4px;
-  padding-top: 16px;
-  border-top: 1px solid rgba(148, 163, 184, 0.25);
+  padding: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(168, 85, 247, 0.1), transparent 30%),
+    rgba(15, 23, 42, 0.4);
 }
 
 .script-textarea {
@@ -1528,9 +1636,48 @@ async function onGenerateVideo() {
 }
 
 .glass {
-  background: linear-gradient(145deg, rgba(15, 23, 42, 0.92), rgba(15, 23, 42, 0.72));
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(216, 180, 254, 0.22);
+  border-radius: 28px;
+  background:
+    linear-gradient(145deg, rgba(15, 23, 42, 0.86), rgba(30, 12, 55, 0.7)),
+    rgba(15, 23, 42, 0.8);
+  box-shadow:
+    0 30px 90px rgba(0, 0, 0, 0.48),
+    0 0 70px rgba(124, 58, 237, 0.16);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.page :deep(.n-card-header) {
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+.page :deep(.n-alert) {
+  border-radius: 18px;
+}
+
+.page :deep(.n-input),
+.page :deep(.n-input-number) {
+  --n-color: rgba(15, 23, 42, 0.72) !important;
+  --n-color-focus: rgba(15, 23, 42, 0.88) !important;
+  --n-border: 1px solid rgba(148, 163, 184, 0.22) !important;
+  --n-border-hover: 1px solid rgba(125, 211, 252, 0.55) !important;
+  --n-border-focus: 1px solid rgba(168, 85, 247, 0.7) !important;
+  --n-box-shadow-focus: 0 0 0 2px rgba(168, 85, 247, 0.18) !important;
+}
+
+.page :deep(.n-tag) {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.page :deep(.n-descriptions-table) {
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.page :deep(.n-descriptions-table-bordered) {
+  border-color: rgba(148, 163, 184, 0.22);
 }
 
 @media (max-width: 900px) {

@@ -16,7 +16,7 @@ const status = computed(() => (props.invalid ? 'error' : undefined))
     <div class="block__label">
       <n-text strong>短视频链接</n-text>
       <n-text class="block__hint" depth="3" style="font-size: 12px">
-        支持整段「复制链接」文案（含 v.douyin.com 短链）或纯 URL
+        支持整段「复制链接」文案（含 v.douyin.com 短链）仅抖音支持
       </n-text>
     </div>
     <n-input

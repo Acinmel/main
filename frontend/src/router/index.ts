@@ -3,7 +3,7 @@ import type { RouteRecordRaw } from 'vue-router'
 import { useDigitalHumanStore } from '@/stores/digitalHuman'
 import { useUserStore } from '@/stores/user'
 
-const PUBLIC_ROUTE_NAMES = new Set(['login', 'register'])
+const PUBLIC_ROUTE_NAMES = new Set(['landing', 'works', 'login', 'register'])
 
 const routes: RouteRecordRaw[] = [
   {
@@ -12,6 +12,12 @@ const routes: RouteRecordRaw[] = [
     children: [
       {
         path: '',
+        name: 'landing',
+        meta: { title: 'AI 口播视频生成工具' },
+        component: () => import('@/views/LandingView.vue'),
+      },
+      {
+        path: 'digital-human',
         name: 'home',
         meta: { title: '专属数字人' },
         component: () => import('@/views/digital-human/DigitalHumanSetupView.vue'),
@@ -104,9 +110,7 @@ const routes: RouteRecordRaw[] = [
         path: 'works',
         name: 'works',
         meta: {
-          title: '我的作品',
-          requiresDigitalHuman: true,
-          requiresActiveAccount: true,
+          title: '作品展示',
         },
         component: () => import('@/views/works/WorksListView.vue'),
       },

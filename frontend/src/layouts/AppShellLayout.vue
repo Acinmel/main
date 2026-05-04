@@ -1,22 +1,42 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
-import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { NAlert, NButton, NText } from 'naive-ui'
+import { useDigitalHumanStore } from '@/stores/digitalHuman'
+import { useTaskDraftStore } from '@/stores/taskDraft'
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
+const router = useRouter()
 const user = useUserStore()
+const draft = useTaskDraftStore()
+const digitalHuman = useDigitalHumanStore()
 
 const isPendingNonAdmin = computed(
   () => user.profile?.accountStatus === 'pending' && user.profile?.role !== 'admin',
 )
 
 const brandTo = computed(() =>
-  isPendingNonAdmin.value ? { name: 'account-pending' as const } : '/',
+  isPendingNonAdmin.value ? { name: 'account-pending' as const } : { name: 'landing' as const },
 )
 
-function logout() {
+async function clearBrowserCaches() {
+  sessionStorage.clear()
+  if (!('caches' in window)) return
+  const keys = await caches.keys()
+  await Promise.all(keys.map((key) => caches.delete(key)))
+}
+
+async function logout() {
+  draft.reset()
+  digitalHuman.clearLocalCache()
   user.clearSession()
+  try {
+    await clearBrowserCaches()
+  } catch {
+    // Cache API may be unavailable or blocked; session cleanup above is still enough to log out.
+  }
+  void router.replace({ name: 'landing' })
 }
 
 onMounted(() => {
@@ -40,9 +60,12 @@ onMounted(() => {
           <RouterLink :to="{ name: 'account-pending' }" class="shell__nav-link">账号审核</RouterLink>
         </template>
         <template v-else>
-          <RouterLink to="/" class="shell__nav-link">专属数字人</RouterLink>
-          <RouterLink to="/studio" class="shell__nav-link">口播制作</RouterLink>
-          <RouterLink to="/works">我的作品</RouterLink>
+          <RouterLink :to="{ name: 'landing' }" class="shell__nav-link">首页</RouterLink>
+          <RouterLink :to="{ name: 'works' }" class="shell__nav-link">作品展示</RouterLink>
+          <template v-if="user.isLoggedIn">
+            <RouterLink :to="{ name: 'home' }" class="shell__nav-link">专属数字人</RouterLink>
+            <RouterLink :to="{ name: 'studio' }" class="shell__nav-link">口播制作</RouterLink>
+          </template>
         </template>
         <template v-if="user.isLoggedIn">
           <n-button quaternary size="small" @click="logout">退出</n-button>
@@ -89,21 +112,38 @@ onMounted(() => {
 }
 
 .shell__header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 8px 12px;
-  padding: 14px 32px;
-  padding-top: max(14px, var(--app-safe-top, 0px));
+  gap: 10px 18px;
+  min-height: 64px;
+  padding: 12px 32px;
+  padding-top: max(12px, var(--app-safe-top, 0px));
   padding-left: max(32px, var(--app-safe-left, 0px));
   padding-right: max(32px, var(--app-safe-right, 0px));
-  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  position: sticky;
-  top: 0;
-  z-index: 100;
+  border-bottom: 1px solid rgba(216, 180, 254, 0.2);
+  background:
+    linear-gradient(90deg, rgba(236, 72, 153, 0.08), rgba(56, 189, 248, 0.08)),
+    rgba(5, 3, 13, 0.76);
+  box-shadow:
+    0 16px 42px rgba(0, 0, 0, 0.36),
+    inset 0 -1px 0 rgba(125, 211, 252, 0.08);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.shell__header::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  content: '';
+  background:
+    radial-gradient(circle at 12% 0%, rgba(168, 85, 247, 0.18), transparent 32%),
+    radial-gradient(circle at 86% 0%, rgba(56, 189, 248, 0.14), transparent 28%);
 }
 
 .shell__title-stack {
@@ -119,22 +159,42 @@ onMounted(() => {
   align-items: center;
   gap: 10px;
   min-width: 0;
+  position: relative;
+  z-index: 1;
+  color: #f8fafc;
+  text-decoration: none;
 }
 
 .shell__logo {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #38bdf8, #6366f1);
-  box-shadow: 0 0 18px rgba(56, 189, 248, 0.55);
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 30% 22%, rgba(255, 255, 255, 0.88), transparent 18%),
+    linear-gradient(135deg, #ec4899, #8b5cf6 52%, #38bdf8);
+  box-shadow:
+    0 0 22px rgba(56, 189, 248, 0.52),
+    0 0 34px rgba(236, 72, 153, 0.28);
+}
+
+.shell__title-stack :deep(> *:first-child) {
+  color: #f8fafc;
+  letter-spacing: 0.04em;
+}
+
+.shell__title-stack :deep(> *:last-child) {
+  color: #a5b4fc;
 }
 
 .shell__nav {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 8px 12px;
+  gap: 8px;
   font-size: 13px;
   color: #cbd5f5;
   max-width: 100%;
@@ -142,11 +202,32 @@ onMounted(() => {
 
 .shell__nav a {
   color: inherit;
+  text-decoration: none;
+}
+
+.shell__nav-link {
+  padding: 7px 11px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.shell__nav-link:hover {
+  color: #e0f2fe;
+  border-color: rgba(125, 211, 252, 0.28);
+  background: rgba(15, 23, 42, 0.56);
+  box-shadow: 0 0 22px rgba(56, 189, 248, 0.14);
 }
 
 .shell__nav-link.router-link-active {
-  color: #38bdf8;
+  color: #7dd3fc;
   font-weight: 600;
+  border-color: rgba(125, 211, 252, 0.38);
+  background: rgba(14, 165, 233, 0.12);
 }
 
 .shell__main {

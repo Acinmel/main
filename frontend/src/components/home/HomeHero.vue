@@ -16,14 +16,50 @@ import { NGradientText, NSpace, NTag, NText } from 'naive-ui'
 
 <style scoped>
 .hero {
-  padding: 28px 16px 10px;
-  text-align: center;
+  position: relative;
+  z-index: 1;
   width: 100%;
   box-sizing: border-box;
+  padding: 28px 16px 12px;
+  text-align: center;
+}
+
+.hero::before {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: min(760px, 90vw);
+  height: 150px;
+  pointer-events: none;
+  content: '';
+  background:
+    radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.18), transparent 38%),
+    radial-gradient(circle at 28% 26%, rgba(236, 72, 153, 0.14), transparent 32%),
+    radial-gradient(circle at 72% 20%, rgba(168, 85, 247, 0.14), transparent 30%);
+  filter: blur(2px);
+  transform: translateX(-50%);
+}
+
+.hero :deep(.n-space) {
+  position: relative;
+  z-index: 1;
+}
+
+.hero :deep(.n-tag) {
+  color: #e9d5ff;
+  border-color: rgba(168, 85, 247, 0.36);
+  background: rgba(168, 85, 247, 0.18);
+  box-shadow: 0 0 24px rgba(168, 85, 247, 0.25);
+}
+
+.hero :deep(.n-gradient-text) {
+  font-family: Sora, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  letter-spacing: 1px;
 }
 
 .hero__sub {
   max-width: 640px;
+  color: #cbd5e1;
   line-height: 1.7;
   margin: 0 auto;
   display: block;

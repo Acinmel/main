@@ -13,6 +13,10 @@ const STYLE_LABELS: Record<string, string> = {
   casual: '休闲版',
   taoist: '道士版',
   fashion: '时尚版',
+  lawyer: '律师版',
+  programmer: '程序员版',
+  finance: '财务版',
+  chef: '厨师版',
 }
 
 export const useDigitalHumanStore = defineStore('digitalHuman', () => {
@@ -68,6 +72,14 @@ export const useDigitalHumanStore = defineStore('digitalHuman', () => {
     revokePreview()
   }
 
+  function clearLocalCache() {
+    hasTemplate.value = false
+    styleId.value = null
+    loading.value = false
+    ready.value = false
+    revokePreview()
+  }
+
   /**
    * 网络长时间无响应时由路由守卫调用，避免 isReady 永久挂起导致整站白屏
    */
@@ -89,6 +101,7 @@ export const useDigitalHumanStore = defineStore('digitalHuman', () => {
     ready,
     refresh,
     remove,
+    clearLocalCache,
     revokePreview,
     markReadyFromTimeout,
   }
