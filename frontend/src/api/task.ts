@@ -8,7 +8,6 @@ import type {
   Transcript,
   TranscriptSegment,
   VideoMetaPreview,
-  WorkItem,
 } from '@/types/domain'
 
 /** 创建任务 */
@@ -103,6 +102,29 @@ export async function createArkI2vTask(body: {
     body,
     { timeout: 120_000 },
   )
+  return data
+}
+
+export interface AliLipSyncResponse {
+  videoUrl: string | null
+  providerResponse: unknown
+  hint?: string
+}
+
+/** 视频对口型：上传不超过 5 分钟的视频，后端代理调用阿里接口并返回成片地址 */
+export async function createAliLipSyncVideo(body: {
+  file: File
+  durationSeconds?: number
+}) {
+  const form = new FormData()
+  form.append('video', body.file)
+  if (body.durationSeconds !== undefined) {
+    form.append('durationSeconds', String(body.durationSeconds))
+  }
+  const { data } = await http.post<AliLipSyncResponse>('v1/tools/ali-lip-sync', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 900_000,
+  })
   return data
 }
 
@@ -338,20 +360,6 @@ export async function submitRender(
 
 export async function getTaskResult(taskId: string) {
   const { data } = await http.get<TaskResultPayload>(`v1/tasks/${taskId}/result`)
-  return data
-}
-
-export async function listWorks() {
-  const { data } = await http.get<{ items: WorkItem[] }>('v1/works')
-  return data.items
-}
-
-/** 更新作品标题、备注（PATCH user_works） */
-export async function patchWorkMeta(
-  workId: string,
-  body: { title?: string; content?: string },
-) {
-  const { data } = await http.patch<{ ok: true }>(`v1/works/${encodeURIComponent(workId)}`, body)
   return data
 }
 

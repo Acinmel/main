@@ -36,6 +36,7 @@ import {
   ArkI2vVideoService,
   type ArkI2vTaskSubmitBody,
 } from '../../integrations/ai/ark-i2v-video.service';
+import { AliLipSyncService } from '../../integrations/ai/ali-lip-sync.service';
 import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.service';
 import {
   FfmpegAudioService,
@@ -67,6 +68,14 @@ class SourceVideoFileDto {
    * 前端可随后调用 `transcribe-saved-video` 以展示分阶段进度。
    */
   transcribe?: boolean;
+}
+
+const LIP_SYNC_MAX_DURATION_SECONDS = 5 * 60;
+
+function getLipSyncVideoMaxBytes(): number {
+  const v = process.env.ALI_LIP_SYNC_VIDEO_MAX_BYTES?.trim();
+  if (v && /^\d+$/.test(v)) return parseInt(v, 10);
+  return 300 * 1024 * 1024;
 }
 
 /** 默认 Windows：C:\\downloadVideo；其它系统：用户目录下 downloadVideo。可用 VIDEO_SAVE_DIR 覆盖。 */
@@ -149,6 +158,7 @@ export class ToolsController {
     private readonly digitalHumanPersistence: DigitalHumanPersistenceService,
     private readonly seedanceI2v: SeedanceI2vService,
     private readonly arkI2vVideo: ArkI2vVideoService,
+    private readonly aliLipSync: AliLipSyncService,
   ) {}
 
   /**
@@ -265,6 +275,50 @@ export class ToolsController {
   @Post('ark-i2v-task')
   async arkI2vTask(@Body() body: ArkI2vTaskSubmitBody) {
     return this.arkI2vVideo.createTask(body);
+  }
+
+  /**
+   * 视频对口型：前端上传单个视频，后端代理调用阿里接口并返回处理后视频 URL。
+   */
+  @Post('ali-lip-sync')
+  @UseInterceptors(
+    FileInterceptor('video', {
+      limits: { fileSize: getLipSyncVideoMaxBytes() },
+    }),
+  )
+  async aliLipSyncVideo(
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body('durationSeconds') durationSecondsRaw?: string,
+  ) {
+    if (!file?.buffer?.length) {
+      throw new BadRequestException('请上传视频文件（multipart 字段名：video）');
+    }
+
+    const mime = (file.mimetype || '').toLowerCase();
+    const name = file.originalname || '';
+    if (!mime.startsWith('video/') && !/\.(mp4|mov|webm|m4v|mkv)$/i.test(name)) {
+      throw new BadRequestException('仅支持上传视频文件');
+    }
+
+    const durationSeconds =
+      durationSecondsRaw !== undefined && durationSecondsRaw !== ''
+        ? Number(durationSecondsRaw)
+        : undefined;
+    if (durationSeconds !== undefined) {
+      if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+        throw new BadRequestException('视频时长无效');
+      }
+      if (durationSeconds > LIP_SYNC_MAX_DURATION_SECONDS) {
+        throw new BadRequestException('视频长度不能超过 5 分钟');
+      }
+    }
+
+    return this.aliLipSync.submitVideo({
+      buffer: file.buffer,
+      filename: file.originalname,
+      mimeType: file.mimetype,
+      durationSeconds,
+    });
   }
 
   /** 数字人风格列表（id + 中文名；具体提示词仅服务端在调用时使用） */

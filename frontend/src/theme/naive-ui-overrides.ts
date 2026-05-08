@@ -4,6 +4,28 @@ import type { GlobalThemeOverrides } from 'naive-ui'
  * 顶部提示（Message）：更大占位、更易读、轻拟物层次。
  */
 export const appThemeOverrides: GlobalThemeOverrides = {
+  common: {
+    primaryColor: '#16f28b',
+    primaryColorHover: '#5cffb3',
+    primaryColorPressed: '#00d26a',
+    primaryColorSuppl: '#16f28b',
+    infoColor: '#16f28b',
+    infoColorHover: '#5cffb3',
+    infoColorPressed: '#00d26a',
+    bodyColor: '#020605',
+    cardColor: 'rgba(6, 20, 15, 0.92)',
+    modalColor: '#06110d',
+    popoverColor: '#06110d',
+    tableColor: 'rgba(6, 20, 15, 0.86)',
+    textColorBase: '#f2fff8',
+    textColor1: '#f2fff8',
+    textColor2: '#86a59a',
+    textColor3: '#4f6f64',
+    borderColor: 'rgba(34, 197, 94, 0.22)',
+    dividerColor: 'rgba(34, 197, 94, 0.2)',
+    inputColor: 'rgba(0, 0, 0, 0.22)',
+    hoverColor: 'rgba(22, 242, 139, 0.08)',
+  },
   Message: {
     margin: '0 0 16px 0',
     padding: '20px 32px',
@@ -17,19 +39,13 @@ export const appThemeOverrides: GlobalThemeOverrides = {
     closeSize: '24px',
     closeIconSize: '18px',
     closeMargin: '0 0 0 16px',
-    border: '1px solid rgba(148, 163, 184, 0.28)',
-    boxShadow:
-      '0 24px 56px rgba(0, 0, 0, 0.58), 0 0 0 1px rgba(255, 255, 255, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
-    boxShadowInfo:
-      '0 24px 56px rgba(14, 165, 233, 0.32), 0 0 0 1px rgba(56, 189, 248, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.1)',
-    boxShadowSuccess:
-      '0 24px 56px rgba(34, 197, 94, 0.3), 0 0 0 1px rgba(74, 222, 128, 0.42), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
-    boxShadowWarning:
-      '0 24px 56px rgba(234, 179, 8, 0.28), 0 0 0 1px rgba(250, 204, 21, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
-    boxShadowError:
-      '0 24px 56px rgba(239, 68, 68, 0.32), 0 0 0 1px rgba(248, 113, 113, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08)',
-    boxShadowLoading:
-      '0 24px 56px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(148, 163, 184, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.06)',
+    border: '1px solid rgba(34, 197, 94, 0.24)',
+    boxShadow: '0 18px 44px rgba(0, 0, 0, 0.34)',
+    boxShadowInfo: '0 18px 44px rgba(22, 242, 139, 0.14)',
+    boxShadowSuccess: '0 12px 40px rgba(34, 197, 94, 0.12)',
+    boxShadowWarning: '0 12px 40px rgba(234, 179, 8, 0.14)',
+    boxShadowError: '0 12px 40px rgba(239, 68, 68, 0.14)',
+    boxShadowLoading: '0 18px 44px rgba(0, 0, 0, 0.34)',
   },
   Alert: {
     padding: '22px 26px',

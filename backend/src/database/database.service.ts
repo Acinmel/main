@@ -141,6 +141,50 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       );
       CREATE INDEX IF NOT EXISTS idx_user_works_user ON user_works(user_id);
 
+      CREATE TABLE IF NOT EXISTS avatar_resources (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT,
+        name TEXT NOT NULL,
+        is_recommended INTEGER NOT NULL DEFAULT 0,
+        cover_url TEXT,
+        source_video_url TEXT,
+        style_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_avatar_resources_user ON avatar_resources(user_id);
+      CREATE INDEX IF NOT EXISTS idx_avatar_resources_updated ON avatar_resources(updated_at, id);
+
+      CREATE TABLE IF NOT EXISTS voice_resources (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT,
+        name TEXT NOT NULL,
+        is_recommended INTEGER NOT NULL DEFAULT 0,
+        audio_url TEXT,
+        clone_status TEXT NOT NULL DEFAULT 'ready',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_voice_resources_user ON voice_resources(user_id);
+      CREATE INDEX IF NOT EXISTS idx_voice_resources_updated ON voice_resources(updated_at, id);
+
+      CREATE TABLE IF NOT EXISTS subtitle_template_resources (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT,
+        name TEXT NOT NULL,
+        is_recommended INTEGER NOT NULL DEFAULT 0,
+        cover_url TEXT,
+        preview_url TEXT,
+        style_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_subtitle_template_resources_user ON subtitle_template_resources(user_id);
+      CREATE INDEX IF NOT EXISTS idx_subtitle_template_resources_updated ON subtitle_template_resources(updated_at, id);
+
       CREATE TABLE IF NOT EXISTS audit_logs (
         id TEXT PRIMARY KEY NOT NULL,
         user_id TEXT NOT NULL,
@@ -207,6 +251,53 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         updated_at VARCHAR(64) NOT NULL,
         INDEX idx_user_works_user (user_id),
         CONSTRAINT fk_user_works_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS avatar_resources (
+        id VARCHAR(36) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NULL,
+        name VARCHAR(255) NOT NULL,
+        is_recommended TINYINT NOT NULL DEFAULT 0,
+        cover_url VARCHAR(2048) NULL,
+        source_video_url VARCHAR(2048) NULL,
+        style_id VARCHAR(128) NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_avatar_resources_user (user_id),
+        INDEX idx_avatar_resources_updated (updated_at, id),
+        CONSTRAINT fk_avatar_resources_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS voice_resources (
+        id VARCHAR(36) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NULL,
+        name VARCHAR(255) NOT NULL,
+        is_recommended TINYINT NOT NULL DEFAULT 0,
+        audio_url VARCHAR(2048) NULL,
+        clone_status VARCHAR(32) NOT NULL DEFAULT 'ready',
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_voice_resources_user (user_id),
+        INDEX idx_voice_resources_updated (updated_at, id),
+        CONSTRAINT fk_voice_resources_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS subtitle_template_resources (
+        id VARCHAR(36) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NULL,
+        name VARCHAR(255) NOT NULL,
+        is_recommended TINYINT NOT NULL DEFAULT 0,
+        cover_url VARCHAR(2048) NULL,
+        preview_url VARCHAR(2048) NULL,
+        style_json LONGTEXT NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_subtitle_template_resources_user (user_id),
+        INDEX idx_subtitle_template_resources_updated (updated_at, id),
+        CONSTRAINT fk_subtitle_template_resources_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
   }

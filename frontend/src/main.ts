@@ -26,7 +26,7 @@ app.use(naive)
 function showFatalMessage(text: string) {
   const el = document.getElementById('app')
   if (el) {
-    el.innerHTML = `<div style="padding:24px;font-family:system-ui,sans-serif;background:#020617;color:#fecaca;min-height:100vh;white-space:pre-wrap;word-break:break-all">${text}</div>`
+    el.innerHTML = `<div style="padding:24px;font-family:Inter,Geist,'SF Pro Display','Alibaba PuHuiTi','HarmonyOS Sans','Source Han Sans SC',sans-serif;background:#ffffff;color:#991b1b;min-height:100vh;white-space:pre-wrap;word-break:break-all">${text}</div>`
   }
 }
 

@@ -90,16 +90,6 @@ export interface TaskResultPayload {
   scriptUrl: string | null
 }
 
-/** 我的作品列表项（与后端 TaskSummaryDto 对齐） */
-export interface WorkItem {
-  id: string
-  status: TaskStatus
-  title: string
-  sourceVideoUrl: string
-  createdAt: string
-  updatedAt: string
-}
-
 /** 视频页元信息（与后端 VideoMetaDto 对齐，来自 HTML 抓取而非 AI） */
 export type VideoPlatform = 'douyin' | 'unknown'
 

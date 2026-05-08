@@ -1337,9 +1337,9 @@ async function onGenerateVideo() {
   box-sizing: border-box;
   color: inherit;
   background:
-    radial-gradient(circle at 12% 4%, rgba(168, 85, 247, 0.2), transparent 28%),
-    radial-gradient(circle at 86% 12%, rgba(56, 189, 248, 0.16), transparent 26%),
-    radial-gradient(circle at 70% 70%, rgba(236, 72, 153, 0.12), transparent 28%);
+    radial-gradient(circle at 12% 4%, rgba(22, 242, 139, 0.12), transparent 28%),
+    radial-gradient(circle at 86% 12%, rgba(0, 210, 106, 0.1), transparent 26%),
+    linear-gradient(135deg, #000302 0%, var(--bg-main) 42%, #000000 100%);
 }
 
 .page::before {
@@ -1370,8 +1370,8 @@ async function onGenerateVideo() {
   border-color: rgba(251, 191, 36, 0.34);
   border-radius: 22px;
   background:
-    linear-gradient(90deg, rgba(251, 191, 36, 0.12), rgba(236, 72, 153, 0.08)),
-    rgba(15, 23, 42, 0.68);
+    linear-gradient(90deg, rgba(251, 191, 36, 0.12), rgba(22, 242, 139, 0.06)),
+    var(--bg-card);
 }
 
 .studio-dh-strip {
@@ -1384,11 +1384,9 @@ async function onGenerateVideo() {
   height: 120px;
   max-width: 100%;
   object-fit: cover;
-  border: 1px solid rgba(125, 211, 252, 0.28);
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
-  box-shadow:
-    0 18px 44px rgba(0, 0, 0, 0.34),
-    0 0 36px rgba(56, 189, 248, 0.16);
+  box-shadow: var(--shadow-soft);
 }
 
 /* 未创建数字人时整区不可点；略提亮度避免在部分屏幕上像「白屏/内容消失」 */
@@ -1447,7 +1445,7 @@ async function onGenerateVideo() {
 
 .step-generate-card :deep(.n-card__content),
 .step-generate-card :deep(.n-card-content) {
-  color: #dbeafe;
+  color: var(--text-main);
 }
 
 .generate-card-stack {
@@ -1457,45 +1455,45 @@ async function onGenerateVideo() {
 .generate-intro {
   display: block;
   padding: 14px 16px;
-  border: 1px solid rgba(168, 85, 247, 0.18);
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
-  color: #cbd5e1;
+  color: var(--text-sub);
   font-size: 13px;
   line-height: 1.85;
   background:
-    radial-gradient(circle at 100% 0%, rgba(236, 72, 153, 0.1), transparent 32%),
-    rgba(15, 23, 42, 0.46);
+    radial-gradient(circle at 100% 0%, rgba(22, 242, 139, 0.08), transparent 32%),
+    var(--bg-soft);
 }
 
 .generate-intro strong {
-  color: #f8fafc;
+  color: var(--text-main);
   font-weight: 700;
 }
 
 .segment-count-bar {
   flex-wrap: wrap;
   padding: 12px 14px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
   background:
-    linear-gradient(135deg, rgba(15, 23, 42, 0.62), rgba(30, 12, 55, 0.46)),
-    rgba(15, 23, 42, 0.44);
+    linear-gradient(135deg, rgba(22, 242, 139, 0.06), rgba(0, 210, 106, 0.04)),
+    var(--bg-soft);
 }
 
 .segment-count-bar :deep(.n-text--strong),
 .segment-toolbar :deep(.n-text--strong) {
-  color: #f8fafc;
+  color: var(--text-main);
   letter-spacing: 0.02em;
 }
 
 .segment-editor {
   width: 100%;
   padding: 12px;
-  border: 1px solid rgba(125, 211, 252, 0.14);
+  border: 1px solid var(--border-soft);
   border-radius: 22px;
   background:
-    radial-gradient(circle at 0% 0%, rgba(56, 189, 248, 0.08), transparent 32%),
-    rgba(2, 6, 23, 0.24);
+    radial-gradient(circle at 0% 0%, rgba(22, 242, 139, 0.08), transparent 32%),
+    var(--bg-card);
 }
 
 /* Hero 在宽屏时压缩纵向占位 */
@@ -1510,27 +1508,25 @@ async function onGenerateVideo() {
   gap: 12px;
   width: 100%;
   padding: 10px 12px;
-  border: 1px solid rgba(148, 163, 184, 0.12);
+  border: 1px solid var(--border-soft);
   border-radius: 16px;
-  background: rgba(15, 23, 42, 0.36);
+  background: var(--bg-card);
 }
 
 .segment-toolbar {
   flex-wrap: wrap;
   padding: 12px 14px;
-  border: 1px solid rgba(125, 211, 252, 0.24);
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
   background:
-    linear-gradient(135deg, rgba(56, 189, 248, 0.13), rgba(168, 85, 247, 0.1)),
-    rgba(15, 23, 42, 0.58);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 14px 34px rgba(2, 6, 23, 0.28);
+    linear-gradient(135deg, rgba(22, 242, 139, 0.08), rgba(0, 210, 106, 0.06)),
+    var(--bg-card);
+  box-shadow: var(--shadow-soft);
 }
 
 .video-segment-label {
   flex: 0 0 52px;
-  color: #a5b4fc;
+  color: var(--accent-blue);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1542,7 +1538,7 @@ async function onGenerateVideo() {
 
 .video-segment-result {
   padding: 10px 0;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .video-segment-result:last-child {
@@ -1557,9 +1553,9 @@ async function onGenerateVideo() {
   margin-top: 10px;
   overflow: hidden;
   max-width: 280px;
-  border: 1px solid rgba(125, 211, 252, 0.26);
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-soft);
 }
 
 .dh-portrait-preview img {
@@ -1575,18 +1571,18 @@ async function onGenerateVideo() {
 .video-preview {
   width: 100%;
   max-width: 420px;
-  border: 1px solid rgba(125, 211, 252, 0.26);
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
-  background: #0f172a;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+  background: var(--bg-soft);
+  box-shadow: var(--shadow-soft);
 }
 
 .meta-feature-card {
   margin-top: 4px;
   border-radius: 20px;
   background:
-    radial-gradient(circle at 100% 0%, rgba(56, 189, 248, 0.08), transparent 30%),
-    rgba(15, 23, 42, 0.48);
+    radial-gradient(circle at 100% 0%, rgba(22, 242, 139, 0.08), transparent 30%),
+    var(--bg-soft);
 }
 
 .meta-hint-line {
@@ -1603,12 +1599,12 @@ async function onGenerateVideo() {
 .meta-cover {
   width: 200px;
   max-width: 100%;
-  border: 1px solid rgba(125, 211, 252, 0.24);
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
   object-fit: cover;
   aspect-ratio: 3 / 4;
-  background: #0f172a;
-  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.3);
+  background: var(--bg-soft);
+  box-shadow: var(--shadow-soft);
 }
 
 .meta-readonly {
@@ -1616,7 +1612,7 @@ async function onGenerateVideo() {
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
-  color: #cbd5f5;
+  color: var(--text-sub);
   max-height: 220px;
   overflow-y: auto;
 }
@@ -1624,11 +1620,11 @@ async function onGenerateVideo() {
 .script-block {
   margin-top: 4px;
   padding: 16px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--border-soft);
   border-radius: 22px;
   background:
-    radial-gradient(circle at 100% 0%, rgba(168, 85, 247, 0.1), transparent 30%),
-    rgba(15, 23, 42, 0.4);
+    radial-gradient(circle at 100% 0%, rgba(22, 242, 139, 0.08), transparent 30%),
+    var(--bg-soft);
 }
 
 .script-textarea {
@@ -1636,20 +1632,31 @@ async function onGenerateVideo() {
 }
 
 .glass {
-  border: 1px solid rgba(216, 180, 254, 0.22);
+  border: 1px solid var(--border-soft);
   border-radius: 28px;
-  background:
-    linear-gradient(145deg, rgba(15, 23, 42, 0.86), rgba(30, 12, 55, 0.7)),
-    rgba(15, 23, 42, 0.8);
+  background: linear-gradient(180deg, rgba(8, 28, 21, 0.78), rgba(2, 10, 7, 0.86));
   box-shadow:
-    0 30px 90px rgba(0, 0, 0, 0.48),
-    0 0 70px rgba(124, 58, 237, 0.16);
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    var(--shadow-soft);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
+  transition:
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform var(--transition-smooth);
+}
+
+.glass:hover {
+  border-color: var(--border-strong);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 18px 44px rgba(0, 0, 0, 0.38),
+    0 0 30px rgba(22, 242, 139, 0.12);
+  transform: translateY(-3px);
 }
 
 .page :deep(.n-card-header) {
-  color: #f8fafc;
+  color: var(--text-main);
   font-weight: 700;
 }
 
@@ -1659,12 +1666,12 @@ async function onGenerateVideo() {
 
 .page :deep(.n-input),
 .page :deep(.n-input-number) {
-  --n-color: rgba(15, 23, 42, 0.72) !important;
-  --n-color-focus: rgba(15, 23, 42, 0.88) !important;
-  --n-border: 1px solid rgba(148, 163, 184, 0.22) !important;
-  --n-border-hover: 1px solid rgba(125, 211, 252, 0.55) !important;
-  --n-border-focus: 1px solid rgba(168, 85, 247, 0.7) !important;
-  --n-box-shadow-focus: 0 0 0 2px rgba(168, 85, 247, 0.18) !important;
+  --n-color: var(--bg-card) !important;
+  --n-color-focus: var(--bg-card) !important;
+  --n-border: 1px solid var(--border-soft) !important;
+  --n-border-hover: 1px solid var(--border-strong) !important;
+  --n-border-focus: 1px solid var(--primary) !important;
+  --n-box-shadow-focus: 0 0 0 2px rgba(22, 242, 139, 0.14) !important;
 }
 
 .page :deep(.n-tag) {
@@ -1673,11 +1680,11 @@ async function onGenerateVideo() {
 }
 
 .page :deep(.n-descriptions-table) {
-  background: rgba(15, 23, 42, 0.42);
+  background: var(--bg-card);
 }
 
 .page :deep(.n-descriptions-table-bordered) {
-  border-color: rgba(148, 163, 184, 0.22);
+  border-color: var(--border-soft);
 }
 
 @media (max-width: 900px) {

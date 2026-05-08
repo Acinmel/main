@@ -33,9 +33,9 @@ import { NGradientText, NSpace, NTag, NText } from 'naive-ui'
   pointer-events: none;
   content: '';
   background:
-    radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.18), transparent 38%),
-    radial-gradient(circle at 28% 26%, rgba(236, 72, 153, 0.14), transparent 32%),
-    radial-gradient(circle at 72% 20%, rgba(168, 85, 247, 0.14), transparent 30%);
+    radial-gradient(circle at 50% 0%, rgba(22, 242, 139, 0.14), transparent 38%),
+    radial-gradient(circle at 28% 26%, rgba(0, 210, 106, 0.1), transparent 32%),
+    radial-gradient(circle at 72% 20%, rgba(22, 242, 139, 0.08), transparent 30%);
   filter: blur(2px);
   transform: translateX(-50%);
 }
@@ -46,20 +46,20 @@ import { NGradientText, NSpace, NTag, NText } from 'naive-ui'
 }
 
 .hero :deep(.n-tag) {
-  color: #e9d5ff;
-  border-color: rgba(168, 85, 247, 0.36);
-  background: rgba(168, 85, 247, 0.18);
-  box-shadow: 0 0 24px rgba(168, 85, 247, 0.25);
+  color: var(--primary);
+  border-color: rgba(22, 242, 139, 0.22);
+  background: rgba(22, 242, 139, 0.08);
+  box-shadow: 0 0 22px rgba(22, 242, 139, 0.12);
 }
 
 .hero :deep(.n-gradient-text) {
-  font-family: Sora, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  font-family: var(--font-display);
   letter-spacing: 1px;
 }
 
 .hero__sub {
   max-width: 640px;
-  color: #cbd5e1;
+  color: var(--text-sub);
   line-height: 1.7;
   margin: 0 auto;
   display: block;

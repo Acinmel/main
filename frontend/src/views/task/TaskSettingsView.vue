@@ -13,6 +13,7 @@ import {
 } from 'naive-ui'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { listSubtitleTemplateResources, listVoiceResources } from '@/api/resources'
 import { getTask, submitRender } from '@/api/task'
 import { useTaskDraftStore } from '@/stores/taskDraft'
 import type { AspectRatio, RenderMode, TaskDetail } from '@/types/domain'
@@ -38,21 +39,48 @@ const modeOptions = [
   { label: '纯字幕快剪版', value: 'subtitle_fast' as RenderMode },
 ]
 
-const voiceOptions = [
+const fallbackVoiceOptions = [
   { label: '中性女声', value: 'neutral_female' },
   { label: '磁性男声', value: 'magnetic_male' },
   { label: '轻快解说', value: 'bright_narration' },
 ]
 
-const subtitleOptions = [
+const fallbackSubtitleOptions = [
   { label: '极简白字', value: 'minimal_white' },
   { label: '高对比黄字', value: 'high_contrast_yellow' },
   { label: '新闻字幕条', value: 'news_bar' },
 ]
 
+const voiceOptions = ref([...fallbackVoiceOptions])
+const subtitleOptions = ref([...fallbackSubtitleOptions])
+
+async function loadResourceOptions() {
+  try {
+    const [voices, subtitles] = await Promise.all([
+      listVoiceResources({ scope: 'all', limit: 40 }),
+      listSubtitleTemplateResources({ scope: 'all', limit: 40 }),
+    ])
+    if (voices.items.length) {
+      voiceOptions.value = voices.items.map((item) => ({ label: item.name, value: item.id }))
+      if (!voiceOptions.value.some((item) => item.value === voiceStyleId.value)) {
+        voiceStyleId.value = voiceOptions.value[0].value
+      }
+    }
+    if (subtitles.items.length) {
+      subtitleOptions.value = subtitles.items.map((item) => ({ label: item.name, value: item.id }))
+      if (!subtitleOptions.value.some((item) => item.value === subtitleStyleId.value)) {
+        subtitleStyleId.value = subtitleOptions.value[0].value
+      }
+    }
+  } catch {
+    voiceOptions.value = [...fallbackVoiceOptions]
+    subtitleOptions.value = [...fallbackSubtitleOptions]
+  }
+}
+
 onMounted(async () => {
   try {
-    const t = await getTask(taskId)
+    const [t] = await Promise.all([getTask(taskId), loadResourceOptions()])
     task.value = t
     if (!t.rewrite) {
       message.warning('请先完成改写后再进入本页')

@@ -15,6 +15,7 @@ import { JwtAuthGuard } from './modules/auth/jwt-auth.guard';
 import { AuditModule } from './modules/audit/audit.module';
 import { AdminModule } from './modules/admin/admin.module';
 import { AccountActiveGuard } from './modules/governance/account-active.guard';
+import { ResourcesModule } from './modules/resources/resources.module';
 
 const inDocker = existsSync('/.dockerenv');
 const rootEnvPath = join(__dirname, '..', '..', '.env');
@@ -39,6 +40,7 @@ const envFilePath = [
     AuditModule,
     AuthModule,
     AdminModule,
+    ResourcesModule,
     TasksModule,
     ToolsModule,
     WorksModule,

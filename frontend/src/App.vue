@@ -3,15 +3,11 @@ import {
   NConfigProvider,
   NDialogProvider,
   NMessageProvider,
-  darkTheme,
   zhCN,
   dateZhCN,
 } from 'naive-ui'
-import { computed, onErrorCaptured, ref } from 'vue'
+import { onErrorCaptured, ref } from 'vue'
 import { appThemeOverrides } from '@/theme/naive-ui-overrides'
-
-/** 全局深色主题，偏工具/科技感 */
-const theme = computed(() => darkTheme)
 
 const childError = ref<string | null>(null)
 onErrorCaptured((err) => {
@@ -28,7 +24,6 @@ onErrorCaptured((err) => {
   </div>
   <n-config-provider
     v-else
-    :theme="theme"
     :locale="zhCN"
     :date-locale="dateZhCN"
     :theme-overrides="appThemeOverrides"
@@ -55,16 +50,16 @@ onErrorCaptured((err) => {
 <style scoped>
 .app-fatal {
   padding: 24px;
-  color: #fecaca;
-  background: #020617;
+  color: #991b1b;
+  background: var(--bg-main);
   min-height: 100vh;
-  font: 15px/1.6 system-ui, sans-serif;
+  font: 15px/1.6 var(--font-sans);
   box-sizing: border-box;
 }
 .app-fatal__pre {
   margin-top: 12px;
   padding: 12px;
-  background: #0f172a;
+  background: var(--bg-soft);
   border-radius: 8px;
   overflow: auto;
   font-size: 13px;

@@ -3,7 +3,7 @@ import { NAlert, NSpace, NText } from 'naive-ui'
 </script>
 
 <template>
-  <n-alert type="default" :bordered="false" style="background: rgba(15, 23, 42, 0.9)">
+  <n-alert type="default" :bordered="false" style="background: var(--bg-soft)">
     <n-space vertical :size="6">
       <n-text strong>照片要求（上传前请自查）</n-text>
       <ul class="guide-list">
@@ -23,7 +23,7 @@ import { NAlert, NSpace, NText } from 'naive-ui'
 .guide-list {
   margin: 0;
   padding-left: 18px;
-  color: #cbd5f5;
+  color: var(--text-sub);
   font-size: 13px;
   line-height: 1.7;
 }

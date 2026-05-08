@@ -3,7 +3,7 @@ import type { RouteRecordRaw } from 'vue-router'
 import { useDigitalHumanStore } from '@/stores/digitalHuman'
 import { useUserStore } from '@/stores/user'
 
-const PUBLIC_ROUTE_NAMES = new Set(['landing', 'works', 'login', 'register'])
+const PUBLIC_ROUTE_NAMES = new Set(['landing', 'login', 'register'])
 
 const routes: RouteRecordRaw[] = [
   {
@@ -23,10 +23,43 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/digital-human/DigitalHumanSetupView.vue'),
       },
       {
+        path: 'resources',
+        name: 'resource-library',
+        meta: { title: '资源库', requiresActiveAccount: true },
+        component: () => import('@/views/resources/ResourceLibraryView.vue'),
+      },
+      {
+        path: 'exclusive-voice',
+        name: 'exclusive-voice',
+        meta: { title: '专属声音', requiresActiveAccount: true },
+        component: () => import('@/views/voice/ExclusiveVoiceView.vue'),
+      },
+      {
+        path: 'resources/avatars',
+        name: 'avatar-library',
+        redirect: { name: 'resource-library' },
+      },
+      {
+        path: 'resources/voices',
+        name: 'voice-library',
+        redirect: { name: 'resource-library' },
+      },
+      {
+        path: 'resources/subtitle-templates',
+        name: 'subtitle-template-library',
+        redirect: { name: 'resource-library' },
+      },
+      {
         path: 'studio',
         name: 'studio',
-        meta: { title: '口播制作', requiresActiveAccount: true },
-        component: () => import('@/views/HomeView.vue'),
+        meta: { title: '视频创作', requiresActiveAccount: true },
+        component: () => import('@/views/CreativeStudioView.vue'),
+      },
+      {
+        path: 'lip-sync',
+        name: 'lip-sync',
+        meta: { title: '视频对口型', requiresActiveAccount: true },
+        redirect: { name: 'studio', query: { tab: 'lip-sync' } },
       },
       {
         path: 'login',
@@ -105,14 +138,6 @@ const routes: RouteRecordRaw[] = [
           requiresActiveAccount: true,
         },
         component: () => import('@/views/task/TaskResultView.vue'),
-      },
-      {
-        path: 'works',
-        name: 'works',
-        meta: {
-          title: '作品展示',
-        },
-        component: () => import('@/views/works/WorksListView.vue'),
       },
     ],
   },
