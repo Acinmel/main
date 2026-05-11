@@ -1,13 +1,32 @@
 <script setup lang="ts">
 import { NTabPane, NTabs } from 'naive-ui'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import AvatarLibraryView from '@/views/resources/AvatarLibraryView.vue'
 import SubtitleTemplateLibraryView from '@/views/resources/SubtitleTemplateLibraryView.vue'
 import VoiceLibraryView from '@/views/resources/VoiceLibraryView.vue'
 
 type ResourceTab = 'avatars' | 'voices' | 'subtitle-templates'
 
+const route = useRoute()
+const router = useRouter()
 const activeTab = ref<ResourceTab>('avatars')
+
+function normalizeTab(value: unknown): ResourceTab {
+  return value === 'voices' || value === 'subtitle-templates' ? value : 'avatars'
+}
+
+watch(
+  () => route.query.tab,
+  (value) => {
+    activeTab.value = normalizeTab(value)
+  },
+  { immediate: true },
+)
+
+watch(activeTab, (value) => {
+  void router.replace({ query: { ...route.query, tab: value } })
+})
 </script>
 
 <template>
@@ -36,8 +55,8 @@ const activeTab = ref<ResourceTab>('avatars')
   width: 100%;
   min-height: 100dvh;
   background:
-    radial-gradient(circle at 86% 12%, rgba(0, 210, 106, 0.12), transparent 28%),
-    linear-gradient(135deg, #000302 0%, var(--bg-main) 42%, #000000 100%);
+    radial-gradient(circle at 88% 10%, rgba(75, 107, 255, 0.1), transparent 22%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 28%);
 }
 
 .resource-library__tabs :deep(.n-tabs-nav) {
@@ -45,7 +64,12 @@ const activeTab = ref<ResourceTab>('avatars')
   top: 0;
   z-index: 10;
   padding: 20px 28px 0;
-  background: linear-gradient(180deg, rgba(2, 6, 5, 0.96) 0%, rgba(2, 6, 5, 0.88) 78%, transparent 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(244, 247, 251, 0.96) 0%,
+    rgba(244, 247, 251, 0.82) 78%,
+    transparent 100%
+  );
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
@@ -53,11 +77,9 @@ const activeTab = ref<ResourceTab>('avatars')
 .resource-library__tabs :deep(.n-tabs-rail) {
   max-width: 560px;
   padding: 5px;
-  border: 1px solid var(--border-soft);
-  background: linear-gradient(180deg, rgba(8, 28, 21, 0.78), rgba(2, 10, 7, 0.86));
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    var(--shadow-soft);
+  border: 1px solid rgba(255, 255, 255, 0.56);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(246, 249, 255, 0.8));
+  box-shadow: var(--shadow-soft);
 }
 
 .resource-library__tabs :deep(.n-tabs-tab) {
@@ -70,9 +92,9 @@ const activeTab = ref<ResourceTab>('avatars')
 }
 
 .resource-library__tabs :deep(.n-tabs-tab--active) {
-  color: #02110a;
-  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
-  box-shadow: 0 10px 26px rgba(22, 242, 139, 0.16);
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  box-shadow: var(--shadow-glow);
 }
 
 .resource-library__tabs :deep(.n-tab-pane) {

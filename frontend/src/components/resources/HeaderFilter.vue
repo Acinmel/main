@@ -67,12 +67,10 @@ const search = computed({
   gap: 16px;
   margin-bottom: 18px;
   padding: 18px;
-  border: 1px solid var(--border-soft);
+  border: 1px solid rgba(255, 255, 255, 0.56);
   border-radius: 24px;
-  background: linear-gradient(180deg, rgba(8, 28, 21, 0.78), rgba(2, 10, 7, 0.86));
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    var(--shadow-soft);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(246, 249, 255, 0.8));
+  box-shadow: var(--shadow-soft);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
@@ -89,8 +87,8 @@ const search = computed({
 }
 
 .resource-header :deep(.n-radio-group .n-radio-button) {
-  border-color: rgba(22, 242, 139, 0.18);
-  background: rgba(0, 0, 0, 0.18);
+  border-color: rgba(121, 144, 184, 0.18);
+  background: rgba(255, 255, 255, 0.56);
 }
 
 .resource-header :deep(.n-radio-button:hover) {
@@ -100,9 +98,9 @@ const search = computed({
 }
 
 .resource-header :deep(.n-radio-button.n-radio-button--checked) {
-  color: #02110a;
-  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
-  box-shadow: 0 10px 24px rgba(22, 242, 139, 0.14);
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  box-shadow: var(--shadow-glow);
 }
 
 @media (max-width: 760px) {

@@ -1,10 +1,79 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 export interface AliLipSyncResult {
   videoUrl: string | null;
   providerResponse: unknown;
   hint?: string;
+}
+
+type LipSyncProvider = 'aliyun-videoretalk' | 'generic-form';
+
+type MediaPayload = {
+  buffer: Buffer;
+  filename: string;
+  mimeType: string;
+};
+
+type ResolvedLipSyncConfig = {
+  provider: LipSyncProvider;
+  apiUrl: string;
+  taskBaseUrl: string;
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
+  pollMaxMs: number;
+  pollIntervalMs: number;
+  publicBaseUrl: string;
+  allowPrivatePublicUrl: boolean;
+  videoFieldName: string;
+  durationFieldName: string;
+  videoExtension: boolean;
+  queryFaceThreshold?: number;
+};
+
+function getVideoSaveDir(config: ConfigService): string {
+  const fromEnv = config.get<string>('VIDEO_SAVE_DIR')?.trim();
+  if (fromEnv) return path.resolve(fromEnv);
+  return process.platform === 'win32'
+    ? 'C:\\downloadVideo'
+    : path.join(os.homedir(), 'downloadVideo');
+}
+
+function getLipSyncPublicDir(config: ConfigService, kind: 'videos' | 'audios'): string {
+  const root = config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR')?.trim();
+  if (root) return path.join(path.resolve(root), kind);
+  return path.join(getVideoSaveDir(config), 'lip-sync-public', kind);
+}
+
+function safeExtFromMedia(media: MediaPayload, fallback: string): string {
+  const ext = path.extname(media.filename || '').toLowerCase();
+  if (/^\.[a-z0-9]{2,6}$/i.test(ext)) return ext;
+  if (media.mimeType === 'video/mp4') return '.mp4';
+  if (media.mimeType === 'video/quicktime') return '.mov';
+  if (media.mimeType === 'video/x-msvideo') return '.avi';
+  if (media.mimeType === 'audio/wav') return '.wav';
+  if (media.mimeType === 'audio/aac') return '.aac';
+  if (media.mimeType === 'audio/mpeg') return '.mp3';
+  return fallback;
+}
+
+function readBool(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(value.trim().toLowerCase());
+}
+
+function readNumber(value: unknown, fallback: number): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 @Injectable()
@@ -13,89 +82,367 @@ export class AliLipSyncService {
 
   constructor(private readonly config: ConfigService) {}
 
+  isConfigured(): boolean {
+    const cfg = this.resolveConfig();
+    if (cfg.provider === 'aliyun-videoretalk') {
+      return Boolean(
+        cfg.apiKey &&
+          cfg.publicBaseUrl &&
+          this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl),
+      );
+    }
+    return Boolean(cfg.apiUrl && cfg.apiKey);
+  }
+
   async submitVideo(params: {
     buffer: Buffer;
     filename: string;
     mimeType: string;
     durationSeconds?: number;
   }): Promise<AliLipSyncResult> {
-    const apiUrl = this.config.get<string>('ALI_LIP_SYNC_API_URL')?.trim();
-    if (!apiUrl) {
-      throw new BadRequestException('未配置 ALI_LIP_SYNC_API_URL，无法调用阿里视频对口型接口');
+    return this.submitLipSync({
+      video: {
+        buffer: params.buffer,
+        filename: params.filename,
+        mimeType: params.mimeType,
+      },
+      durationSeconds: params.durationSeconds,
+    });
+  }
+
+  async submitLipSync(params: {
+    video: MediaPayload;
+    audio?: MediaPayload;
+    refImageUrl?: string | null;
+    durationSeconds?: number;
+    videoExtension?: boolean;
+  }): Promise<AliLipSyncResult> {
+    const cfg = this.resolveConfig();
+    if (cfg.provider === 'aliyun-videoretalk') {
+      return this.submitAliyunVideoRetalk(cfg, params);
+    }
+    return this.submitGenericForm(cfg, {
+      buffer: params.video.buffer,
+      filename: params.video.filename,
+      mimeType: params.video.mimeType,
+      durationSeconds: params.durationSeconds,
+    });
+  }
+
+  private async submitAliyunVideoRetalk(
+    cfg: ResolvedLipSyncConfig,
+    params: {
+      video: MediaPayload;
+      audio?: MediaPayload;
+      refImageUrl?: string | null;
+      videoExtension?: boolean;
+    },
+  ): Promise<AliLipSyncResult> {
+    if (!cfg.apiKey) {
+      throw new BadRequestException('DASHSCOPE_API_KEY is required for Aliyun VideoRetalk');
+    }
+    if (!params.audio?.buffer?.length) {
+      throw new BadRequestException('Aliyun VideoRetalk requires both video and audio inputs');
+    }
+    if (!cfg.publicBaseUrl) {
+      throw new BadRequestException(
+        'PUBLIC_BASE_URL or LIP_SYNC_PUBLIC_BASE_URL is required so Aliyun can fetch media files',
+      );
+    }
+    if (!this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl)) {
+      throw new BadRequestException(
+        'PUBLIC_BASE_URL must be a public HTTP(S) domain, not localhost or a private LAN address',
+      );
     }
 
-    const apiKey =
-      this.config.get<string>('ALI_LIP_SYNC_API_KEY')?.trim() ||
-      this.config.get<string>('DASHSCOPE_API_KEY')?.trim();
-    if (!apiKey) {
-      throw new BadRequestException('未配置 ALI_LIP_SYNC_API_KEY 或 DASHSCOPE_API_KEY');
+    const videoUrl = await this.persistPublicMedia('videos', params.video, cfg.publicBaseUrl);
+    const audioUrl = await this.persistPublicMedia('audios', params.audio, cfg.publicBaseUrl);
+    const payload = {
+      model: cfg.model,
+      input: {
+        video_url: videoUrl,
+        audio_url: audioUrl,
+        ...(params.refImageUrl?.trim() ? { ref_image_url: params.refImageUrl.trim() } : {}),
+      },
+      parameters: {
+        video_extension: params.videoExtension ?? cfg.videoExtension,
+        ...(cfg.queryFaceThreshold ? { query_face_threshold: cfg.queryFaceThreshold } : {}),
+      },
+    };
+
+    const submitResponse = await this.fetchJson(cfg.apiUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.apiKey}`,
+        'Content-Type': 'application/json',
+        'X-DashScope-Async': 'enable',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
+
+    const submitOutput =
+      submitResponse.output && typeof submitResponse.output === 'object'
+        ? (submitResponse.output as Record<string, unknown>)
+        : {};
+    const taskId = this.readString(submitOutput.task_id) || this.readString(submitResponse.task_id);
+    if (!taskId) {
+      throw new Error('Aliyun VideoRetalk did not return output.task_id');
     }
 
-    const timeoutMs = Number(this.config.get('ALI_LIP_SYNC_TIMEOUT_MS') ?? 900_000);
-    const videoFieldName = this.config.get<string>('ALI_LIP_SYNC_VIDEO_FIELD')?.trim() || 'video';
-    const durationFieldName =
-      this.config.get<string>('ALI_LIP_SYNC_DURATION_FIELD')?.trim() || 'duration_seconds';
+    const resultResponse = await this.pollAliyunTask(cfg, taskId);
+    const videoResultUrl = this.pickVideoUrl(resultResponse as Record<string, unknown>);
+    if (!videoResultUrl) {
+      throw new Error('Aliyun VideoRetalk succeeded but did not return output.video_url');
+    }
+
+    return {
+      videoUrl: videoResultUrl,
+      providerResponse: {
+        provider: 'aliyun-videoretalk',
+        taskId,
+        input: { videoUrl, audioUrl },
+        submitResponse,
+        resultResponse,
+      },
+      hint: 'Aliyun VideoRetalk lip-sync completed.',
+    };
+  }
+
+  private async submitGenericForm(
+    cfg: ResolvedLipSyncConfig,
+    params: {
+      buffer: Buffer;
+      filename: string;
+      mimeType: string;
+      durationSeconds?: number;
+    },
+  ): Promise<AliLipSyncResult> {
+    if (!cfg.apiUrl) {
+      throw new BadRequestException('LIP_SYNC_API_URL / ALI_LIP_SYNC_API_URL is not configured');
+    }
+    if (!cfg.apiKey) {
+      throw new BadRequestException('LIP_SYNC_API_KEY / ALI_LIP_SYNC_API_KEY / DASHSCOPE_API_KEY is not configured');
+    }
 
     const videoBytes = new Uint8Array(params.buffer.byteLength);
     videoBytes.set(params.buffer);
 
     const form = new FormData();
     form.append(
-      videoFieldName,
+      cfg.videoFieldName,
       new Blob([videoBytes], { type: params.mimeType || 'video/mp4' }),
       params.filename || 'input.mp4',
     );
     if (params.durationSeconds !== undefined) {
-      form.append(durationFieldName, String(Math.round(params.durationSeconds * 100) / 100));
+      form.append(cfg.durationFieldName, String(Math.round(params.durationSeconds * 100) / 100));
     }
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const res = await fetch(cfg.apiUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: form,
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
 
-    try {
-      const res = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: form,
-        signal: controller.signal,
-      });
+    const contentType = res.headers.get('content-type') ?? '';
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`HTTP ${res.status} ${text.slice(0, 800)}`);
+    }
 
-      const contentType = res.headers.get('content-type') ?? '';
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`HTTP ${res.status} ${text.slice(0, 800)}`);
-      }
-
-      if (contentType.startsWith('video/') || contentType === 'application/octet-stream') {
-        const arr = await res.arrayBuffer();
-        const base64 = Buffer.from(arr).toString('base64');
-        const mime = contentType.startsWith('video/') ? contentType : 'video/mp4';
-        return {
-          videoUrl: `data:${mime};base64,${base64}`,
-          providerResponse: { contentType, bytes: arr.byteLength },
-          hint: '阿里接口返回了视频二进制，已转换为可预览的 data URL。',
-        };
-      }
-
-      const json = (await res.json()) as Record<string, unknown>;
-      const videoUrl = this.pickVideoUrl(json);
-      if (!videoUrl) {
-        throw new Error('阿里接口响应中未找到视频地址字段（支持 videoUrl / video_url / output.video_url 等）');
-      }
-
+    if (contentType.startsWith('video/') || contentType === 'application/octet-stream') {
+      const arr = await res.arrayBuffer();
+      const base64 = Buffer.from(arr).toString('base64');
+      const mime = contentType.startsWith('video/') ? contentType : 'video/mp4';
       return {
-        videoUrl,
-        providerResponse: json,
+        videoUrl: `data:${mime};base64,${base64}`,
+        providerResponse: { contentType, bytes: arr.byteLength },
+        hint: 'Lip-sync provider returned binary video data.',
       };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.warn(`阿里视频对口型接口调用失败：${msg}`);
-      throw e;
-    } finally {
-      clearTimeout(timer);
     }
+
+    const json = (await res.json()) as Record<string, unknown>;
+    const videoUrl = this.pickVideoUrl(json);
+    if (!videoUrl) {
+      throw new Error('Lip-sync provider response did not contain a video URL');
+    }
+
+    return {
+      videoUrl,
+      providerResponse: json,
+    };
+  }
+
+  private async pollAliyunTask(
+    cfg: ResolvedLipSyncConfig,
+    taskId: string,
+  ): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + cfg.pollMaxMs;
+    let lastResponse: Record<string, unknown> | null = null;
+
+    while (Date.now() <= deadline) {
+      const url = `${cfg.taskBaseUrl.replace(/\/+$/, '')}/tasks/${encodeURIComponent(taskId)}`;
+      const json = await this.fetchJson(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${cfg.apiKey}`,
+        },
+        signal: AbortSignal.timeout(cfg.timeoutMs),
+      });
+      lastResponse = json as Record<string, unknown>;
+
+      const output =
+        json && typeof json === 'object' && 'output' in json
+          ? (json.output as Record<string, unknown>)
+          : {};
+      const status = this.readString(output.task_status).toUpperCase();
+      if (status === 'SUCCEEDED') return lastResponse;
+      if (status === 'FAILED' || status === 'UNKNOWN') {
+        const code = this.readString(output.code);
+        const message = this.readString(output.message);
+        throw new Error(
+          `Aliyun VideoRetalk task ${status}${code ? ` (${code})` : ''}${message ? `: ${message}` : ''}`,
+        );
+      }
+
+      await sleep(cfg.pollIntervalMs);
+    }
+
+    throw new Error(
+      `Aliyun VideoRetalk task timed out after ${Math.round(cfg.pollMaxMs / 1000)}s: ${JSON.stringify(
+        lastResponse,
+      ).slice(0, 800)}`,
+    );
+  }
+
+  private async fetchJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
+    const res = await fetch(url, init);
+    const text = await res.text();
+    let json: Record<string, unknown>;
+    try {
+      json = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+    } catch {
+      throw new Error(`Provider returned non-JSON response: ${text.slice(0, 800)}`);
+    }
+
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${JSON.stringify(json).slice(0, 1200)}`);
+    }
+    return json;
+  }
+
+  private async persistPublicMedia(
+    kind: 'videos' | 'audios',
+    media: MediaPayload,
+    publicBaseUrl: string,
+  ): Promise<string> {
+    const dir = getLipSyncPublicDir(this.config, kind);
+    await fs.mkdir(dir, { recursive: true });
+    const ext = safeExtFromMedia(media, kind === 'videos' ? '.mp4' : '.mp3');
+    const prefix = kind === 'videos' ? 'lip-video' : 'lip-audio';
+    const fileName = `${prefix}_${Date.now()}_${randomUUID().slice(0, 10)}${ext}`;
+    await fs.writeFile(path.join(dir, fileName), media.buffer);
+    return `${publicBaseUrl.replace(/\/+$/, '')}/api/v1/tools/lip-sync-public/${kind}/${encodeURIComponent(fileName)}/stream`;
+  }
+
+  private resolveConfig(): ResolvedLipSyncConfig {
+    const genericApiUrl =
+      this.config.get<string>('LIP_SYNC_API_URL')?.trim() ||
+      this.config.get<string>('ALI_LIP_SYNC_API_URL')?.trim() ||
+      '';
+    const provider = this.resolveProvider(genericApiUrl);
+    const dashScopeBase =
+      this.config.get<string>('ALI_VIDEORETALK_BASE_URL')?.trim() ||
+      this.config.get<string>('DASHSCOPE_ASR_BASE_URL')?.trim() ||
+      'https://dashscope.aliyuncs.com/api/v1';
+    const normalizedDashScopeBase = dashScopeBase.replace(/\/+$/, '');
+    const pollMaxMs = readNumber(this.config.get('ALI_VIDEORETALK_POLL_MAX_MS'), 900_000);
+    const queryFaceThreshold = readNumber(
+      this.config.get('ALI_VIDEORETALK_QUERY_FACE_THRESHOLD'),
+      Number.NaN,
+    );
+
+    return {
+      provider,
+      apiUrl:
+        provider === 'aliyun-videoretalk'
+          ? this.config.get<string>('ALI_VIDEORETALK_API_URL')?.trim() ||
+            `${normalizedDashScopeBase}/services/aigc/image2video/video-synthesis/`
+          : genericApiUrl,
+      taskBaseUrl:
+        this.config.get<string>('ALI_VIDEORETALK_TASK_BASE_URL')?.trim() ||
+        normalizedDashScopeBase,
+      apiKey:
+        this.config.get<string>('LIP_SYNC_API_KEY')?.trim() ||
+        this.config.get<string>('ALI_LIP_SYNC_API_KEY')?.trim() ||
+        this.config.get<string>('DASHSCOPE_API_KEY')?.trim() ||
+        '',
+      model: this.config.get<string>('ALI_VIDEORETALK_MODEL')?.trim() || 'videoretalk',
+      timeoutMs: readNumber(
+        this.config.get('LIP_SYNC_TIMEOUT_MS') ?? this.config.get('ALI_LIP_SYNC_TIMEOUT_MS'),
+        120_000,
+      ),
+      pollMaxMs,
+      pollIntervalMs: readNumber(this.config.get('ALI_VIDEORETALK_POLL_INTERVAL_MS'), 3_000),
+      publicBaseUrl:
+        this.config.get<string>('LIP_SYNC_PUBLIC_BASE_URL')?.trim() ||
+        this.config.get<string>('PUBLIC_BASE_URL')?.trim() ||
+        this.config.get<string>('BACKEND_PUBLIC_BASE_URL')?.trim() ||
+        this.config.get<string>('API_PUBLIC_BASE_URL')?.trim() ||
+        '',
+      allowPrivatePublicUrl: readBool(
+        this.config.get<string>('LIP_SYNC_ALLOW_PRIVATE_PUBLIC_URL'),
+        false,
+      ),
+      videoFieldName:
+        this.config.get<string>('LIP_SYNC_VIDEO_FIELD')?.trim() ||
+        this.config.get<string>('ALI_LIP_SYNC_VIDEO_FIELD')?.trim() ||
+        'video',
+      durationFieldName:
+        this.config.get<string>('LIP_SYNC_DURATION_FIELD')?.trim() ||
+        this.config.get<string>('ALI_LIP_SYNC_DURATION_FIELD')?.trim() ||
+        'duration_seconds',
+      videoExtension: readBool(this.config.get<string>('ALI_VIDEORETALK_VIDEO_EXTENSION'), true),
+      queryFaceThreshold: Number.isFinite(queryFaceThreshold)
+        ? Math.max(120, Math.min(200, Math.round(queryFaceThreshold)))
+        : undefined,
+    };
+  }
+
+  private resolveProvider(genericApiUrl: string): LipSyncProvider {
+    const raw =
+      this.config.get<string>('LIP_SYNC_PROVIDER')?.trim() ||
+      this.config.get<string>('ALI_LIP_SYNC_PROVIDER')?.trim() ||
+      '';
+    if (/^(generic|generic-form|custom)$/i.test(raw)) return 'generic-form';
+    if (/^(aliyun|aliyun-videoretalk|videoretalk)$/i.test(raw)) return 'aliyun-videoretalk';
+    return genericApiUrl ? 'generic-form' : 'aliyun-videoretalk';
+  }
+
+  private isUsablePublicBaseUrl(value: string, allowPrivate: boolean): boolean {
+    try {
+      const u = new URL(value);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      if (allowPrivate) return true;
+      const host = u.hostname.toLowerCase();
+      if (host === 'localhost' || host === '::1' || host.endsWith('.local')) return false;
+      if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return false;
+      const match = host.match(/^172\.(\d+)\./);
+      if (match) {
+        const n = Number(match[1]);
+        if (n >= 16 && n <= 31) return false;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private readString(value: unknown): string {
+    return typeof value === 'string' ? value.trim() : '';
   }
 
   private pickVideoUrl(json: Record<string, unknown>): string | null {

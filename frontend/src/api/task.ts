@@ -32,6 +32,27 @@ export async function previewTranscript(body: { sourceVideoUrl: string }) {
 }
 
 /** 第三步：探测千问 ASR（转写 HTTP）是否配置 */
+export interface OptimizeOralScriptResponse {
+  hook3s: string
+  hook10s: string
+  optimizedScript: string
+  strategyId: string
+  strategyLabel: string
+  llmUsed: boolean
+}
+
+export async function optimizeOralScript(body: {
+  sourceText: string
+  sourceVideoUrl?: string
+}) {
+  const { data } = await http.post<OptimizeOralScriptResponse>(
+    'v1/tools/optimize-oral-script',
+    body,
+    { timeout: 120_000 },
+  )
+  return data
+}
+
 export interface AsrHealthResponse {
   ok: boolean
   transcribeUrlConfigured: boolean
@@ -111,6 +132,102 @@ export interface AliLipSyncResponse {
   hint?: string
 }
 
+export interface LipSyncPreviewResponse {
+  optimizedScript: string
+  llmUsed: boolean
+  estimatedTotalSeconds: number
+  videoUrl: string | null
+  hint: string
+  providerResponse?: unknown
+}
+
+export interface VoicePreviewResponse {
+  audioUrl: string
+  hint: string
+  ttsMode: 'provider' | 'mock'
+  voiceLabel: string
+  durationSeconds: number
+}
+
+export interface SubtitleCue {
+  id: string
+  startMs: number
+  endMs: number
+  text: string
+  lines: string[]
+}
+
+export interface SubtitleWorkflowJson {
+  version: 1
+  language: string
+  durationMs: number
+  generatedAt: string
+  source: {
+    script: string
+    avatarResourceId: string
+    voiceResourceId: string
+    subtitleTemplateId: string
+  }
+  template: {
+    id: string
+    name: string
+    styleJson: Record<string, unknown>
+  }
+  cues: SubtitleCue[]
+}
+
+export interface SubtitleWorkflowPreviewResponse {
+  draftId: string
+  previewUrl: string
+  subtitleJson: SubtitleWorkflowJson
+  hint: string
+  ttsMode: 'provider' | 'mock'
+  timelineSource: 'asr-fallback' | 'local-estimate'
+}
+
+export interface SubtitleWorkflowFinalizeResponse {
+  draftId: string
+  videoUrl: string
+  subtitleJson: SubtitleWorkflowJson
+  hint: string
+  fallback: boolean
+  providerResponse?: unknown
+}
+
+export interface DouyinHomepageLearnedProfile {
+  secUserId: string
+  uid: string
+  nickname: string
+  handle: string
+  signature: string
+  avatarUrl: string
+  awemeCount: number
+  followerCount: number
+  followingCount: number
+  totalFavorited: number
+  city: string
+  liveStatus: number
+}
+
+export interface DouyinHomepageLearnedPost {
+  awemeId: string
+  title: string
+  coverUrl: string
+  diggCount: number
+  commentCount: number
+  shareCount: number
+  createdAt: string
+}
+
+export interface DouyinHomepageLearnResponse {
+  sourceUrl: string
+  learnedAt: string
+  hint: string
+  profile: DouyinHomepageLearnedProfile
+  samples: DouyinHomepageLearnedPost[]
+  ideaSuggestions: string[]
+}
+
 /** 视频对口型：上传不超过 5 分钟的视频，后端代理调用阿里接口并返回成片地址 */
 export async function createAliLipSyncVideo(body: {
   file: File
@@ -125,6 +242,70 @@ export async function createAliLipSyncVideo(body: {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 900_000,
   })
+  return data
+}
+
+export async function createLipSyncPreview(body: {
+  script: string
+  avatarResourceId: string
+  voiceResourceId: string
+}, opts?: { signal?: AbortSignal }) {
+  const { data } = await http.post<LipSyncPreviewResponse>('v1/tools/lip-sync-preview', body, {
+    timeout: 900_000,
+    signal: opts?.signal,
+  })
+  return data
+}
+
+export async function createVoicePreview(body: {
+  script: string
+  voiceResourceId: string
+}) {
+  const { data } = await http.post<VoicePreviewResponse>('v1/tools/voice-preview', body, {
+    timeout: 180_000,
+  })
+  return data
+}
+
+export async function learnDouyinHomepage(body: { homepageUrl: string }) {
+  const { data } = await http.post<DouyinHomepageLearnResponse>(
+    'v1/tools/douyin-homepage-learn',
+    body,
+    { timeout: 120_000 },
+  )
+  return data
+}
+
+export async function createSubtitleWorkflowPreview(
+  body: {
+    script: string
+    avatarResourceId: string
+    voiceResourceId: string
+    subtitleTemplateId: string
+    previewSeconds?: number
+  },
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.post<SubtitleWorkflowPreviewResponse>(
+    'v1/tools/subtitle-workflow-preview',
+    body,
+    {
+      timeout: 900_000,
+      signal: opts?.signal,
+    },
+  )
+  return data
+}
+
+export async function finalizeSubtitleWorkflow(body: { draftId: string }, opts?: { signal?: AbortSignal }) {
+  const { data } = await http.post<SubtitleWorkflowFinalizeResponse>(
+    'v1/tools/subtitle-workflow-finalize',
+    body,
+    {
+      timeout: 900_000,
+      signal: opts?.signal,
+    },
+  )
   return data
 }
 
@@ -299,6 +480,14 @@ export async function listSavedVideos() {
     files: { name: string; size: number; mtime: string }[]
   }>('v1/tools/saved-videos', { timeout: 15_000 })
   return data
+}
+
+export async function fetchSavedVideoBlob(fileName: string) {
+  const res = await http.get(`v1/tools/saved-videos/${encodeURIComponent(fileName)}/stream`, {
+    responseType: 'blob',
+    timeout: 120_000,
+  })
+  return res.data as Blob
 }
 
 /** 对已保存到本地的视频文件做 FFmpeg + ASR，生成口播（不重新下载） */

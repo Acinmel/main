@@ -1,14 +1,5 @@
 <script setup lang="ts">
-import {
-  NButton,
-  NCard,
-  NForm,
-  NFormItem,
-  NInput,
-  NTag,
-  NText,
-  useMessage,
-} from 'naive-ui'
+import { NButton, NCard, NForm, NFormItem, NInput, NTag, NText, useMessage } from 'naive-ui'
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { registerAuth } from '@/api/auth'
@@ -25,6 +16,8 @@ const form = reactive({
   email: '',
   password: '',
 })
+
+const proofs = ['数字人形象', '口播任务', 'AI 改写']
 
 async function handleSubmit() {
   if (!form.email?.trim() || !form.password) {
@@ -58,24 +51,22 @@ async function handleSubmit() {
 </script>
 
 <template>
-  <div class="register">
-    <section class="register__shell">
-      <div class="register__copy">
-        <n-tag :bordered="false" class="register__eyebrow">AI VIDEO GENERATION WORKBENCH</n-tag>
+  <div class="auth-page page-entrance">
+    <section class="auth-page__hero glass-panel">
+      <div class="auth-page__copy auth-page__copy--register">
+        <n-tag :bordered="false" class="auth-page__eyebrow">
+          AI VIDEO GENERATION WORKBENCH
+        </n-tag>
         <h1>创建你的 AI 数字人工作台账号</h1>
-        <p>
-          注册后即可进入审核流程，开通后使用专属数字人、口播文案提取与 AI 改写能力。
-        </p>
-        <div class="register__proof">
-          <span>数字人形象</span>
-          <span>口播任务</span>
-          <span>AI 改写</span>
+        <p>注册后即可进入审核流程，开通后即可使用专属数字人、口播文案提取与 AI 改写能力。</p>
+        <div class="auth-page__proofs">
+          <span v-for="item in proofs" :key="item">{{ item }}</span>
         </div>
       </div>
 
-      <n-card class="register__card" size="large" :bordered="false">
+      <n-card class="auth-page__card" size="large" :bordered="false">
         <template #header>
-          <div class="register__card-head">
+          <div class="auth-page__card-head">
             <span>注册账号</span>
             <p>使用邮箱创建账号，提交后默认等待管理员审核。</p>
           </div>
@@ -98,17 +89,17 @@ async function handleSubmit() {
             type="primary"
             block
             size="large"
-            class="register__submit"
+            class="auth-page__submit"
             :loading="loading"
             @click="handleSubmit"
           >
             注册并登录
           </n-button>
 
-          <n-text depth="3" class="register__notice">
-            新账号默认待管理员审核，开通后方可使用专属数字人、口播与任务等功能。
+          <n-text depth="3" class="auth-page__notice">
+            新账号默认等待管理员审核，开通后方可使用专属数字人、口播与任务等能力。
           </n-text>
-          <router-link :to="{ name: 'login', query: route.query }" class="register__link">
+          <router-link :to="{ name: 'login', query: route.query }" class="auth-page__link">
             已有账号？去登录
           </router-link>
         </n-form>
@@ -118,200 +109,180 @@ async function handleSubmit() {
 </template>
 
 <style scoped>
-.register {
-  position: relative;
-  min-height: calc(100vh - 64px);
-  overflow: hidden;
-  padding: 72px 24px 88px;
-  color: #f8fafc;
-  font-family: var(--font-sans);
-  background:
-    radial-gradient(circle at 18% 10%, rgba(22, 242, 139, 0.18), transparent 30%),
-    radial-gradient(circle at 82% 8%, rgba(0, 210, 106, 0.12), transparent 28%),
-    radial-gradient(circle at 72% 70%, rgba(22, 242, 139, 0.08), transparent 28%),
-    linear-gradient(135deg, #000302 0%, var(--bg-main) 42%, #000000 100%);
+.auth-page {
+  min-height: 100%;
 }
 
-.register::before {
+.auth-page__hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(360px, 430px);
+  gap: 34px;
+  align-items: center;
+  min-height: calc(100vh - 168px);
+  padding: 34px;
+}
+
+.auth-page__copy {
+  position: relative;
+  overflow: hidden;
+  min-height: 100%;
+  padding: 34px;
+  border-radius: 34px;
+  background:
+    radial-gradient(circle at 12% 10%, rgba(75, 107, 255, 0.18), transparent 20%),
+    radial-gradient(circle at 82% 20%, rgba(75, 199, 187, 0.16), transparent 22%),
+    linear-gradient(135deg, rgba(35, 48, 76, 0.88), rgba(92, 112, 150, 0.54) 52%, rgba(244, 247, 251, 0.8));
+  box-shadow: var(--shadow-panel);
+}
+
+.auth-page__copy::after {
   position: absolute;
   inset: 0;
   pointer-events: none;
   content: '';
   background-image:
-    linear-gradient(rgba(148, 163, 184, 0.06) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 163, 184, 0.06) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.85), transparent 82%);
+    linear-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.62), transparent 88%);
 }
 
-.register__shell {
+.auth-page__copy--register {
+  background:
+    radial-gradient(circle at 16% 10%, rgba(75, 107, 255, 0.16), transparent 18%),
+    radial-gradient(circle at 86% 20%, rgba(239, 177, 75, 0.18), transparent 22%),
+    linear-gradient(135deg, rgba(33, 45, 72, 0.9), rgba(104, 116, 148, 0.56) 52%, rgba(244, 247, 251, 0.8));
+}
+
+.auth-page__eyebrow {
   position: relative;
   z-index: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 440px);
-  gap: 44px;
-  align-items: center;
-  width: min(1080px, 100%);
-  min-height: 560px;
-  margin: 0 auto;
+  color: #9fc3ff;
+  font-family: var(--font-accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  background: rgba(255, 255, 255, 0.08);
 }
 
-.register__copy {
-  max-width: 620px;
-}
-
-.register__eyebrow {
-  color: var(--primary);
-  background: rgba(22, 242, 139, 0.1);
-  box-shadow: 0 0 24px rgba(22, 242, 139, 0.18);
-}
-
-.register h1,
-.register p {
+.auth-page h1,
+.auth-page p {
+  position: relative;
+  z-index: 1;
   margin: 0;
 }
 
-.register h1 {
-  margin-top: 28px;
+.auth-page h1 {
+  max-width: 620px;
+  margin-top: 26px;
+  color: var(--text-inverse);
   font-family: var(--font-display);
-  font-size: clamp(38px, 6vw, 68px);
-  line-height: 1.08;
-  letter-spacing: 1px;
+  font-size: clamp(42px, 6vw, 72px);
+  line-height: 1.04;
+  letter-spacing: -0.05em;
 }
 
-.register__copy p {
-  max-width: 560px;
+.auth-page__copy p {
+  max-width: 580px;
   margin-top: 18px;
-  color: var(--text-sub);
-  font-size: 18px;
+  color: rgba(241, 246, 255, 0.8);
+  font-size: 19px;
   line-height: 1.8;
 }
 
-.register__proof {
+.auth-page__proofs {
+  position: relative;
+  z-index: 1;
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  margin-top: 28px;
-  color: var(--primary);
-  font-size: 13px;
+  margin-top: 30px;
 }
 
-.register__proof span {
-  padding: 7px 11px;
-  border: 1px solid rgba(22, 242, 139, 0.24);
+.auth-page__proofs span {
+  padding: 9px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
   border-radius: 999px;
-  background: rgba(22, 242, 139, 0.08);
-  transition:
-    border-color var(--transition-fast),
-    background var(--transition-fast),
-    transform var(--transition-smooth);
+  color: #dbe7ff;
+  background: rgba(255, 255, 255, 0.08);
 }
 
-.register__proof span:hover {
-  border-color: var(--border-strong);
-  background: rgba(22, 242, 139, 0.12);
-  transform: translateY(-2px);
+.auth-page__card {
+  padding-top: 8px;
 }
 
-.register__card {
-  border: 1px solid var(--border-soft);
-  border-radius: 30px;
-  background: linear-gradient(145deg, rgba(8, 28, 21, 0.84), rgba(2, 10, 7, 0.78));
-  box-shadow:
-    0 30px 90px rgba(0, 0, 0, 0.55),
-    0 0 70px rgba(22, 242, 139, 0.13);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  transition:
-    border-color var(--transition-fast),
-    box-shadow var(--transition-fast),
-    transform var(--transition-smooth);
-}
-
-.register__card:hover {
-  border-color: var(--border-strong);
-  box-shadow:
-    0 30px 90px rgba(0, 0, 0, 0.58),
-    0 0 70px rgba(22, 242, 139, 0.18);
-  transform: translateY(-4px);
-}
-
-.register__card-head span {
+.auth-page__card-head span {
   display: block;
-  color: #f8fafc;
-  font-size: 22px;
+  color: var(--text-main);
+  font-family: var(--font-display);
+  font-size: 24px;
   font-weight: 700;
 }
 
-.register__card-head p {
+.auth-page__card-head p {
   margin-top: 8px;
   color: var(--text-sub);
-  font-size: 13px;
-  line-height: 1.6;
+  font-size: 14px;
+  line-height: 1.7;
 }
 
-.register__submit {
-  margin-top: 4px;
-  border: 0;
-  color: #02110a;
-  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
-  box-shadow: 0 0 32px rgba(22, 242, 139, 0.22);
+.auth-page__submit {
+  margin-top: 6px;
+  min-height: 50px;
 }
 
-.register__notice {
+.auth-page__notice {
   display: block;
   margin-top: 14px;
   font-size: 12px;
-  line-height: 1.55;
+  line-height: 1.7;
 }
 
-.register__link {
+.auth-page__link {
   display: block;
-  margin-top: 14px;
+  margin-top: 16px;
   color: var(--primary);
-  font-size: 13px;
   text-align: center;
 }
 
-.register__link:hover {
+.auth-page__link:hover {
   color: var(--primary-hover);
 }
 
-.register :deep(.n-form-item-label__text) {
-  color: #e2e8f0;
+.auth-page :deep(.n-form-item-label__text) {
+  color: var(--text-sub);
 }
 
-.register :deep(.n-input) {
-  --n-color: rgba(0, 0, 0, 0.22) !important;
-  --n-color-focus: rgba(0, 0, 0, 0.32) !important;
-  --n-border: 1px solid rgba(22, 242, 139, 0.2) !important;
-  --n-border-hover: 1px solid rgba(22, 242, 139, 0.48) !important;
-  --n-border-focus: 1px solid rgba(22, 242, 139, 0.7) !important;
-  --n-box-shadow-focus: 0 0 0 2px rgba(22, 242, 139, 0.14) !important;
+.auth-page :deep(.n-input) {
+  --n-color: rgba(247, 250, 255, 0.96) !important;
+  --n-color-focus: rgba(255, 255, 255, 1) !important;
+  --n-border: 1px solid rgba(121, 144, 184, 0.2) !important;
+  --n-border-hover: 1px solid rgba(75, 107, 255, 0.34) !important;
+  --n-border-focus: 1px solid rgba(75, 107, 255, 0.46) !important;
+  --n-box-shadow-focus: 0 0 0 3px rgba(75, 107, 255, 0.12) !important;
 }
 
-@media (max-width: 480px) {
-  .register {
-    padding: 0 max(12px, var(--app-safe-left, 0px)) 0 max(12px, var(--app-safe-right, 0px));
-  }
-
-  .register__shell {
+@media (max-width: 980px) {
+  .auth-page__hero {
     grid-template-columns: 1fr;
-    gap: 24px;
-    min-height: auto;
-    padding: 34px 0 56px;
-  }
-
-  .register h1 {
-    font-size: 36px;
   }
 }
 
-@media (min-width: 481px) and (max-width: 860px) {
-  .register__shell {
-    grid-template-columns: 1fr;
-    max-width: 560px;
-    min-height: auto;
+@media (max-width: 640px) {
+  .auth-page__hero {
+    padding: 18px;
+  }
+
+  .auth-page__copy {
+    padding: 24px 20px;
+  }
+
+  .auth-page h1 {
+    font-size: 40px;
+  }
+
+  .auth-page__copy p {
+    font-size: 16px;
   }
 }
 </style>

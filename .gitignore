@@ -74,6 +74,9 @@ whisper_models/
 # 日志与本地数据
 *.log
 backend/data/
+.tmp-chrome-cdp/
+tmp_*.json
+tmp_*.wav
 
 # IDE / 系统
 .idea/

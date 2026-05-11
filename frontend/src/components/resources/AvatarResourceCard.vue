@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { NButton, NCard, NCheckbox, NInput, NSpace, NTag, NText } from 'naive-ui'
 import type { AvatarResource } from '@/types/resources'
 
@@ -18,6 +18,7 @@ const emit = defineEmits<{
 
 const editing = ref(false)
 const draftName = ref(props.item.name)
+const hasSourceVideo = computed(() => Boolean(props.item.originalVideoUrl))
 
 function saveName() {
   editing.value = false
@@ -53,8 +54,8 @@ function saveName() {
         </n-tag>
       </n-space>
       <n-space class="resource-card__actions" size="small">
-        <n-button size="tiny" @click="emit('create')">立即创作</n-button>
-        <n-button size="tiny" :disabled="!item.originalVideoUrl" @click="emit('preview')">
+        <n-button size="tiny" :disabled="!hasSourceVideo" @click="emit('create')">立即创作</n-button>
+        <n-button size="tiny" :disabled="!hasSourceVideo" @click="emit('preview')">
           原始视频
         </n-button>
         <n-button v-if="item.owner === 'mine'" size="tiny" @click="editing = true">编辑名称</n-button>
@@ -62,6 +63,9 @@ function saveName() {
           删除
         </n-button>
       </n-space>
+      <n-text v-if="!hasSourceVideo" depth="3" class="resource-card__hint">
+        这个数字人还没有绑定原始视频，先补充视频素材后才能做对口型预览。
+      </n-text>
     </div>
   </n-card>
 </template>
@@ -69,11 +73,11 @@ function saveName() {
 <style scoped>
 .resource-card {
   overflow: hidden;
-  border: 1px solid var(--border-soft);
+  border: 1px solid rgba(255, 255, 255, 0.58);
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(8, 28, 21, 0.78), rgba(2, 10, 7, 0.9));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(246, 249, 255, 0.82));
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.94),
     var(--shadow-soft);
   transition:
     border-color var(--transition-fast),
@@ -84,9 +88,8 @@ function saveName() {
 .resource-card:hover {
   border-color: var(--border-strong);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 18px 44px rgba(0, 0, 0, 0.38),
-    0 0 30px rgba(22, 242, 139, 0.12);
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    var(--shadow-panel);
   transform: translateY(-5px);
 }
 
@@ -94,7 +97,7 @@ function saveName() {
   position: relative;
   aspect-ratio: 4 / 5;
   overflow: hidden;
-  background: var(--bg-soft);
+  background: linear-gradient(180deg, #eef3fb, #dfe8f7);
 }
 
 .resource-card__media img {
@@ -115,8 +118,8 @@ function saveName() {
   left: 10px;
   padding: 6px;
   border-radius: 999px;
-  background: rgba(2, 17, 10, 0.82);
-  box-shadow: 0 0 18px rgba(22, 242, 139, 0.16);
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 24px rgba(64, 86, 122, 0.14);
 }
 
 .resource-card__body {
@@ -125,5 +128,11 @@ function saveName() {
 
 .resource-card__actions {
   margin-top: 12px;
+}
+
+.resource-card__hint {
+  display: block;
+  margin-top: 10px;
+  line-height: 1.45;
 }
 </style>

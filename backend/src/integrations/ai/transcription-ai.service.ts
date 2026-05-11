@@ -4,13 +4,21 @@ import {
   Logger,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { promisify } from 'node:util';
 import { DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES } from '../../common/media.constants';
 import type {
   TranscribeResultDto,
   TranscriptSegmentDto,
 } from '../transcription/transcript.types';
 import { TranscriptStore } from '../transcription/transcript.store';
-import * as path from 'node:path';
+import { buildMockSegments, mockAsrText } from './ai-mock.util';
+
+const execFileAsync = promisify(execFile);
 
 interface QwenAsrChatCompletionJson {
   choices?: Array<{
@@ -43,6 +51,32 @@ interface QwenFileTransResultJson {
   }>;
 }
 
+interface OpenAiTranscriptionVerboseJson {
+  text?: string;
+  language?: string;
+  segments?: Array<{
+    start?: number;
+    end?: number;
+    text?: string;
+  }>;
+}
+
+interface DashScopeRealtimeTranscriptionJson {
+  requestId?: string;
+  fullText?: string;
+  language?: string;
+  segments?: Array<{
+    startMs?: number;
+    endMs?: number;
+    text?: string;
+  }>;
+}
+
+type AsrProvider =
+  | 'dashscope'
+  | 'openai-compatible'
+  | 'mock';
+
 /**
  * 语音转写：唯一入口为百炼千问 ASR。
  */
@@ -59,7 +93,7 @@ export class TranscriptionAiService {
     taskId: string;
     sourceVideoUrl: string;
   }): Promise<{ fullText: string; language: string }> {
-    const result = await this.transcribeWithQwenAsr(params.sourceVideoUrl);
+    const result = await this.transcribeFromSourceReference(params.sourceVideoUrl);
     return { fullText: result.fullText, language: result.language };
   }
 
@@ -70,7 +104,7 @@ export class TranscriptionAiService {
     size: number;
   }): Promise<TranscribeResultDto> {
     this.assertAcceptableMedia(file);
-    const result = await this.transcribeWithQwenAsr(this.toAudioDataUrl(file));
+    const result = await this.transcribeFromMedia(file);
     const transcriptId = this.transcriptStore.save({
       fullText: result.fullText,
       language: result.language,
@@ -92,18 +126,40 @@ export class TranscriptionAiService {
     transcribeUrlConfigured: boolean;
     healthUrl: string;
     latencyMs: number;
+    provider?: AsrProvider;
     error?: string;
   }> {
     const t0 = Date.now();
     try {
-      const config = this.getQwenAsrConfig();
+      const provider = this.resolveProvider();
+      if (provider.type === 'dashscope') {
+        return {
+          ok: true,
+          transcribeUrlConfigured: true,
+          healthUrl: this.isRealtimeModel(provider.config.model)
+            ? this.getDashScopeRealtimeWsUrl()
+            : this.isFileTransModel(provider.config.model)
+              ? provider.config.asyncSubmitUrl
+              : provider.config.chatCompletionsUrl,
+          latencyMs: Date.now() - t0,
+          provider: 'dashscope',
+        };
+      }
+      if (provider.type === 'openai-compatible') {
+        return {
+          ok: true,
+          transcribeUrlConfigured: true,
+          healthUrl: provider.config.url,
+          latencyMs: Date.now() - t0,
+          provider: 'openai-compatible',
+        };
+      }
       return {
         ok: true,
-        transcribeUrlConfigured: true,
-        healthUrl: this.isFileTransModel(config.model)
-          ? config.asyncSubmitUrl
-          : config.chatCompletionsUrl,
+        transcribeUrlConfigured: false,
+        healthUrl: 'mock://transcription',
         latencyMs: Date.now() - t0,
+        provider: 'mock',
       };
     } catch (e) {
       return {
@@ -116,12 +172,245 @@ export class TranscriptionAiService {
     }
   }
 
-  private async transcribeWithQwenAsr(audioData: string): Promise<{
+  private async transcribeFromSourceReference(sourceRef: string): Promise<{
     fullText: string;
     language: string;
     segments: TranscriptSegmentDto[];
   }> {
-    const config = this.getQwenAsrConfig();
+    const provider = this.resolveProvider();
+    if (provider.type === 'dashscope') {
+      if (this.isRealtimeModel(provider.config.model)) {
+        const maybeLocal = this.resolveLocalSourceReference(sourceRef);
+        if (!maybeLocal) {
+          if (this.isMockFallbackEnabled()) {
+            this.logger.warn(
+              'FunASR 实时 SDK 仅支持本地文件输入，sourceVideoUrl 非本地媒体，已回退 mock',
+            );
+            return this.buildMockTranscript(sourceRef);
+          }
+          throw new BadRequestException(
+            'FunASR 实时转写仅支持本地媒体文件，请改走上传转写或先保存视频后再转写。',
+          );
+        }
+        return this.transcribeLocalFileWithDashScopeRealtimeSdk(maybeLocal, provider.config);
+      }
+      return this.transcribeWithQwenAsr(sourceRef, provider.config);
+    }
+    return this.buildMockTranscript(sourceRef);
+  }
+
+  private async transcribeFromMedia(file: {
+    buffer: Buffer;
+    originalname: string;
+    mimetype: string;
+    size: number;
+  }): Promise<{
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  }> {
+    const provider = this.resolveProvider();
+    if (provider.type === 'dashscope') {
+      if (this.isRealtimeModel(provider.config.model)) {
+        return this.transcribeWithDashScopeRealtimeSdk(file, provider.config);
+      }
+      return this.transcribeWithQwenAsr(this.toAudioDataUrl(file), provider.config);
+    }
+    if (provider.type === 'openai-compatible') {
+      return this.transcribeWithOpenAiStyleApi(file, provider.config);
+    }
+    return this.buildMockTranscript(file.originalname);
+  }
+
+  private resolveProvider():
+    | {
+        type: 'dashscope';
+        config: ReturnType<TranscriptionAiService['getQwenAsrConfig']>;
+      }
+    | {
+        type: 'openai-compatible';
+        config: ReturnType<TranscriptionAiService['getOpenAiTranscribeConfig']>;
+      }
+    | {
+        type: 'mock';
+      } {
+    if (this.hasDashScopeConfig()) {
+      return { type: 'dashscope', config: this.getQwenAsrConfig() };
+    }
+    if (this.hasOpenAiCompatibleConfig()) {
+      return { type: 'openai-compatible', config: this.getOpenAiTranscribeConfig() };
+    }
+    if (this.isMockFallbackEnabled()) {
+      return { type: 'mock' };
+    }
+    throw new BadRequestException(
+      '未配置可用转写服务。请设置 DASHSCOPE_API_KEY，或配置 ASR_API_KEY/OPENAI_API_KEY；本地联调可启用 AI_MOCK_FALLBACK=true。',
+    );
+  }
+
+  private hasDashScopeConfig(): boolean {
+    return Boolean(this.config.get<string>('DASHSCOPE_API_KEY')?.trim());
+  }
+
+  private hasOpenAiCompatibleConfig(): boolean {
+    return Boolean(
+      this.config.get<string>('ASR_API_KEY')?.trim() ||
+        this.config.get<string>('OPENAI_API_KEY')?.trim(),
+    );
+  }
+
+  private isMockFallbackEnabled(): boolean {
+    const raw = this.config.get<string>('AI_MOCK_FALLBACK')?.trim().toLowerCase();
+    if (raw === 'true' || raw === '1' || raw === 'on') return true;
+    if (raw === 'false' || raw === '0' || raw === 'off') return false;
+    return this.config.get<string>('NODE_ENV') !== 'production';
+  }
+
+  private getOpenAiTranscribeConfig(): {
+    apiKey: string;
+    url: string;
+    model: string;
+    language?: string;
+  } {
+    const apiKey =
+      this.config.get<string>('ASR_API_KEY')?.trim() ||
+      this.config.get<string>('OPENAI_API_KEY')?.trim() ||
+      '';
+    if (!apiKey) {
+      throw new BadRequestException('未配置 ASR_API_KEY / OPENAI_API_KEY');
+    }
+    const base =
+      this.config.get<string>('ASR_API_BASE_URL')?.trim() ||
+      this.config.get<string>('OPENAI_BASE_URL')?.trim() ||
+      'https://api.openai.com/v1';
+    const model =
+      this.config.get<string>('ASR_API_MODEL')?.trim() ||
+      this.config.get<string>('OPENAI_TRANSCRIBE_MODEL')?.trim() ||
+      'whisper-1';
+    const language = this.config.get<string>('ASR_LANGUAGE')?.trim();
+    return {
+      apiKey,
+      url: `${base.replace(/\/+$/, '')}/audio/transcriptions`,
+      model,
+      language: language || undefined,
+    };
+  }
+
+  private async transcribeWithOpenAiStyleApi(
+    file: {
+      buffer: Buffer;
+      originalname: string;
+      mimetype: string;
+      size: number;
+    },
+    config: ReturnType<TranscriptionAiService['getOpenAiTranscribeConfig']>,
+  ): Promise<{
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  }> {
+    const timeoutMs = Number(this.config.get('ASR_TIMEOUT_MS') ?? 600_000);
+    const fileBytes = new Uint8Array(file.buffer.byteLength);
+    fileBytes.set(file.buffer);
+
+    const form = new FormData();
+    form.append(
+      'file',
+      new Blob([fileBytes], {
+        type: this.guessAudioMime(file.originalname, file.mimetype),
+      }),
+      file.originalname || 'audio.wav',
+    );
+    form.append('model', config.model);
+    form.append('response_format', 'verbose_json');
+    if (config.language) {
+      form.append('language', config.language);
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(config.url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: form,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`OpenAI 兼容转写 API 请求失败: ${msg}`);
+      if (this.isMockFallbackEnabled()) {
+        this.logger.warn('OpenAI 兼容转写失败，已回退本地 mock');
+        return this.buildMockTranscript(file.originalname);
+      }
+      throw new BadRequestException(`OpenAI 兼容转写 API 不可达：${msg}`);
+    }
+
+    const raw = await res.text();
+    if (!res.ok) {
+      this.logger.warn(`OpenAI 兼容转写 API HTTP ${res.status}: ${raw.slice(0, 800)}`);
+      if (this.isMockFallbackEnabled()) {
+        this.logger.warn('OpenAI 兼容转写返回错误，已回退本地 mock');
+        return this.buildMockTranscript(file.originalname);
+      }
+      throw new BadRequestException(
+        `OpenAI 兼容转写 API 返回错误（${res.status}）：${raw.slice(0, 500)}`,
+      );
+    }
+
+    let json: OpenAiTranscriptionVerboseJson;
+    try {
+      json = JSON.parse(raw) as OpenAiTranscriptionVerboseJson;
+    } catch {
+      throw new BadRequestException('OpenAI 兼容转写 API 返回非 JSON，无法解析');
+    }
+
+    const fullText = json.text?.trim() ?? '';
+    if (!fullText) {
+      if (this.isMockFallbackEnabled()) {
+        this.logger.warn('OpenAI 兼容转写返回空文本，已回退本地 mock');
+        return this.buildMockTranscript(file.originalname);
+      }
+      throw new BadRequestException('OpenAI 兼容转写 API 未返回有效转写文本');
+    }
+
+    const segments = (json.segments ?? [])
+      .map((segment) => ({
+        startMs: Math.max(0, Math.round((segment.start ?? 0) * 1000)),
+        endMs: Math.max(0, Math.round((segment.end ?? 0) * 1000)),
+        text: segment.text?.trim() ?? '',
+      }))
+      .filter((segment) => segment.text);
+
+    return {
+      fullText,
+      language: json.language?.trim() || config.language || 'zh-CN',
+      segments: segments.length ? segments : this.buildSegments(fullText),
+    };
+  }
+
+  private buildMockTranscript(source: string): {
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  } {
+    const fullText = mockAsrText(source);
+    return {
+      fullText,
+      language: 'zh-CN',
+      segments: buildMockSegments(fullText),
+    };
+  }
+
+  private async transcribeWithQwenAsr(
+    audioData: string,
+    config: ReturnType<TranscriptionAiService['getQwenAsrConfig']>,
+  ): Promise<{
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  }> {
     if (this.isFileTransModel(config.model)) {
       return this.transcribeWithQwenFileTrans(audioData, config);
     }
@@ -188,6 +477,95 @@ export class TranscriptionAiService {
       language: 'zh-CN',
       segments: this.buildSegments(fullText),
     };
+  }
+
+  private async transcribeWithDashScopeRealtimeSdk(
+    file: {
+      buffer: Buffer;
+      originalname: string;
+      mimetype: string;
+      size: number;
+    },
+    config: ReturnType<TranscriptionAiService['getQwenAsrConfig']>,
+  ): Promise<{
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  }> {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-funasr-'));
+    const ext = this.resolveRealtimeAudioExtension(file.originalname, file.mimetype);
+    const inputPath = path.join(tmpDir, `input${ext}`);
+    try {
+      await fs.writeFile(inputPath, file.buffer);
+      return await this.transcribeLocalFileWithDashScopeRealtimeSdk(inputPath, config, {
+        originalname: file.originalname,
+        mimetype: file.mimetype,
+      });
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  private async transcribeLocalFileWithDashScopeRealtimeSdk(
+    filePath: string,
+    config: ReturnType<TranscriptionAiService['getQwenAsrConfig']>,
+    meta?: { originalname?: string; mimetype?: string },
+  ): Promise<{
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  }> {
+    const timeoutMs = Number(this.config.get('ASR_TIMEOUT_MS') ?? 600_000);
+    const scriptPath = this.resolveDashScopeRealtimeScriptPath();
+    const python = this.resolveAsrPythonCommand();
+    const args = [
+      ...python.prefixArgs,
+      scriptPath,
+      '--file',
+      filePath,
+      '--model',
+      config.model,
+      '--format',
+      this.resolveRealtimeAudioFormat(meta?.originalname || filePath, meta?.mimetype || ''),
+      '--sample-rate',
+      String(this.getDashScopeRealtimeSampleRate()),
+    ];
+    const language = this.config.get<string>('QWEN_ASR_LANGUAGE')?.trim();
+    if (language) {
+      args.push('--language', language);
+    }
+    if (this.getDashScopeSemanticPunctuationEnabled()) {
+      args.push('--semantic-punctuation-enabled');
+    }
+
+    try {
+      const { stdout } = await execFileAsync(python.command, args, {
+        timeout: timeoutMs,
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          DASHSCOPE_API_KEY: config.apiKey,
+          DASHSCOPE_REALTIME_WS_URL: this.getDashScopeRealtimeWsUrl(),
+          PYTHONUTF8: '1',
+          PYTHONIOENCODING: 'utf-8',
+        },
+      });
+      return this.normalizeDashScopeRealtimeResult(stdout);
+    } catch (e) {
+      const err = e as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
+      const stderr = err.stderr?.toString?.().trim() ?? '';
+      const stdout = err.stdout?.toString?.().trim() ?? '';
+      const detail = this.extractDashScopeRealtimeError(stderr || stdout || err.message);
+      this.logger.error(
+        `FunASR 实时转写失败: ${detail}${stderr ? ` | stderr=${stderr.slice(0, 500)}` : ''}`,
+      );
+      if (this.isMockFallbackEnabled()) {
+        this.logger.warn('FunASR 实时转写失败，已回退本地 mock');
+        return this.buildMockTranscript(meta?.originalname || path.basename(filePath));
+      }
+      throw new BadRequestException(`FunASR 实时转写失败：${detail}`);
+    }
   }
 
   private assertAcceptableMedia(file: {
@@ -409,6 +787,11 @@ export class TranscriptionAiService {
     return 'https://dashscope.aliyuncs.com/api/v1';
   }
 
+  private isRealtimeModel(model: string): boolean {
+    const normalized = model.toLowerCase();
+    return normalized.includes('fun-asr-realtime') || normalized.includes('funasr');
+  }
+
   private isFileTransModel(model: string): boolean {
     return model.toLowerCase().includes('filetrans');
   }
@@ -430,6 +813,166 @@ export class TranscriptionAiService {
     if (raw === '1' || raw === 'true') return true;
     if (raw === '0' || raw === 'false') return false;
     return false;
+  }
+
+  private getDashScopeSemanticPunctuationEnabled(): boolean {
+    const raw = this.config
+      .get<string>('QWEN_ASR_SEMANTIC_PUNCTUATION_ENABLED')
+      ?.trim()
+      .toLowerCase();
+    if (raw === '1' || raw === 'true') return true;
+    if (raw === '0' || raw === 'false') return false;
+    return true;
+  }
+
+  private getDashScopeRealtimeSampleRate(): number {
+    const raw =
+      this.config.get<string>('QWEN_ASR_SAMPLE_RATE')?.trim() ||
+      this.config.get<string>('ASR_SAMPLE_RATE')?.trim() ||
+      '16000';
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) {
+      return Math.round(value);
+    }
+    return 16000;
+  }
+
+  private getDashScopeRealtimeWsUrl(): string {
+    return (
+      this.config.get<string>('DASHSCOPE_REALTIME_WS_URL')?.trim() ||
+      'wss://dashscope.aliyuncs.com/api-ws/v1/inference'
+    );
+  }
+
+  private resolveDashScopeRealtimeScriptPath(): string {
+    const fromEnv = this.config.get<string>('ASR_FUNASR_SCRIPT')?.trim();
+    if (fromEnv && existsSync(fromEnv)) return fromEnv;
+
+    const candidates = [
+      path.join(process.cwd(), 'scripts', 'dashscope_funasr_transcribe.py'),
+      path.join(process.cwd(), 'backend', 'scripts', 'dashscope_funasr_transcribe.py'),
+      path.join(__dirname, '..', '..', '..', 'scripts', 'dashscope_funasr_transcribe.py'),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    throw new BadRequestException('未找到 FunASR Python 转写脚本，请检查 backend/scripts 目录。');
+  }
+
+  private resolveAsrPythonCommand(): {
+    command: string;
+    prefixArgs: string[];
+  } {
+    const fromEnv = this.config.get<string>('ASR_PYTHON_BIN')?.trim();
+    if (fromEnv) {
+      return { command: fromEnv, prefixArgs: [] };
+    }
+
+    if (process.platform === 'win32') {
+      const candidates = [
+        'C:\\Users\\PC\\AppData\\Local\\Programs\\Python\\Python314\\python.exe',
+        'C:\\Users\\PC\\AppData\\Local\\Programs\\Python\\Python313\\python.exe',
+        'C:\\Python311\\python.exe',
+      ];
+      for (const candidate of candidates) {
+        if (existsSync(candidate)) {
+          return { command: candidate, prefixArgs: [] };
+        }
+      }
+      return { command: 'py', prefixArgs: ['-3.14'] };
+    }
+
+    return { command: 'python3', prefixArgs: [] };
+  }
+
+  private normalizeDashScopeRealtimeResult(raw: string | Buffer): {
+    fullText: string;
+    language: string;
+    segments: TranscriptSegmentDto[];
+  } {
+    let json: DashScopeRealtimeTranscriptionJson;
+    try {
+      json = JSON.parse(raw.toString()) as DashScopeRealtimeTranscriptionJson;
+    } catch {
+      throw new BadRequestException('FunASR 实时转写返回非 JSON，无法解析。');
+    }
+
+    const fullText = json.fullText?.trim() ?? '';
+    if (!fullText) {
+      throw new BadRequestException('FunASR 实时转写未返回有效文本。');
+    }
+
+    const segments = (json.segments ?? [])
+      .map((segment) => ({
+        startMs: Math.max(0, Math.round(segment.startMs ?? 0)),
+        endMs: Math.max(0, Math.round(segment.endMs ?? 0)),
+        text: segment.text?.trim() ?? '',
+      }))
+      .filter((segment) => segment.text);
+
+    return {
+      fullText,
+      language: json.language?.trim() || 'zh-CN',
+      segments: segments.length > 0 ? segments : this.buildSegments(fullText),
+    };
+  }
+
+  private extractDashScopeRealtimeError(raw: string): string {
+    if (!raw) {
+      return '未知错误';
+    }
+    try {
+      const json = JSON.parse(raw) as {
+        message?: string;
+        code?: string;
+        status_code?: number;
+      };
+      const parts = [json.code, json.message, json.status_code?.toString()].filter(Boolean);
+      return parts.join(' | ') || raw;
+    } catch {
+      return raw;
+    }
+  }
+
+  private resolveLocalSourceReference(sourceRef: string): string | null {
+    const trimmed = sourceRef.trim();
+    if (!trimmed || /^https?:\/\//i.test(trimmed) || /^data:/i.test(trimmed)) {
+      return null;
+    }
+    const candidates = [path.resolve(trimmed)];
+    const saveDir = this.config.get<string>('VIDEO_SAVE_DIR')?.trim();
+    if (saveDir) {
+      candidates.push(path.resolve(path.join(saveDir, path.basename(trimmed))));
+    }
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  private resolveRealtimeAudioExtension(originalname: string, mimetype: string): string {
+    const ext = path.extname(originalname).toLowerCase();
+    if (ext) return ext;
+    const mime = this.guessAudioMime(originalname, mimetype);
+    if (mime === 'audio/mpeg') return '.mp3';
+    if (mime === 'audio/mp4') return '.m4a';
+    if (mime === 'audio/flac') return '.flac';
+    if (mime === 'audio/ogg') return '.ogg';
+    if (mime === 'audio/webm') return '.webm';
+    return '.wav';
+  }
+
+  private resolveRealtimeAudioFormat(originalname: string, mimetype: string): string {
+    const ext = this.resolveRealtimeAudioExtension(originalname, mimetype).replace('.', '');
+    const alias: Record<string, string> = {
+      mpeg: 'mp3',
+      mpga: 'mp3',
+      wave: 'wav',
+      xwav: 'wav',
+    };
+    return alias[ext] ?? (ext || 'wav');
   }
 
   private toAudioDataUrl(file: { buffer: Buffer; originalname: string; mimetype: string }): string {

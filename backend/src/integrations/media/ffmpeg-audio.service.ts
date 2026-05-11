@@ -147,6 +147,27 @@ export class FfmpegAudioService {
     return exe;
   }
 
+  private resolveFfprobeBinary(): string {
+    const exe = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
+    const fromEnv = this.config.get<string>('FFPROBE_BIN')?.trim();
+    if (fromEnv && existsSync(fromEnv)) return fromEnv;
+    const ffmpegFromEnv = this.config.get<string>('FFMPEG_BIN')?.trim();
+    if (ffmpegFromEnv) {
+      const alongside = path.join(path.dirname(ffmpegFromEnv), exe);
+      if (existsSync(alongside)) return alongside;
+    }
+
+    const candidates = [
+      path.join(process.cwd(), 'ffmpeg', 'bin', exe),
+      path.join(process.cwd(), 'backend', 'ffmpeg', 'bin', exe),
+      path.join(__dirname, '..', '..', '..', 'ffmpeg', 'bin', exe),
+    ];
+    for (const p of candidates) {
+      if (existsSync(p)) return p;
+    }
+    return exe;
+  }
+
   private async writeTempInput(dir: string, media: TranscribeMediaInput): Promise<string> {
     const ext = path.extname(media.originalname) || '.bin';
     const p = path.join(dir, `input${ext}`);
@@ -176,6 +197,174 @@ export class FfmpegAudioService {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, path: bin, error: msg };
     }
+  }
+
+  async probeDurationSeconds(input: {
+    buffer: Buffer;
+    originalname: string;
+  }): Promise<number | null> {
+    const bin = this.resolveFfprobeBinary();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffprobe-'));
+    const inputPath = path.join(
+      tmpDir,
+      `input${path.extname(input.originalname) || '.bin'}`,
+    );
+
+    try {
+      await fs.writeFile(inputPath, input.buffer);
+      const { stdout } = await execFileAsync(
+        bin,
+        [
+          '-v',
+          'error',
+          '-show_entries',
+          'format=duration',
+          '-of',
+          'default=noprint_wrappers=1:nokey=1',
+          inputPath,
+        ],
+        {
+          timeout: 20_000,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+      const seconds = Number((stdout?.toString() ?? '').trim());
+      return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+    } catch (error) {
+      this.logger.warn(
+        `FFprobe duration probe failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  async replaceVideoAudio(params: {
+    video: { buffer: Buffer; originalname: string };
+    audio: { buffer: Buffer; originalname?: string };
+  }): Promise<TranscribeMediaInput> {
+    const bin = this.resolveFfmpegBinary();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-mux-'));
+    const videoExt = path.extname(params.video.originalname) || '.mp4';
+    const audioExt = path.extname(params.audio.originalname || '') || '.mp3';
+    const inputVideo = path.join(tmpDir, `input-video${videoExt}`);
+    const inputAudio = path.join(tmpDir, `input-audio${audioExt}`);
+    const outputVideo = path.join(tmpDir, 'lip-sync-input.mp4');
+
+    try {
+      await fs.writeFile(inputVideo, params.video.buffer);
+      await fs.writeFile(inputAudio, params.audio.buffer);
+      const args = [
+        '-nostdin',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-i',
+        inputVideo,
+        '-i',
+        inputAudio,
+        '-map',
+        '0:v:0',
+        '-map',
+        '1:a:0',
+        '-c:v',
+        'copy',
+        '-c:a',
+        'aac',
+        '-shortest',
+        outputVideo,
+      ];
+      await execFileAsync(bin, args, {
+        maxBuffer: 32 * 1024 * 1024,
+        windowsHide: true,
+      });
+      const buffer = await fs.readFile(outputVideo);
+      return {
+        buffer,
+        originalname: 'lip-sync-input.mp4',
+        mimetype: 'video/mp4',
+        size: buffer.length,
+      };
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
+  async burnAssSubtitles(params: {
+    inputVideoPath: string;
+    subtitleAssPath: string;
+    outputVideoPath: string;
+    clipSeconds?: number;
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const filter = `subtitles='${this.escapeFilterPath(params.subtitleAssPath)}'`;
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      params.inputVideoPath,
+      '-vf',
+      filter,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '20',
+      '-c:a',
+      'copy',
+    ];
+    if (params.clipSeconds && params.clipSeconds > 0) {
+      args.push('-t', String(params.clipSeconds));
+    }
+    args.push(params.outputVideoPath);
+    await execFileAsync(bin, args, {
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
+  async clipVideo(params: {
+    inputVideoPath: string;
+    outputVideoPath: string;
+    clipSeconds?: number;
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      params.inputVideoPath,
+      '-c',
+      'copy',
+    ];
+    if (params.clipSeconds && params.clipSeconds > 0) {
+      args.push('-t', String(params.clipSeconds));
+    }
+    args.push(params.outputVideoPath);
+    await execFileAsync(bin, args, {
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
+  private escapeFilterPath(filePath: string): string {
+    return path
+      .resolve(filePath)
+      .replace(/\\/g, '/')
+      .replace(/:/g, '\\:')
+      .replace(/'/g, "\\'");
   }
 
   private async runExtract(

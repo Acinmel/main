@@ -8,6 +8,7 @@ import { DigitalHumanImageService } from './digital-human-image.service';
 import { SeedanceI2vService } from './seedance-i2v.service';
 import { ArkI2vVideoService } from './ark-i2v-video.service';
 import { AliLipSyncService } from './ali-lip-sync.service';
+import { QwenVoiceCloneService } from './qwen-voice-clone.service';
 import { TranscriptStore } from '../transcription/transcript.store';
 
 @Module({
@@ -21,6 +22,7 @@ import { TranscriptStore } from '../transcription/transcript.store';
     SeedanceI2vService,
     ArkI2vVideoService,
     AliLipSyncService,
+    QwenVoiceCloneService,
     TranscriptStore,
   ],
   exports: [
@@ -33,6 +35,7 @@ import { TranscriptStore } from '../transcription/transcript.store';
     SeedanceI2vService,
     ArkI2vVideoService,
     AliLipSyncService,
+    QwenVoiceCloneService,
     TranscriptStore,
   ],
 })

@@ -27,6 +27,11 @@ export interface VoiceResourceDto {
   recommended: boolean;
   audioUrl: string;
   cloneStatus: 'ready' | 'processing' | 'failed';
+  provider: string | null;
+  providerVoice: string | null;
+  providerModel: string | null;
+  sampleDurationMs: number | null;
+  cloneError: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -54,6 +59,11 @@ export interface ResourceRow {
   audio_url?: string | null;
   style_id?: string | null;
   clone_status?: string | null;
+  provider?: string | null;
+  provider_voice?: string | null;
+  provider_model?: string | null;
+  sample_duration_ms?: number | null;
+  clone_error?: string | null;
   style_json?: string | null;
   created_at: string;
   updated_at: string;

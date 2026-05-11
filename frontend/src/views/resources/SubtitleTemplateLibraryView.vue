@@ -240,8 +240,8 @@ async function confirmDelete() {
   padding: 22px 28px 48px;
   color: var(--text-main);
   background:
-    radial-gradient(circle at 86% 14%, rgba(22, 242, 139, 0.1), transparent 28%),
-    linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.12));
+    radial-gradient(circle at 86% 14%, rgba(75, 107, 255, 0.1), transparent 24%),
+    linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16));
 }
 
 .template-grid {
@@ -258,10 +258,6 @@ async function confirmDelete() {
   padding: 18px;
   color: var(--text-sub);
   text-align: center;
-}
-
-.template-modal {
-  width: min(620px, calc(100vw - 32px));
 }
 
 @media (max-width: 760px) {

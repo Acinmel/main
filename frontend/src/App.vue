@@ -3,13 +3,15 @@ import {
   NConfigProvider,
   NDialogProvider,
   NMessageProvider,
-  zhCN,
   dateZhCN,
+  zhCN,
 } from 'naive-ui'
 import { onErrorCaptured, ref } from 'vue'
+import { RouterView } from 'vue-router'
 import { appThemeOverrides } from '@/theme/naive-ui-overrides'
 
 const childError = ref<string | null>(null)
+
 onErrorCaptured((err) => {
   childError.value = err instanceof Error ? err.message : String(err)
   console.error('[App] child render error', err)
@@ -19,7 +21,7 @@ onErrorCaptured((err) => {
 
 <template>
   <div v-if="childError" class="app-fatal">
-    页面渲染出错（请把下列信息发开发者），或先尝试硬刷新/清除缓存后重开：
+    页面渲染出现错误，请稍后刷新重试。
     <pre class="app-fatal__pre">{{ childError }}</pre>
   </div>
   <n-config-provider
@@ -31,7 +33,7 @@ onErrorCaptured((err) => {
     <n-dialog-provider>
       <n-message-provider
         placement="top"
-        :duration="5600"
+        :duration="5200"
         :closable="true"
         :max="6"
         container-class="app-message-root"
@@ -41,7 +43,11 @@ onErrorCaptured((err) => {
           paddingRight: 'max(20px, env(safe-area-inset-right))',
         }"
       >
-        <router-view />
+        <RouterView v-slot="{ Component, route }">
+          <Transition name="route-fade" mode="out-in">
+            <component :is="Component" :key="route.fullPath" />
+          </Transition>
+        </RouterView>
       </n-message-provider>
     </n-dialog-provider>
   </n-config-provider>
@@ -50,19 +56,20 @@ onErrorCaptured((err) => {
 <style scoped>
 .app-fatal {
   padding: 24px;
-  color: #991b1b;
+  color: #a82647;
   background: var(--bg-main);
   min-height: 100vh;
-  font: 15px/1.6 var(--font-sans);
   box-sizing: border-box;
+  font: 15px/1.7 var(--font-sans);
 }
+
 .app-fatal__pre {
   margin-top: 12px;
-  padding: 12px;
-  background: var(--bg-soft);
-  border-radius: 8px;
+  padding: 14px;
   overflow: auto;
-  font-size: 13px;
+  border: 1px solid var(--border-soft);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.9);
   white-space: pre-wrap;
   word-break: break-word;
 }

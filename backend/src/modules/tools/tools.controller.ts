@@ -20,6 +20,7 @@ import { constants as fsConstants } from 'fs';
 import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Express, Request, Response } from 'express';
 import { createReadStream, existsSync } from 'fs';
@@ -37,18 +38,22 @@ import {
   type ArkI2vTaskSubmitBody,
 } from '../../integrations/ai/ark-i2v-video.service';
 import { AliLipSyncService } from '../../integrations/ai/ali-lip-sync.service';
+import { SpeechAiService } from '../../integrations/ai/speech-ai.service';
 import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.service';
 import {
   FfmpegAudioService,
   type TranscribeMediaInput,
 } from '../../integrations/media/ffmpeg-audio.service';
+import { DouyinBenchmarkService } from '../../integrations/video/douyin-benchmark.service';
 import { VideoMediaDownloadService } from '../../integrations/video/video-media-download.service';
 import { VideoMetaService } from '../../integrations/video/video-meta.service';
 import { TranscriptStore } from '../../integrations/transcription/transcript.store';
 import type { TranscribeResultDto } from '../../integrations/transcription/transcript.types';
 import type { RewriteStyle } from '../tasks/tasks.types';
 import { DigitalHumanPersistenceService } from '../digital-human/digital-human-persistence.service';
+import { ResourcesService } from '../resources/resources.service';
 import { Public } from '../auth/public.decorator';
+import { SubtitleWorkflowService } from './subtitle-workflow.service';
 
 class SourceVideoUrlDto {
   /** 支持抖音整段分享文案或纯 URL */
@@ -60,6 +65,10 @@ class DouyinTranscribeRewriteDto extends SourceVideoUrlDto {
   rewriteStyle?: RewriteStyle;
 }
 
+class DouyinHomepageLearnDto {
+  homepageUrl!: string;
+}
+
 class SourceVideoFileDto {
   /** 支持抖音整段分享文案或纯 URL */
   sourceVideoUrl!: string;
@@ -68,6 +77,31 @@ class SourceVideoFileDto {
    * 前端可随后调用 `transcribe-saved-video` 以展示分阶段进度。
    */
   transcribe?: boolean;
+}
+
+class OptimizeOralScriptDto {
+  sourceText!: string;
+  sourceVideoUrl?: string;
+}
+
+class LipSyncPreviewDto {
+  script!: string;
+  avatarResourceId!: string;
+  voiceResourceId!: string;
+}
+
+class VoicePreviewDto {
+  script!: string;
+  voiceResourceId!: string;
+}
+
+class SubtitleWorkflowPreviewDto extends LipSyncPreviewDto {
+  subtitleTemplateId!: string;
+  previewSeconds?: number;
+}
+
+class SubtitleWorkflowFinalizeDto {
+  draftId!: string;
 }
 
 const LIP_SYNC_MAX_DURATION_SECONDS = 5 * 60;
@@ -85,6 +119,24 @@ function getVideoSaveDir(config: ConfigService): string {
   return process.platform === 'win32'
     ? 'C:\\downloadVideo'
     : path.join(os.homedir(), 'downloadVideo');
+}
+
+function getPreviewVideoSaveDir(config: ConfigService): string {
+  const fromEnv = config.get<string>('PREVIEW_VIDEO_SAVE_DIR')?.trim();
+  if (fromEnv) return path.resolve(fromEnv);
+  return path.join(getVideoSaveDir(config), 'preview-videos');
+}
+
+function getPreviewAudioSaveDir(config: ConfigService): string {
+  const fromEnv = config.get<string>('PREVIEW_AUDIO_SAVE_DIR')?.trim();
+  if (fromEnv) return path.resolve(fromEnv);
+  return path.join(getVideoSaveDir(config), 'preview-audios');
+}
+
+function getLipSyncPublicMediaDir(config: ConfigService, kind: 'videos' | 'audios'): string {
+  const root = config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR')?.trim();
+  if (root) return path.join(path.resolve(root), kind);
+  return path.join(getVideoSaveDir(config), 'lip-sync-public', kind);
 }
 
 function sanitizeFilenameForDisk(name: string): string {
@@ -155,10 +207,14 @@ export class ToolsController {
     private readonly rewriteAi: RewriteAiService,
     private readonly videoGenerateLlm: VideoGenerateLlmService,
     private readonly digitalHumanImage: DigitalHumanImageService,
+    private readonly douyinBenchmark: DouyinBenchmarkService,
     private readonly digitalHumanPersistence: DigitalHumanPersistenceService,
     private readonly seedanceI2v: SeedanceI2vService,
     private readonly arkI2vVideo: ArkI2vVideoService,
     private readonly aliLipSync: AliLipSyncService,
+    private readonly speechAi: SpeechAiService,
+    private readonly resources: ResourcesService,
+    private readonly subtitleWorkflow: SubtitleWorkflowService,
   ) {}
 
   /**
@@ -313,6 +369,21 @@ export class ToolsController {
       }
     }
 
+    if (!this.aliLipSync.isConfigured()) {
+      const previewUrl = await this.persistPreviewVideo({
+        buffer: file.buffer,
+        originalname: file.originalname || 'lip-sync-input.mp4',
+      });
+      return {
+        videoUrl: previewUrl,
+        providerResponse: {
+          fallback: true,
+          reason: 'lip-sync-api-unconfigured',
+        },
+        hint: '当前环境未配置对口型 API，已直接返回上传视频用于流程联调。',
+      };
+    }
+
     return this.aliLipSync.submitVideo({
       buffer: file.buffer,
       filename: file.originalname,
@@ -321,7 +392,237 @@ export class ToolsController {
     });
   }
 
+  @Post('lip-sync-preview')
+  async createLipSyncPreview(@Req() req: Request, @Body() body: LipSyncPreviewDto) {
+    const script = body.script?.trim() ?? '';
+    if (script.length < 2) {
+      throw new BadRequestException('口播文案过短或为空');
+    }
+    if (!body.avatarResourceId?.trim()) {
+      throw new BadRequestException('avatarResourceId 不能为空');
+    }
+    if (!body.voiceResourceId?.trim()) {
+      throw new BadRequestException('voiceResourceId 不能为空');
+    }
+
+    const userId = req.userId!;
+    const [avatar, voice] = await Promise.all([
+      this.resources.getAvatar(userId, body.avatarResourceId.trim()),
+      this.resources.getVoice(userId, body.voiceResourceId.trim()),
+    ]);
+    if (!avatar.originalVideoUrl?.trim()) {
+      throw new BadRequestException('该数字人资源未配置原始视频');
+    }
+
+    const videoMedia = await this.readVideoFromSourceRef(avatar.originalVideoUrl);
+    const estimatedTotalSeconds = Math.min(
+      180,
+      Math.max(15, Math.round(script.length * 0.22)),
+    );
+    const hintParts: string[] = [];
+
+    const fallbackToPreview = async (
+      video: {
+        buffer: Buffer;
+        originalname: string;
+        mimetype?: string;
+      },
+      reason: string,
+      providerResponse: Record<string, unknown>,
+    ) => {
+      const previewUrl = await this.persistPreviewVideo({
+        buffer: video.buffer,
+        originalname: video.originalname,
+      });
+      return {
+        optimizedScript: script,
+        llmUsed: false,
+        estimatedTotalSeconds,
+        videoUrl: previewUrl,
+        hint: hintParts.join(' '),
+        providerResponse: {
+          ...providerResponse,
+          fallback: true,
+          reason,
+          previewMimeType: video.mimetype || guessMimeFromFilename(video.originalname),
+        },
+      };
+    };
+
+    let speech!: Awaited<ReturnType<SpeechAiService['synthesizeAudio']>>;
+    try {
+      speech = await this.speechAi.synthesizeAudio({
+        text: script,
+        voiceStyleId: voice.id,
+        voiceName: voice.name,
+        provider: voice.provider,
+        providerVoice: voice.providerVoice,
+        providerModel: voice.providerModel,
+      });
+      hintParts.push(`已用「${voice.name}」生成配音音轨。`);
+    } catch (e) {
+      hintParts.push(
+        `当前环境未走通真实 TTS（${toSingleErrorMessage(e)}），已回退为原始出镜视频，便于先联调整体流程。`,
+      );
+      return fallbackToPreview(videoMedia, 'speech-unavailable', {
+        ttsConfigured: this.speechAi.isConfigured(),
+        lipSyncConfigured: this.aliLipSync.isConfigured(),
+      });
+    }
+
+    let workingVideo:
+      | {
+          buffer: Buffer;
+          originalname: string;
+          mimetype: string;
+        }
+      | {
+          buffer: Buffer;
+          originalname: string;
+          mimetype?: string;
+        } = videoMedia;
+    try {
+      workingVideo = await this.ffmpegAudio.replaceVideoAudio({
+        video: {
+          buffer: videoMedia.buffer,
+          originalname: videoMedia.originalname,
+        },
+        audio: {
+          buffer: speech.buffer,
+          originalname: `tts${this.audioExtensionForMime(speech.mimeType)}`,
+        },
+      });
+      hintParts.push(`已把配音写入「${avatar.name}」的原始视频。`);
+    } catch (e) {
+      hintParts.push(
+        `音轨替换失败（${toSingleErrorMessage(e)}），已回退为原始出镜视频。`,
+      );
+      return fallbackToPreview(videoMedia, 'mux-failed', {
+        ttsConfigured: this.speechAi.isConfigured(),
+        lipSyncConfigured: this.aliLipSync.isConfigured(),
+        voice: speech.voice,
+      });
+    }
+
+    if (!this.aliLipSync.isConfigured()) {
+      hintParts.push('当前环境未配置对口型 API，已返回换音轨预览，可先联调前后端流程。');
+      return fallbackToPreview(workingVideo, 'lip-sync-unconfigured', {
+        ttsConfigured: this.speechAi.isConfigured(),
+        lipSyncConfigured: false,
+        voice: speech.voice,
+      });
+    }
+
+    try {
+      const result = await this.aliLipSync.submitLipSync({
+        video: {
+          buffer: videoMedia.buffer,
+          filename: videoMedia.originalname,
+          mimeType: videoMedia.mimetype || guessMimeFromFilename(videoMedia.originalname),
+        },
+        audio: {
+          buffer: speech.buffer,
+          filename: `tts${this.audioExtensionForMime(speech.mimeType)}`,
+          mimeType: speech.mimeType,
+        },
+      });
+
+      return {
+        optimizedScript: script,
+        llmUsed: false,
+        estimatedTotalSeconds,
+        videoUrl: result.videoUrl,
+        hint:
+          result.hint ||
+          `${hintParts.join(' ')} 已使用「${voice.name}」驱动「${avatar.name}」生成对口型预览。`,
+        providerResponse: result.providerResponse,
+      };
+    } catch (e) {
+      hintParts.push(
+        `对口型接口调用失败（${toSingleErrorMessage(e)}），已回退为换音轨预览。`,
+      );
+      return fallbackToPreview(workingVideo, 'lip-sync-failed', {
+        ttsConfigured: this.speechAi.isConfigured(),
+        lipSyncConfigured: true,
+        voice: speech.voice,
+      });
+    }
+  }
+
+  @Post('voice-preview')
+  async createVoicePreview(@Req() req: Request, @Body() body: VoicePreviewDto) {
+    const script = body.script?.trim() ?? '';
+    if (script.length < 2) {
+      throw new BadRequestException('口播文案过短或为空');
+    }
+    if (!body.voiceResourceId?.trim()) {
+      throw new BadRequestException('voiceResourceId 不能为空');
+    }
+
+    const voice = await this.resources.getVoice(req.userId!, body.voiceResourceId.trim());
+    const estimatedDurationSeconds = Math.max(2.8, Math.min(24, script.length * 0.22));
+
+    try {
+      const speech = await this.speechAi.synthesizeAudio({
+        text: script,
+        voiceStyleId: voice.id,
+        voiceName: voice.name,
+        provider: voice.provider,
+        providerVoice: voice.providerVoice,
+        providerModel: voice.providerModel,
+      });
+      return {
+        audioUrl: await this.persistPreviewAudio({
+          buffer: speech.buffer,
+          originalname: `tts-preview${this.audioExtensionForMime(speech.mimeType)}`,
+        }),
+        hint: `已用「${voice.name}」生成可试听的配音音轨。`,
+        ttsMode: 'provider' as const,
+        voiceLabel: voice.name,
+        durationSeconds: estimatedDurationSeconds,
+      };
+    } catch (e) {
+      const fallbackAudio = this.buildSilentWav(estimatedDurationSeconds);
+      return {
+        audioUrl: await this.persistPreviewAudio({
+          buffer: fallbackAudio,
+          originalname: 'tts-preview-fallback.wav',
+        }),
+        hint: `当前环境未走通真实 TTS（${toSingleErrorMessage(
+          e,
+        )}），已回退为静音占位音频，方便继续联调第二步流程。`,
+        ttsMode: 'mock' as const,
+        voiceLabel: voice.name,
+        durationSeconds: estimatedDurationSeconds,
+      };
+    }
+  }
+
   /** 数字人风格列表（id + 中文名；具体提示词仅服务端在调用时使用） */
+  @Post('subtitle-workflow-preview')
+  async createSubtitleWorkflowPreview(
+    @Req() req: Request,
+    @Body() body: SubtitleWorkflowPreviewDto,
+  ) {
+    if (!body.subtitleTemplateId?.trim()) {
+      throw new BadRequestException('subtitleTemplateId 不能为空');
+    }
+    return this.subtitleWorkflow.createPreview(req.userId!, {
+      script: body.script,
+      avatarResourceId: body.avatarResourceId,
+      voiceResourceId: body.voiceResourceId,
+      subtitleTemplateId: body.subtitleTemplateId,
+      previewSeconds: body.previewSeconds,
+    });
+  }
+
+  @Post('subtitle-workflow-finalize')
+  async finalizeSubtitleWorkflow(@Req() req: Request, @Body() body: SubtitleWorkflowFinalizeDto) {
+    return this.subtitleWorkflow.finalizeDraft(req.userId!, {
+      draftId: body.draftId,
+    });
+  }
+
   @Get('digital-human-styles')
   digitalHumanStyles() {
     return this.digitalHumanImage.listStyles();
@@ -489,6 +790,177 @@ export class ToolsController {
     return full;
   }
 
+  private resolveSavedVideoPathMaybe(sourceRef: string): string | null {
+    const ref = sourceRef.trim();
+    if (!ref || /^https?:\/\//i.test(ref)) return null;
+    const dir = path.resolve(getVideoSaveDir(this.config));
+    const basename = path.basename(ref);
+    if (!basename || /[\\/]/.test(basename) || basename.includes('..')) {
+      throw new BadRequestException('本地视频仅支持 VIDEO_SAVE_DIR 目录下的文件名');
+    }
+    const full = path.resolve(path.join(dir, basename));
+    const rel = path.relative(dir, full);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new BadRequestException('本地视频路径不合法');
+    }
+    return full;
+  }
+
+  private resolvePreviewVideoPathOrThrow(fileName: string): string {
+    const base = assertSafeSavedBasename(fileName);
+    const dir = path.resolve(getPreviewVideoSaveDir(this.config));
+    const full = path.resolve(path.join(dir, base));
+    const rel = path.relative(dir, full);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new BadRequestException('非法预览文件路径');
+    }
+    return full;
+  }
+
+  private resolvePreviewAudioPathOrThrow(fileName: string): string {
+    const base = assertSafeSavedBasename(fileName);
+    const dir = path.resolve(getPreviewAudioSaveDir(this.config));
+    const full = path.resolve(path.join(dir, base));
+    const rel = path.relative(dir, full);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new BadRequestException('非法预览音频路径');
+    }
+    return full;
+  }
+
+  private resolveLipSyncPublicMediaPathOrThrow(
+    kind: string,
+    fileName: string,
+  ): { full: string; kind: 'videos' | 'audios' } {
+    if (kind !== 'videos' && kind !== 'audios') {
+      throw new BadRequestException('invalid lip-sync public media kind');
+    }
+    const base = assertSafeSavedBasename(fileName);
+    const dir = path.resolve(getLipSyncPublicMediaDir(this.config, kind));
+    const full = path.resolve(path.join(dir, base));
+    const rel = path.relative(dir, full);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new BadRequestException('invalid lip-sync public media path');
+    }
+    return { full, kind };
+  }
+
+  private async persistPreviewVideo(params: {
+    buffer: Buffer;
+    originalname: string;
+  }): Promise<string> {
+    const dir = path.resolve(getPreviewVideoSaveDir(this.config));
+    await fs.mkdir(dir, { recursive: true });
+    const ext = path.extname(params.originalname || '').toLowerCase() || '.mp4';
+    const safeExt = /^\.[a-z0-9]{2,6}$/i.test(ext) ? ext : '.mp4';
+    const fileName = `${Date.now()}_${randomUUID().slice(0, 8)}${safeExt}`;
+    await fs.writeFile(path.join(dir, fileName), params.buffer);
+    return `/api/v1/tools/preview-videos/${encodeURIComponent(fileName)}/stream`;
+  }
+
+  private async persistPreviewAudio(params: {
+    buffer: Buffer;
+    originalname: string;
+  }): Promise<string> {
+    const dir = path.resolve(getPreviewAudioSaveDir(this.config));
+    await fs.mkdir(dir, { recursive: true });
+    const ext = path.extname(params.originalname || '').toLowerCase() || '.mp3';
+    const safeExt = /^\.[a-z0-9]{2,6}$/i.test(ext) ? ext : '.mp3';
+    const fileName = `${Date.now()}_${randomUUID().slice(0, 8)}${safeExt}`;
+    await fs.writeFile(path.join(dir, fileName), params.buffer);
+    return `/api/v1/tools/preview-audios/${encodeURIComponent(fileName)}/stream`;
+  }
+
+  private audioExtensionForMime(mimeType: string): string {
+    if (mimeType === 'audio/wav') return '.wav';
+    if (mimeType === 'audio/mp4') return '.m4a';
+    return '.mp3';
+  }
+
+  private buildSilentWav(durationSeconds: number): Buffer {
+    const sampleRate = 16_000;
+    const channels = 1;
+    const bitsPerSample = 16;
+    const totalSamples = Math.max(1, Math.round(sampleRate * durationSeconds));
+    const dataSize = totalSamples * channels * (bitsPerSample / 8);
+    const buffer = Buffer.alloc(44 + dataSize);
+
+    buffer.write('RIFF', 0);
+    buffer.writeUInt32LE(36 + dataSize, 4);
+    buffer.write('WAVE', 8);
+    buffer.write('fmt ', 12);
+    buffer.writeUInt32LE(16, 16);
+    buffer.writeUInt16LE(1, 20);
+    buffer.writeUInt16LE(channels, 22);
+    buffer.writeUInt32LE(sampleRate, 24);
+    buffer.writeUInt32LE(sampleRate * channels * (bitsPerSample / 8), 28);
+    buffer.writeUInt16LE(channels * (bitsPerSample / 8), 32);
+    buffer.writeUInt16LE(bitsPerSample, 34);
+    buffer.write('data', 36);
+    buffer.writeUInt32LE(dataSize, 40);
+    return buffer;
+  }
+
+  private async readVideoFromSourceRef(sourceRef: string): Promise<TranscribeMediaInput> {
+    const local = this.resolveSavedVideoPathMaybe(sourceRef);
+    if (local) {
+      try {
+        const buffer = await fs.readFile(local);
+        return {
+          buffer,
+          originalname: path.basename(local),
+          mimetype: guessMimeFromFilename(local),
+          size: buffer.length,
+        };
+      } catch {
+        throw new NotFoundException(`未找到本地视频文件：${path.basename(local)}`);
+      }
+    }
+
+    const normalized = normalizeSourceVideoUrl(sourceRef) || sourceRef.trim();
+    if (!/^https?:\/\//i.test(normalized)) {
+      throw new BadRequestException('视频资源需填写可访问的视频 URL，或 VIDEO_SAVE_DIR 下的文件名');
+    }
+
+    if (normalized.toLowerCase().includes('douyin.com')) {
+      const dl = await this.videoMediaDownload.tryDownloadForTranscription(normalized);
+      if (!dl.ok) {
+        throw new BadRequestException('抖音视频下载失败，请先确认 Cookie 与链接有效');
+      }
+      return dl.media;
+    }
+
+    const timeoutMs = Number(this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 120_000);
+    const maxBytes = getLipSyncVideoMaxBytes();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(normalized, {
+        method: 'GET',
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        throw new BadRequestException(`视频下载失败：HTTP ${res.status}`);
+      }
+      const buffer = Buffer.from(await res.arrayBuffer());
+      if (!buffer.length || buffer.length > maxBytes) {
+        throw new BadRequestException('视频文件为空或超过上传上限');
+      }
+      const filename = sanitizeFilenameForDisk(
+        path.basename(new URL(res.url || normalized).pathname) || 'avatar-video.mp4',
+      );
+      return {
+        buffer,
+        originalname: filename,
+        mimetype: guessMimeFromFilename(filename),
+        size: buffer.length,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /**
    * 数字人形象：当前进程是否读到 ARK / Seedream / 自建 URL（不返回密钥）。
    * 排障：curl http://127.0.0.1:8080/api/v1/tools/digital-human-env
@@ -514,6 +986,14 @@ export class ToolsController {
   dyDownloaderCookieStatus() {
     const configured = !!this.config.get<string>('DY_DOWNLOADER_COOKIE')?.trim();
     return { configured };
+  }
+
+  @Post('douyin-homepage-learn')
+  async learnDouyinHomepage(@Body() body: DouyinHomepageLearnDto) {
+    if (!body?.homepageUrl?.trim()) {
+      throw new BadRequestException('homepageUrl 不能为空');
+    }
+    return this.douyinBenchmark.learnHomepage(body.homepageUrl);
   }
 
   /** 第三步：检查 ASR API 是否可达（不消耗模型推理） */
@@ -689,6 +1169,18 @@ export class ToolsController {
   /**
    * 抓取视频页 HTML 并解析 Open Graph 等元信息（不调用 AI；可能被平台反爬限制）
    */
+  @Post('optimize-oral-script')
+  async optimizeOralScript(@Body() body: OptimizeOralScriptDto) {
+    const sourceText = body?.sourceText?.trim() ?? '';
+    if (!sourceText) {
+      throw new BadRequestException('sourceText 不能为空');
+    }
+    return this.rewriteAi.optimizeHookedOralScript({
+      source: sourceText,
+      sourceVideoUrl: body?.sourceVideoUrl?.trim(),
+    });
+  }
+
   @Post('video-meta')
   async fetchVideoMeta(@Body() body: SourceVideoUrlDto) {
     if (!body?.sourceVideoUrl?.trim()) {
@@ -815,6 +1307,72 @@ export class ToolsController {
   /**
    * 对已保存到本地目录的视频文件做 FFmpeg 抽音轨 + ASR，返回口播全文（与 source-video-file 转写环节一致）。
    */
+  @Get('saved-videos/:fileName/stream')
+  async streamSavedVideo(
+    @Param('fileName') fileName: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const full = this.resolveSavedVideoPathOrThrow(this.config, fileName);
+    try {
+      await fs.access(full);
+    } catch {
+      throw new NotFoundException(`未找到文件：${path.basename(full)}`);
+    }
+    res.setHeader('Content-Type', guessMimeFromFilename(full));
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    return new StreamableFile(createReadStream(full));
+  }
+
+  @Get('preview-videos/:fileName/stream')
+  async streamPreviewVideo(
+    @Param('fileName') fileName: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const full = this.resolvePreviewVideoPathOrThrow(fileName);
+    try {
+      await fs.access(full);
+    } catch {
+      throw new NotFoundException(`未找到预览文件：${path.basename(full)}`);
+    }
+    res.setHeader('Content-Type', guessMimeFromFilename(full));
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return new StreamableFile(createReadStream(full));
+  }
+
+  @Public()
+  @Get('lip-sync-public/:kind/:fileName/stream')
+  async streamLipSyncPublicMedia(
+    @Param('kind') kind: string,
+    @Param('fileName') fileName: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const { full } = this.resolveLipSyncPublicMediaPathOrThrow(kind, fileName);
+    try {
+      await fs.access(full);
+    } catch {
+      throw new NotFoundException(`lip-sync public media not found: ${path.basename(full)}`);
+    }
+    res.setHeader('Content-Type', guessMimeFromFilename(full));
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    return new StreamableFile(createReadStream(full));
+  }
+
+  @Get('preview-audios/:fileName/stream')
+  async streamPreviewAudio(
+    @Param('fileName') fileName: string,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const full = this.resolvePreviewAudioPathOrThrow(fileName);
+    try {
+      await fs.access(full);
+    } catch {
+      throw new NotFoundException(`未找到预览音频：${path.basename(full)}`);
+    }
+    res.setHeader('Content-Type', guessMimeFromFilename(full));
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return new StreamableFile(createReadStream(full));
+  }
+
   @Post('transcribe-saved-video')
   async transcribeSavedVideo(@Body() body: { fileName?: string }): Promise<{
     transcript: TranscribeResultDto | null;

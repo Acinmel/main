@@ -68,11 +68,11 @@ function saveName() {
 <style scoped>
 .voice-card {
   overflow: hidden;
-  border: 1px solid var(--border-soft);
+  border: 1px solid rgba(255, 255, 255, 0.58);
   border-radius: 26px;
-  background: linear-gradient(180deg, rgba(8, 28, 21, 0.8), rgba(2, 10, 7, 0.9));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(246, 249, 255, 0.82));
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.94),
     var(--shadow-soft);
   transition:
     border-color var(--transition-fast),
@@ -83,9 +83,8 @@ function saveName() {
 .voice-card:hover {
   border-color: var(--border-strong);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 18px 44px rgba(0, 0, 0, 0.38),
-    0 0 30px rgba(22, 242, 139, 0.12);
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    var(--shadow-panel);
   transform: translateY(-5px);
 }
 
@@ -107,7 +106,7 @@ function saveName() {
   top: 10px;
   right: 10px;
   color: var(--primary);
-  background: rgba(22, 242, 139, 0.1);
+  background: rgba(75, 107, 255, 0.08);
 }
 
 .voice-card__play {
@@ -115,19 +114,19 @@ function saveName() {
   height: 54px;
   color: var(--primary);
   cursor: pointer;
-  border: 1px solid rgba(22, 242, 139, 0.22);
+  border: 1px solid rgba(121, 144, 184, 0.22);
   border-radius: 18px;
   background:
-    radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.18), transparent 28%),
-    rgba(22, 242, 139, 0.08);
-  box-shadow: 0 10px 26px rgba(22, 242, 139, 0.12);
+    radial-gradient(circle at 30% 20%, rgba(255, 255, 255, 0.36), transparent 28%),
+    rgba(75, 107, 255, 0.08);
+  box-shadow: 0 10px 26px rgba(75, 107, 255, 0.12);
 }
 
 .voice-card__play:hover {
-  color: #02110a;
-  border-color: rgba(22, 242, 139, 0.42);
-  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
-  box-shadow: 0 0 28px rgba(22, 242, 139, 0.24);
+  color: #ffffff;
+  border-color: rgba(75, 107, 255, 0.32);
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  box-shadow: 0 0 28px rgba(75, 107, 255, 0.22);
   transform: translateY(-2px) scale(1.04);
 }
 

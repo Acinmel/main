@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
-import { NAlert, NButton, NText } from 'naive-ui'
+import { NButton, NIcon } from 'naive-ui'
+import {
+  AlbumsOutline,
+  HomeOutline,
+  LogInOutline,
+  PersonCircleOutline,
+  SparklesOutline,
+  VideocamOutline,
+} from '@vicons/ionicons5'
 import { useDigitalHumanStore } from '@/stores/digitalHuman'
 import { useTaskDraftStore } from '@/stores/taskDraft'
 import { useUserStore } from '@/stores/user'
@@ -16,10 +24,60 @@ const isPendingNonAdmin = computed(
   () => user.profile?.accountStatus === 'pending' && user.profile?.role !== 'admin',
 )
 
-const brandTo = computed(() =>
-  isPendingNonAdmin.value ? { name: 'account-pending' as const } : { name: 'landing' as const },
-)
-const isLanding = computed(() => route.name === 'landing')
+const navItems = computed(() => {
+  if (isPendingNonAdmin.value) {
+    return [
+      {
+        label: '账号审核',
+        name: 'account-pending',
+        icon: SparklesOutline,
+      },
+    ]
+  }
+
+  const base = [
+    { label: '首页', name: 'landing', icon: HomeOutline },
+    { label: '视频创作', name: 'studio', icon: VideocamOutline },
+  ]
+
+  if (!user.isLoggedIn) {
+    return [...base, { label: '登录 / 注册', name: 'login', icon: LogInOutline }]
+  }
+
+  return [
+    ...base,
+    { label: '数字人库', name: 'home', icon: PersonCircleOutline },
+    { label: '资源库', name: 'resource-library', icon: AlbumsOutline },
+  ]
+})
+
+const pageTitle = computed(() => String(route.meta.title || 'AI 内容工作台'))
+
+const primaryTo = computed(() => {
+  if (isPendingNonAdmin.value) return { name: 'account-pending' as const }
+  return user.isLoggedIn ? { name: 'studio' as const } : { name: 'register' as const }
+})
+
+const primaryText = computed(() => (user.isLoggedIn ? '立即创作' : '免费注册 / 登录'))
+
+const secondaryTo = computed(() => {
+  if (user.isLoggedIn) return { name: 'resource-library' as const }
+  return { name: 'login' as const }
+})
+
+const secondaryText = computed(() => (user.isLoggedIn ? '进入资源库' : '账号入口'))
+
+const memberTitle = computed(() => {
+  if (!user.profile?.email) return '未登录'
+  return user.profile.email
+})
+
+const memberSubtitle = computed(() => {
+  if (!user.isLoggedIn) return 'AI Ready'
+  if (user.profile?.role === 'admin') return '管理员已登录'
+  if (user.profile?.accountStatus === 'pending') return '等待审核中'
+  return '工作台已就绪'
+})
 
 async function clearBrowserCaches() {
   sessionStorage.clear()
@@ -35,297 +93,426 @@ async function logout() {
   try {
     await clearBrowserCaches()
   } catch {
-    // Cache API may be unavailable or blocked; session cleanup above is still enough to log out.
+    // ignore
   }
   void router.replace({ name: 'landing' })
 }
 
 onMounted(() => {
-  void user.hydrateProfile()
+  if (user.token && !user.profile) {
+    void user.hydrateProfile()
+  }
 })
 </script>
 
 <template>
   <div class="shell">
-    <aside v-if="!isLanding" class="shell__sidebar">
-      <RouterLink :to="brandTo" class="shell__brand">
-        <span class="shell__logo" aria-hidden="true" />
-        <span class="shell__title-stack">
-          <n-text strong>口播重制</n-text>
-          <n-text depth="3" style="margin-left: 8px; font-size: 12px">Koubo Remake</n-text>
+    <aside class="shell__sidebar glass-panel">
+      <RouterLink :to="{ name: 'landing' }" class="shell__brand">
+        <span class="shell__logo">K</span>
+        <span class="shell__brand-copy">
+          <strong>数字人创作智能体</strong>
+          <small>AI CREATION STUDIO</small>
         </span>
       </RouterLink>
 
-      <nav class="shell__nav">
-        <template v-if="isPendingNonAdmin">
-          <RouterLink :to="{ name: 'account-pending' }" class="shell__nav-link">账号审核</RouterLink>
-        </template>
-        <template v-else>
-          <RouterLink :to="{ name: 'landing' }" class="shell__nav-link">首页</RouterLink>
-          <template v-if="user.isLoggedIn">
-            <RouterLink :to="{ name: 'home' }" class="shell__nav-link">专属数字人</RouterLink>
-            <RouterLink :to="{ name: 'exclusive-voice' }" class="shell__nav-link">专属声音</RouterLink>
-            <RouterLink :to="{ name: 'resource-library' }" class="shell__nav-link">资源库</RouterLink>
-            <RouterLink :to="{ name: 'studio' }" class="shell__nav-link">视频创作</RouterLink>
-          </template>
-        </template>
+      <nav class="shell__nav" aria-label="主导航">
+        <RouterLink
+          v-for="item in navItems"
+          :key="item.name"
+          :to="{ name: item.name as never }"
+          class="shell__nav-link"
+        >
+          <n-icon size="18">
+            <component :is="item.icon" />
+          </n-icon>
+          <span>{{ item.label }}</span>
+        </RouterLink>
       </nav>
 
-      <div class="shell__account">
-        <template v-if="user.isLoggedIn">
-          <n-button block quaternary size="small" @click="logout">退出</n-button>
-        </template>
-        <template v-else>
-          <RouterLink to="/login">
-            <n-button block size="small" type="primary" quaternary>登录</n-button>
-          </RouterLink>
-          <RouterLink to="/register">
-            <n-button block size="small" type="primary">注册</n-button>
-          </RouterLink>
-        </template>
-      </div>
+      <section class="shell__member surface-card">
+        <div class="shell__member-head">
+          <span class="shell__member-badge">会员中心</span>
+          <span class="shell__member-dot" />
+        </div>
+        <div class="shell__member-body">
+          <div class="shell__member-icon">✦</div>
+          <div>
+            <strong>{{ memberTitle }}</strong>
+            <small>{{ memberSubtitle }}</small>
+          </div>
+        </div>
+        <div class="shell__member-footer">
+          <span>AI READY</span>
+          <span>{{ user.isLoggedIn ? '在线' : '24ms' }}</span>
+        </div>
+      </section>
     </aside>
 
-    <n-alert
-      v-if="isPendingNonAdmin && route.name !== 'account-pending'"
-      type="warning"
-      show-icon
-      class="shell__banner"
-    >
-      账号待管理员审核，开通后方可使用专属数字人、口播制作、任务与作品功能。
-    </n-alert>
+    <div class="shell__content">
+      <header class="shell__topbar glass-panel">
+        <div class="shell__headline">
+          <span class="shell__eyebrow">AI CONTENT WORKBENCH</span>
+          <strong>{{ pageTitle }}</strong>
+        </div>
 
-    <main :class="['shell__main', { 'shell__main--with-sidebar': !isLanding }]">
-      <RouterView />
-    </main>
+        <div class="shell__actions">
+          <span class="shell__hint">为短视频团队打造的 AI 内容工作台</span>
+          <RouterLink :to="secondaryTo">
+            <n-button secondary class="shell__secondary-action">{{ secondaryText }}</n-button>
+          </RouterLink>
+          <RouterLink :to="primaryTo">
+            <n-button type="primary" class="shell__primary-action">{{ primaryText }}</n-button>
+          </RouterLink>
+          <n-button v-if="user.isLoggedIn" quaternary @click="logout">退出</n-button>
+        </div>
+      </header>
 
-    <footer v-if="!isLanding" class="shell__footer">
-      <n-text class="shell__footer-txt" depth="3" style="font-size: 12px">
-        MVP · 短视频口播重制工具
-      </n-text>
-    </footer>
+      <main class="shell__main">
+        <RouterView v-slot="{ Component, route: childRoute }">
+          <Transition name="route-fade" mode="out-in">
+            <component :is="Component" :key="childRoute.fullPath" />
+          </Transition>
+        </RouterView>
+      </main>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .shell {
+  --shell-sidebar-width: 252px;
+  --shell-gap: 18px;
+  --shell-pad: 18px;
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: var(--shell-sidebar-width) minmax(0, 1fr);
   min-height: 100vh;
   min-height: 100dvh;
-  --sidebar-width: 224px;
-  color: var(--text-main);
-  background:
-    radial-gradient(circle at 84% 14%, rgba(0, 210, 106, 0.12), transparent 28%),
-    radial-gradient(circle at 38% 54%, rgba(22, 242, 139, 0.06), transparent 36%),
-    linear-gradient(135deg, #000302 0%, var(--bg-main) 42%, #000000 100%);
+  gap: var(--shell-gap);
+  padding: var(--shell-pad);
 }
 
 .shell__sidebar {
-  position: fixed;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 100;
+  position: sticky;
+  top: 18px;
   display: flex;
   flex-direction: column;
   gap: 18px;
-  width: var(--sidebar-width);
-  padding: max(18px, var(--app-safe-top, 0px)) 16px max(18px, var(--app-safe-bottom, 0px));
-  border-right: 1px solid var(--border-soft);
-  background:
-    linear-gradient(180deg, rgba(8, 28, 21, 0.9), rgba(2, 8, 6, 0.94)),
-    rgba(0, 0, 0, 0.72);
-  box-shadow:
-    inset -1px 0 0 rgba(255, 255, 255, 0.03),
-    10px 0 34px rgba(0, 0, 0, 0.34);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-}
-
-.shell__sidebar::before {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  content: '';
-  background:
-    radial-gradient(circle at 0% 12%, rgba(22, 242, 139, 0.14), transparent 34%),
-    radial-gradient(circle at 100% 82%, rgba(0, 210, 106, 0.12), transparent 30%);
-}
-
-.shell__title-stack {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px;
-  min-width: 0;
+  height: calc(100dvh - 36px);
+  padding: 16px;
 }
 
 .shell__brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-width: 0;
-  position: relative;
-  z-index: 1;
+  gap: 12px;
   color: var(--text-main);
-  text-decoration: none;
-  transition: transform var(--transition-smooth);
-}
-
-.shell__brand:hover {
-  transform: translateX(2px);
 }
 
 .shell__logo {
-  width: 30px;
-  height: 30px;
-  border: 1px solid rgba(22, 242, 139, 0.28);
-  border-radius: 10px;
-  background:
-    radial-gradient(circle at 30% 22%, rgba(255, 255, 255, 0.38), transparent 18%),
-    linear-gradient(135deg, var(--primary), var(--primary-deep) 52%, #0ea766);
-  box-shadow: 0 0 20px rgba(22, 242, 139, 0.34);
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 16px;
+  color: #ffffff;
+  font-family: var(--font-display);
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  box-shadow: var(--shadow-glow);
 }
 
-.shell__title-stack :deep(> *:first-child) {
-  color: var(--text-main);
-  letter-spacing: 0.04em;
+.shell__brand-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.shell__title-stack :deep(> *:last-child) {
+.shell__brand-copy strong {
+  font-size: 14px;
+  letter-spacing: 0.01em;
+}
+
+.shell__brand-copy small {
   color: var(--text-light);
+  font-size: 11px;
+  letter-spacing: 0.22em;
 }
 
 .shell__nav {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  align-items: stretch;
+  display: grid;
   gap: 10px;
-  font-size: 13px;
-  color: var(--text-sub);
-}
-
-.shell__nav a {
-  color: inherit;
-  text-decoration: none;
+  margin-top: 8px;
 }
 
 .shell__nav-link {
-  display: block;
-  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 56px;
+  padding: 0 16px;
   border: 1px solid transparent;
-  border-radius: 14px;
-  transition:
-    color 0.2s ease,
-    border-color 0.2s ease,
-    background 0.2s ease,
-    box-shadow 0.2s ease,
-    transform var(--transition-smooth);
+  border-radius: 20px;
+  color: var(--text-sub);
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .shell__nav-link:hover {
-  color: var(--primary);
-  border-color: rgba(22, 242, 139, 0.3);
-  background: rgba(22, 242, 139, 0.1);
-  box-shadow:
-    inset 0 0 0 1px rgba(22, 242, 139, 0.08),
-    0 14px 28px rgba(22, 242, 139, 0.08);
-  transform: translateX(4px);
+  color: var(--text-main);
+  border-color: rgba(75, 107, 255, 0.22);
+  background: rgba(255, 255, 255, 0.54);
+  box-shadow: var(--shadow-soft);
 }
 
 .shell__nav-link.router-link-active {
   color: var(--primary);
-  font-weight: 600;
-  border-color: var(--border-strong);
-  background:
-    radial-gradient(circle at 0% 50%, rgba(22, 242, 139, 0.18), transparent 46%),
-    rgba(22, 242, 139, 0.1);
+  border-color: rgba(75, 107, 255, 0.18);
+  background: linear-gradient(135deg, rgba(75, 107, 255, 0.08), rgba(75, 107, 255, 0.02));
   box-shadow:
-    inset 0 0 0 1px rgba(22, 242, 139, 0.1),
-    0 0 26px rgba(22, 242, 139, 0.12);
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 16px 34px rgba(75, 107, 255, 0.12);
 }
 
-.shell__account {
-  position: relative;
-  z-index: 1;
+.shell__member {
+  margin-top: auto;
+  padding: 14px;
+}
+
+.shell__member-head,
+.shell__member-body,
+.shell__member-footer {
+  display: flex;
+  align-items: center;
+}
+
+.shell__member-head,
+.shell__member-footer {
+  justify-content: space-between;
+}
+
+.shell__member-head {
+  margin-bottom: 16px;
+}
+
+.shell__member-badge {
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.shell__member-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent-gold);
+  box-shadow: 0 0 12px rgba(239, 177, 75, 0.52);
+}
+
+.shell__member-body {
+  gap: 12px;
+}
+
+.shell__member-icon {
   display: grid;
-  gap: 8px;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  border-radius: 16px;
+  color: var(--primary);
+  background: linear-gradient(180deg, rgba(75, 107, 255, 0.12), rgba(75, 107, 255, 0.04));
+  font-size: 18px;
 }
 
-.shell__account a {
-  text-decoration: none;
+.shell__member-body strong,
+.shell__member-body small {
+  display: block;
 }
 
-.shell__banner {
-  margin-left: var(--sidebar-width);
+.shell__member-body strong {
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.shell__member-body small,
+.shell__member-footer {
+  color: var(--text-light);
+  font-size: 11px;
+}
+
+.shell__content {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 18px;
+}
+
+.shell__topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 18px;
+}
+
+.shell__headline {
+  display: grid;
+  gap: 2px;
+}
+
+.shell__eyebrow {
+  color: var(--primary);
+  font-family: var(--font-accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.24em;
+}
+
+.shell__headline strong {
+  font-family: var(--font-display);
+  font-size: 18px;
+}
+
+.shell__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.shell__hint {
+  color: var(--text-sub);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.shell__secondary-action {
+  --n-text-color: var(--text-main) !important;
+  --n-text-color-hover: var(--text-main) !important;
+  --n-color: rgba(255, 255, 255, 0.4) !important;
+  --n-color-hover: rgba(255, 255, 255, 0.68) !important;
+  --n-border: 1px solid rgba(121, 144, 184, 0.18) !important;
+  --n-border-hover: 1px solid rgba(75, 107, 255, 0.22) !important;
+}
+
+.shell__primary-action {
+  min-width: 138px;
 }
 
 .shell__main {
-  min-height: 100vh;
-  min-height: 100dvh;
+  min-width: 0;
+  min-height: 0;
 }
 
-.shell__main--with-sidebar {
-  margin-left: var(--sidebar-width);
+@media (max-width: 1320px) {
+  .shell__topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shell__actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .shell__hint {
+    white-space: normal;
+  }
 }
 
-.shell__footer {
-  margin-left: var(--sidebar-width);
-  padding: 10px 32px 16px;
-  padding-bottom: max(16px, var(--app-safe-bottom, 0px));
-  text-align: center;
-}
-
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .shell {
-    --sidebar-width: 188px;
+    --shell-sidebar-width: 96px;
   }
 
   .shell__sidebar {
-    padding-left: 12px;
-    padding-right: 12px;
-  }
-
-  .shell__footer {
-    padding-left: 16px;
-    padding-right: 16px;
-  }
-}
-
-@media (max-width: 640px) {
-  .shell {
-    --sidebar-width: 92px;
+    padding: 14px 10px;
   }
 
   .shell__brand {
     justify-content: center;
-    flex-direction: column;
-    gap: 8px;
   }
 
-  .shell__title-stack {
-    justify-content: center;
-  }
-
-  .shell__title-stack :deep(> *:first-child),
-  .shell__title-stack :deep(> *:last-child) {
+  .shell__brand-copy,
+  .shell__hint,
+  .shell__member-body small,
+  .shell__member-footer {
     display: none;
   }
 
+  .shell__nav-link {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .shell__nav-link span {
+    display: none;
+  }
+
+  .shell__member {
+    padding: 12px;
+  }
+
+  .shell__member-head {
+    justify-content: center;
+  }
+
+  .shell__member-dot,
+  .shell__member-badge,
+  .shell__member-body strong {
+    display: none;
+  }
+
+  .shell__member-body {
+    justify-content: center;
+  }
+}
+
+@media (max-width: 760px) {
+  .shell {
+    --shell-sidebar-width: 0px;
+    --shell-gap: 14px;
+    --shell-pad: 14px;
+    grid-template-columns: 1fr;
+  }
+
+  .shell__sidebar {
+    position: relative;
+    top: 0;
+    height: auto;
+    gap: 12px;
+  }
+
   .shell__nav {
-    font-size: 11px;
-    gap: 8px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .shell__brand-copy,
+  .shell__member {
+    display: none;
   }
 
   .shell__nav-link {
-    padding: 9px 6px;
-    text-align: center;
+    min-height: 48px;
   }
 
-  .shell__footer {
-    padding-bottom: max(20px, var(--app-safe-bottom, 0px));
+  .shell__nav-link span {
+    display: inline;
+    font-size: 12px;
+  }
+
+  .shell__topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shell__actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 }
 </style>

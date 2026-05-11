@@ -8,33 +8,30 @@ import {
   NInput,
   NInputNumber,
   NProgress,
-  NRadio,
-  NRadioGroup,
+  NSelect,
   NSpace,
   NTag,
   NText,
-  useDialog,
+  NUpload,
   useMessage,
 } from 'naive-ui'
 import type { UploadFileInfo } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import HomeHero from '@/components/home/HomeHero.vue'
-import PhotoUploader from '@/components/home/PhotoUploader.vue'
 import VideoLinkInput from '@/components/home/VideoLinkInput.vue'
-import { useDigitalHumanStore } from '@/stores/digitalHuman'
-import { useTaskDraftStore } from '@/stores/taskDraft'
+import { listAvatarResources, listVoiceResources } from '@/api/resources'
 import {
+  createLipSyncPreview,
   downloadSourceVideoFile,
-  fetchDigitalHumanImageBlob,
   fetchVideoMeta,
-  generateVideoPreview,
   getDyDownloaderCookieConfigured,
   getTranscribePipelineHealth,
   transcribeSavedVideo,
   transcribeUploadFile,
   transcribeFromUrl,
 } from '@/api/task'
+import { useTaskDraftStore } from '@/stores/taskDraft'
 import { useTranscriptDraftStream } from '@/composables/useTranscriptDraftStream'
 import { isDouyinNormalizedUrl, validateSourceVideoInput } from '@/utils/douyinShareUrl'
 import { formatStatCount } from '@/utils/formatDisplay'
@@ -44,192 +41,89 @@ import {
 } from '@/utils/httpErrorMessage'
 import axios from 'axios'
 
+type SelectOption = { label: string; value: string }
+
+type SegmentGenState = {
+  progress: number
+  processing: boolean
+  statusLabel: string
+  videoUrl: string | null
+  hint: string
+  optimizedScript: string
+  error?: string
+}
+
 function isRequestCanceled(e: unknown): boolean {
   if (axios.isCancel(e)) return true
   if (e && typeof e === 'object') {
     if ('code' in e && (e as { code: string }).code === 'ERR_CANCELED') return true
     if ('name' in e) {
-      const n = (e as { name: string }).name
-      if (n === 'CanceledError' || n === 'AbortError') return true
+      const name = (e as { name: string }).name
+      if (name === 'CanceledError' || name === 'AbortError') return true
     }
   }
   return false
 }
 
-const message = useMessage()
-const dialog = useDialog()
-const router = useRouter()
-const draft = useTaskDraftStore()
-const dhStore = useDigitalHumanStore()
-
-const studioLocked = computed(() => dhStore.ready && !dhStore.hasTemplate)
-
-/** 第二步口播照片：默认拉取专属数字人图；可切换为自行上传 */
-const portraitSyncing = ref(false)
-
-async function syncPortraitFromDigitalHuman() {
-  if (draft.portraitMode !== 'digital_human') return
-  if (!dhStore.hasTemplate) return
-  portraitSyncing.value = true
-  try {
-    /**
-     * 优先复用「专属数字人」同步阶段已拉取的预览图（blob: URL），避免二次请求 /api 与鉴权竞态。
-     * 预览 blob 失效或为空时再回退到带鉴权的 GET。
-     */
-    let blob: Blob | null = null
-    if (dhStore.previewBlobUrl) {
-      try {
-        const res = await fetch(dhStore.previewBlobUrl)
-        if (res.ok) {
-          const b = await res.blob()
-          if (b.size) blob = b
-        }
-      } catch {
-        /* 预览 URL 可能已 revoke，走下方接口 */
-      }
-    }
-    if (!blob) {
-      blob = await fetchDigitalHumanImageBlob()
-    }
-    if (!blob.size) throw new Error('empty blob')
-    /* 拉取可能较慢：完成前用户若已切到「自行上传」，不得覆盖其照片 */
-    if (draft.portraitMode !== 'digital_human') return
-    const ext = blob.type.includes('png') ? 'png' : 'jpg'
-    const mime = blob.type || (ext === 'png' ? 'image/png' : 'image/jpeg')
-    const file = new File([blob], `digital-human-portrait.${ext}`, { type: mime })
-    draft.setPhotoFromDigitalHuman(file)
-  } catch (e: unknown) {
-    const detail = e instanceof Error ? e.message : String(e)
-    console.warn('[syncPortraitFromDigitalHuman]', detail)
-    message.warning(
-      '无法加载数字人形象，请改用「自行上传」或稍后再试（若未登录请先登录后再试）。',
-    )
-    draft.portraitMode = 'custom'
-    draft.setPhotoFromUserUpload(null)
-  } finally {
-    portraitSyncing.value = false
+function emptySegmentGenState(): SegmentGenState {
+  return {
+    progress: 0,
+    processing: false,
+    statusLabel: '',
+    videoUrl: null,
+    hint: '',
+    optimizedScript: '',
+    error: undefined,
   }
 }
 
-watch(
-  () => [draft.portraitMode, dhStore.ready, dhStore.hasTemplate] as const,
-  async (newVal, oldVal) => {
-    const [mode, ready, hasT] = newVal
-    if (!ready) return
-    if (mode === 'digital_human' && hasT) {
-      await syncPortraitFromDigitalHuman()
-    }
-    if (mode === 'custom' && oldVal && oldVal[0] === 'digital_human') {
-      draft.setPhotoFromUserUpload(null)
-    }
-  },
-  { immediate: true },
-)
+const VIDEO_SEGMENT_MAX = 6
+const VIDEO_SEGMENT_MAX_CHARS = 60
 
-watch(
-  () => dhStore.hasTemplate,
-  (hasT) => {
-    if (!dhStore.ready) return
-    if (!hasT && draft.portraitMode === 'digital_human') {
-      draft.portraitMode = 'custom'
-      draft.setPhotoFromUserUpload(null)
-    }
-  },
-)
+const message = useMessage()
+const route = useRoute()
+const router = useRouter()
+const draft = useTaskDraftStore()
+const {
+  applyTranscriptToEditableScript,
+  cancelStream,
+  interruptStreamWithFullText,
+  isStreamingToScript,
+} = useTranscriptDraftStream()
 
-function goCreateDigitalHuman() {
-  void router.push({ name: 'home' })
-}
-
-function confirmDeleteStudioDh() {
-  dialog.warning({
-    title: '删除数字人形象',
-    content:
-      '删除后口播制作、创建任务与作品等功能将不可用，需先在「专属数字人」页面重新上传并生成形象。确定删除吗？',
-    positiveText: '确定删除',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        await dhStore.remove()
-        message.warning('已删除数字人形象。请前往「专属数字人」页面重新创建后再使用口播制作。')
-      } catch (e: unknown) {
-        message.error(describeHttpOrNetworkError(e))
-      }
-    },
-  })
-}
-const { applyTranscriptToEditableScript, isStreamingToScript, cancelStream, interruptStreamWithFullText } =
-  useTranscriptDraftStream()
-
-/** ① 拉取 HTML 元信息（先出「视频信息」卡片） */
 const loadingMeta = ref(false)
-/** ② 抖音：保存视频 + FFmpeg + ASR（再填入「口播文案」） */
 const douyinPipeline = ref(false)
-const fetchBusy = computed(() => loadingMeta.value || douyinPipeline.value)
-
-/** 抖音：分阶段（下载 → ASR 转写） */
 const pipelinePhase = ref<'idle' | 'download' | 'transcribe'>('idle')
 const pipelineProgress = ref(0)
 const pipelineBarProcessing = ref(false)
-const pipelineStatusLabel = computed(() => {
-  if (!douyinPipeline.value) return ''
-  if (pipelinePhase.value === 'download')
-    return '① 正在将源视频下载到服务端保存目录…'
-  if (pipelinePhase.value === 'transcribe') return '② 正在抽取音轨并调用 ASR 转写口播（耗时因时长而异，请稍候）…'
-  return ''
-})
-
-/** 最近一次成功保存到服务端的视频文件名（仅文件名），用于「从本地文件转写口播」 */
-const lastSavedVideoBasename = ref<string | null>(null)
-const retranscribingLocal = ref(false)
-/** 本地上传 → POST /v1/tools/transcribe */
 const transcribeUploadLoading = ref(false)
-/** 非抖音链接 → POST /v1/tools/transcribe-url */
 const transcribeUrlLoading = ref(false)
-/** 服务端 Cookie 检测：loading 仅表示请求中；error 表示连不上或接口异常 */
-type DyCookieUi = 'loading' | 'yes' | 'no' | 'error'
-const dyCookieUi = ref<DyCookieUi>('loading')
-
-/** 口播链路：FFmpeg + ASR + 保存目录（下载成功后转写依赖） */
-const pipelineLoading = ref(false)
-const pipelineHealth = ref<Awaited<ReturnType<typeof getTranscribePipelineHealth>> | null>(null)
-/** 请求链路接口失败时（后端未起、代理、超时等），非子项 ASR/FFmpeg 未就绪 */
+const retranscribingLocal = ref(false)
+const lastSavedVideoBasename = ref<string | null>(null)
+const dyCookieConfigured = ref<boolean | null>(null)
 const pipelineHealthError = ref('')
 
-async function refreshPipelineHealth() {
-  pipelineLoading.value = true
-  pipelineHealthError.value = ''
-  try {
-    pipelineHealth.value = await getTranscribePipelineHealth()
-  } catch (e) {
-    pipelineHealth.value = null
-    pipelineHealthError.value = describeHttpOrNetworkError(e)
-    message.warning(pipelineHealthError.value)
-  } finally {
-    pipelineLoading.value = false
-  }
-}
+const renderResourceLoading = ref(false)
+const avatarOptions = ref<SelectOption[]>([])
+const voiceOptions = ref<SelectOption[]>([])
+const selectedAvatarId = ref('')
+const selectedVoiceId = ref('')
+const requestedAvatarUnavailable = ref(false)
 
-async function refreshDyCookieStatus() {
-  dyCookieUi.value = 'loading'
-  try {
-    const { configured } = await getDyDownloaderCookieConfigured()
-    dyCookieUi.value = configured ? 'yes' : 'no'
-  } catch {
-    dyCookieUi.value = 'error'
-  }
-}
-
-onMounted(() => {
-  void dhStore.refresh()
-  void refreshDyCookieStatus()
-  void refreshPipelineHealth()
-})
-
-onUnmounted(() => {
-  cancelStream()
-  clearAllSegmentProgressTimers()
-})
+const videoSegmentCount = ref<number | null>(3)
+const videoScriptSegments = ref<string[]>(
+  Array.from({ length: VIDEO_SEGMENT_MAX }, () => ''),
+)
+const generateVideoLoading = ref(false)
+const generateVideoEstimatedTotalSec = ref(0)
+const generateBatchAbort = ref<AbortController | null>(null)
+const generateQueueStopRequested = ref(false)
+const segmentGenStates = ref<SegmentGenState[]>(
+  Array.from({ length: VIDEO_SEGMENT_MAX }, emptySegmentGenState),
+)
+const segmentProgressTimers = ref<Array<ReturnType<typeof setInterval> | null>>(
+  Array(VIDEO_SEGMENT_MAX).fill(null),
+)
 
 const urlInvalid = computed(() => {
   if (!draft.videoUrl?.trim()) return false
@@ -237,41 +131,224 @@ const urlInvalid = computed(() => {
 })
 
 const linkReady = computed(() => validateSourceVideoInput(draft.videoUrl).ok)
-
-/**
- * 第二步「生成视频」是否可点：不要求原视频链接已校验通过（与后端 sourceVideoUrl 可选一致）；
- * 本批至少一格有口播、且口播照片就绪（数字人形象或自定义上传）。
- */
-const canGenerateVideoPreview = computed(() => {
-  const n = safeSegmentCount.value
-  const segs = videoScriptSegments.value.slice(0, n)
-  if (!segs.some((s) => s.trim().length >= 2)) return false
-  if (draft.portraitMode === 'digital_human' && !dhStore.hasTemplate) return false
-  if (draft.portraitMode === 'custom' && !draft.photoFile) return false
-  return true
-})
-
-/** 非抖音：可用链接直拉媒体后转写（与抖音「下载到本地再转写」不同） */
 const canTranscribeNonDouyinUrl = computed(
   () => linkReady.value && !isDouyinNormalizedUrl(draft.videoUrl),
 )
-
+const safeSegmentCount = computed(() => {
+  const value = videoSegmentCount.value
+  if (value == null || Number.isNaN(Number(value))) return 3
+  return Math.min(VIDEO_SEGMENT_MAX, Math.max(1, Math.round(Number(value))))
+})
+const canGenerateVideoPreview = computed(() => {
+  const segments = videoScriptSegments.value.slice(0, safeSegmentCount.value)
+  return (
+    segments.some((segment) => segment.trim().length >= 2) &&
+    Boolean(selectedAvatarId.value) &&
+    Boolean(selectedVoiceId.value)
+  )
+})
+const showSegmentResultBlocks = computed(
+  () =>
+    generateVideoLoading.value ||
+    segmentGenStates.value.some(
+      (state) =>
+        state.statusLabel ||
+        state.videoUrl ||
+        state.error ||
+        state.progress > 0 ||
+        state.processing,
+    ),
+)
+const pipelineStatusLabel = computed(() => {
+  if (!douyinPipeline.value) return ''
+  if (pipelinePhase.value === 'download') return '1/2 正在下载并保存抖音源视频…'
+  if (pipelinePhase.value === 'transcribe') return '2/2 正在抽取音轨并转写文案…'
+  return ''
+})
 const scriptBlockHint = computed(() =>
   isDouyinNormalizedUrl(draft.videoUrl)
-    ? '抖音：服务端保存视频后从本地文件抽音轨并转写填入本框；若未出字可点「从本地文件转写口播」重试。'
-    : '默认同步自上方「内容」；点「使用文案」写入任务流水线。',
+    ? '抖音链接会先下载到服务端，再用 FFmpeg + ASR 回填到这里。'
+    : '支持直接从上传音视频或当前链接中转写口播文案。',
 )
 
-/**
- * 非抖音：用页面「内容」预填口播框。
- * 抖音：口播以保存视频后 ASR 转写为准（见 onFetchVideoMeta），避免 HTML 占位文案覆盖转写结果。
- */
+function segmentInputPlaceholder(index1Based: number) {
+  return `第 ${index1Based} 段口播（最多 ${VIDEO_SEGMENT_MAX_CHARS} 字）`
+}
+
+function clearSegmentProgressTimer(index: number) {
+  const timer = segmentProgressTimers.value[index]
+  if (timer) {
+    clearInterval(timer)
+    segmentProgressTimers.value[index] = null
+  }
+}
+
+function clearAllSegmentProgressTimers() {
+  for (let i = 0; i < VIDEO_SEGMENT_MAX; i += 1) clearSegmentProgressTimer(i)
+}
+
+function startFakeProgressForSegment(index: number, estimatedSec: number) {
+  clearSegmentProgressTimer(index)
+  const startedAt = Date.now()
+  const targetMs = Math.max(8000, estimatedSec * 920)
+  segmentGenStates.value[index].processing = true
+  segmentGenStates.value[index].progress = 0
+  segmentProgressTimers.value[index] = setInterval(() => {
+    const elapsed = Date.now() - startedAt
+    const progress = Math.min(92, Math.floor((elapsed / targetMs) * 92))
+    segmentGenStates.value[index].progress = progress
+    if (progress < 24) {
+      segmentGenStates.value[index].statusLabel = '正在准备文本和资源…'
+    } else if (progress < 52) {
+      segmentGenStates.value[index].statusLabel = '正在生成配音音轨…'
+    } else if (progress < 82) {
+      segmentGenStates.value[index].statusLabel = '正在驱动视频对口型…'
+    } else {
+      segmentGenStates.value[index].statusLabel = '正在等待成片返回…'
+    }
+  }, 280)
+}
+
+function markGenerateSlotsCancelledFrom(
+  toRun: { s: string; idx: number }[],
+  fromIndex: number,
+  firstWasAbortedRequest: boolean,
+) {
+  for (let i = fromIndex; i < toRun.length; i += 1) {
+    const slot = toRun[i].idx
+    clearSegmentProgressTimer(slot)
+    segmentGenStates.value[slot] = {
+      ...emptySegmentGenState(),
+      statusLabel:
+        i === fromIndex && firstWasAbortedRequest
+          ? '已取消（当前请求已中断）'
+          : '已取消（后续未继续发起）',
+    }
+  }
+}
+
+function importSegmentsFromManualDraft() {
+  const raw = draft.manualScriptDraft.trim()
+  if (!raw) {
+    message.warning('请先在上方口播文案中准备内容')
+    return
+  }
+  const parts = raw
+    .split(/\r\n|\n|\r/)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+  const count = safeSegmentCount.value
+
+  for (let i = 0; i < VIDEO_SEGMENT_MAX; i += 1) {
+    videoScriptSegments.value[i] = ''
+  }
+
+  if (parts.length <= 1) {
+    let cursor = 0
+    for (let i = 0; i < count; i += 1) {
+      videoScriptSegments.value[i] = raw.slice(
+        cursor,
+        cursor + VIDEO_SEGMENT_MAX_CHARS,
+      )
+      cursor += VIDEO_SEGMENT_MAX_CHARS
+    }
+    if (cursor < raw.length) {
+      message.warning('文案超过本批可容纳字数，末尾内容已暂时省略')
+    } else {
+      message.success('已按顺序自动拆分到各个片段')
+    }
+    return
+  }
+
+  for (let i = 0; i < count; i += 1) {
+    videoScriptSegments.value[i] = (parts[i] ?? '').slice(0, VIDEO_SEGMENT_MAX_CHARS)
+  }
+  if (parts.length > count) {
+    message.info(`检测到 ${parts.length} 行，仅载入前 ${count} 行`)
+  } else {
+    message.success('已按行载入口播片段')
+  }
+}
+
+function onVideoSegmentInput(index: number, value: string | null) {
+  videoScriptSegments.value[index] = (value ?? '').slice(0, VIDEO_SEGMENT_MAX_CHARS)
+}
+
+function estimateGenerateSeconds(scriptLength: number) {
+  return Math.min(180, Math.max(18, Math.round(18 + scriptLength * 0.35)))
+}
+
+async function loadRenderResources() {
+  renderResourceLoading.value = true
+  try {
+    const [avatars, voices] = await Promise.all([
+      listAvatarResources({ scope: 'all', limit: 40 }),
+      listVoiceResources({ scope: 'all', limit: 40 }),
+    ])
+    avatarOptions.value = avatars.items
+      .filter((item) => Boolean(item.originalVideoUrl))
+      .map((item) => ({ label: item.name, value: item.id }))
+    voiceOptions.value = voices.items.map((item) => ({
+      label: item.name,
+      value: item.id,
+    }))
+
+    const routeAvatarId =
+      typeof route.query.avatarId === 'string' ? route.query.avatarId.trim() : ''
+    requestedAvatarUnavailable.value = false
+    if (routeAvatarId && avatarOptions.value.some((item) => item.value === routeAvatarId)) {
+      selectedAvatarId.value = routeAvatarId
+    } else if (routeAvatarId) {
+      requestedAvatarUnavailable.value = true
+    } else if (!selectedAvatarId.value && avatarOptions.value.length) {
+      selectedAvatarId.value = avatarOptions.value[0].value
+    }
+
+    if (!selectedVoiceId.value && voiceOptions.value.length) {
+      selectedVoiceId.value = voiceOptions.value[0].value
+    }
+  } catch {
+    avatarOptions.value = []
+    voiceOptions.value = []
+  } finally {
+    renderResourceLoading.value = false
+  }
+}
+
+async function refreshDyCookieStatus() {
+  try {
+    const { configured } = await getDyDownloaderCookieConfigured()
+    dyCookieConfigured.value = configured
+  } catch {
+    dyCookieConfigured.value = null
+  }
+}
+
+async function refreshPipelineHealth() {
+  pipelineHealthError.value = ''
+  try {
+    await getTranscribePipelineHealth()
+  } catch (e) {
+    pipelineHealthError.value = describeHttpOrNetworkError(e)
+  }
+}
+
+watch(videoSegmentCount, (value) => {
+  if (value == null || Number.isNaN(Number(value))) {
+    videoSegmentCount.value = 3
+    return
+  }
+  const next = Math.min(VIDEO_SEGMENT_MAX, Math.max(1, Math.round(Number(value))))
+  if (next !== value) videoSegmentCount.value = next
+})
+
 watch(
-  () => draft.videoMeta,
-  (m) => {
-    if (!m) return
-    if (isDouyinNormalizedUrl(draft.videoUrl)) return
-    draft.prefillManualScriptFromMeta(m)
+  () => route.query.avatarId,
+  (value) => {
+    const next = typeof value === 'string' ? value.trim() : ''
+    if (next && avatarOptions.value.some((item) => item.value === next)) {
+      selectedAvatarId.value = next
+    }
   },
 )
 
@@ -284,10 +361,12 @@ async function onFetchVideoMeta() {
   draft.videoUrl = link.normalizedUrl
 
   loadingMeta.value = true
-  let meta: Awaited<ReturnType<typeof fetchVideoMeta>>
   try {
-    meta = await fetchVideoMeta({ sourceVideoUrl: link.normalizedUrl })
+    const meta = await fetchVideoMeta({ sourceVideoUrl: link.normalizedUrl })
     draft.setVideoMeta(meta)
+    if (!isDouyinNormalizedUrl(link.normalizedUrl)) {
+      draft.prefillManualScriptFromMeta(meta)
+    }
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
     return
@@ -295,25 +374,15 @@ async function onFetchVideoMeta() {
     loadingMeta.value = false
   }
 
-  // 先让「视频信息」等区域完成一次渲染，再进入抖音长耗时下载/转写
   await nextTick()
-
-  const douyin = isDouyinNormalizedUrl(link.normalizedUrl)
-
-  if (!douyin) {
-    if (meta.hasUsefulMeta) {
-      message.success('已获取视频页信息')
-    } else {
-      message.warning('未解析到完整元信息，请查看下方提示')
-    }
-    void refreshDyCookieStatus()
-    void refreshPipelineHealth()
+  if (!isDouyinNormalizedUrl(link.normalizedUrl)) {
+    message.success('已获取视频信息')
     return
   }
 
   douyinPipeline.value = true
   pipelinePhase.value = 'download'
-  pipelineProgress.value = 6
+  pipelineProgress.value = 8
   pipelineBarProcessing.value = true
   try {
     const saved = await downloadSourceVideoFile({
@@ -322,53 +391,33 @@ async function onFetchVideoMeta() {
     })
     const basename = saved.savedPath.split(/[/\\]/).pop()?.trim() || null
     if (!basename) {
-      message.error('未能解析保存文件名')
+      message.error('未能识别服务端保存的视频文件名')
       return
     }
     lastSavedVideoBasename.value = basename
 
-    pipelineProgress.value = 42
-    pipelineBarProcessing.value = false
     pipelinePhase.value = 'transcribe'
-
-    pipelineProgress.value = 48
-    pipelineBarProcessing.value = true
-    message.info('服务端已保存视频文件，开始 ASR 转写…')
-
-    const r = await transcribeSavedVideo({ fileName: basename })
-
+    pipelineProgress.value = 50
+    const result = await transcribeSavedVideo({ fileName: basename })
     pipelineProgress.value = 100
     pipelineBarProcessing.value = false
 
-    if (r.transcript) {
+    if (result.transcript) {
       applyTranscriptToEditableScript({
-        fullText: r.transcript.fullText,
-        segments: r.transcript.segments,
-        transcriptId: r.transcript.transcriptId,
+        fullText: result.transcript.fullText,
+        segments: result.transcript.segments,
+        transcriptId: result.transcript.transcriptId,
       })
+      message.success('抖音视频已下载并完成文案转写')
     }
-
-    const parts: string[] = [
-      meta.hasUsefulMeta ? '已获取视频信息。' : '元信息不完整，但源视频已保存。',
-      saved.message,
-    ]
-    if (r.transcript) {
-      parts.push('已用 ASR 从口播音轨填入下方口播文案。')
+    if (result.transcriptionError) {
+      message.warning(result.transcriptionError)
     }
-    message.success(parts.join(''))
-    if (r.transcriptionError) {
-      message.warning(
-        `视频已保存到服务端目录；口播转写未完成：${r.transcriptionError}`,
-      )
-    }
-  } catch (de: unknown) {
+  } catch (e: unknown) {
     lastSavedVideoBasename.value = null
-    if (meta.hasUsefulMeta) {
-      message.success('已获取视频页信息')
-    } else {
-      message.warning('未解析到完整元信息，请查看下方提示')
-    }
-    message.warning(`源视频下载/转写失败：${await describeHttpOrNetworkErrorMaybeBlob(de)}`)
+    message.warning(
+      `视频下载或转写失败：${await describeHttpOrNetworkErrorMaybeBlob(e)}`,
+    )
   } finally {
     douyinPipeline.value = false
     pipelinePhase.value = 'idle'
@@ -380,35 +429,34 @@ async function onFetchVideoMeta() {
 }
 
 function onUseScript() {
-  const t = draft.manualScriptDraft.trim()
-  if (!t) {
-    message.warning('请先在文案框中填写内容')
+  const text = draft.manualScriptDraft.trim()
+  if (!text) {
+    message.warning('请先在文案框中准备内容')
     return
   }
   draft.commitManualScriptToPipeline()
-  message.success(`已写入后续流程（${t.length} 字）`)
+  message.success(`已同步 ${text.length} 字到后续创作流程`)
 }
 
-/** 不重新下载，仅根据保存目录里已有文件做 FFmpeg + ASR，写入口播框 */
 async function onRetranscribeFromLocal() {
   const name = lastSavedVideoBasename.value?.trim()
   if (!name) {
-    message.warning('暂无已保存的视频文件名，请先点击「获取视频信息」完成下载')
+    message.warning('还没有可重转写的本地视频，请先完成一次抖音抓取')
     return
   }
   retranscribingLocal.value = true
   try {
-    const r = await transcribeSavedVideo({ fileName: name })
-    if (r.transcript) {
+    const result = await transcribeSavedVideo({ fileName: name })
+    if (result.transcript) {
       applyTranscriptToEditableScript({
-        fullText: r.transcript.fullText,
-        segments: r.transcript.segments,
-        transcriptId: r.transcript.transcriptId,
+        fullText: result.transcript.fullText,
+        segments: result.transcript.segments,
+        transcriptId: result.transcript.transcriptId,
       })
-      message.success('已根据本地保存的视频生成口播文案')
+      message.success('已从本地保存视频重新生成文案')
     }
-    if (r.transcriptionError) {
-      message.warning(r.transcriptionError)
+    if (result.transcriptionError) {
+      message.warning(result.transcriptionError)
     }
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
@@ -429,7 +477,7 @@ async function onTranscribeUpload(options: { fileList: UploadFileInfo[] }) {
       segments: data.segments,
       transcriptId: data.transcriptId,
     })
-    message.success('已转写并流式填入下方口播文案。')
+    message.success('上传文件已完成转写')
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
   } finally {
@@ -451,7 +499,7 @@ async function onTranscribeNonDouyinFromUrl() {
       segments: data.segments,
       transcriptId: data.transcriptId,
     })
-    message.success('已转写并流式填入下方口播文案。')
+    message.success('当前链接内容已完成转写')
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
   } finally {
@@ -459,344 +507,101 @@ async function onTranscribeNonDouyinFromUrl() {
   }
 }
 
-/** 单批最多支持的分段/成片条数（与 UI、缓冲数组一致） */
-const VIDEO_SEGMENT_MAX = 6
-/** 本批实际生成条数，默认 6；用户可在 1～VIDEO_SEGMENT_MAX 间调整（输入框可短暂为 null） */
-const videoSegmentCount = ref<number | null>(6)
-/**
- * 与 NInputNumber 配合：v-for 绝不能直接用可能为 null 的 ref，否则整页可能无法渲染
- */
-const safeSegmentCount = computed(() => {
-  const v = videoSegmentCount.value
-  if (v == null || Number.isNaN(Number(v))) return 6
-  return Math.min(VIDEO_SEGMENT_MAX, Math.max(1, Math.round(Number(v))))
-})
-
-watch(videoSegmentCount, (v) => {
-  if (v == null || Number.isNaN(Number(v))) {
-    videoSegmentCount.value = 6
-    return
-  }
-  const c = Math.min(VIDEO_SEGMENT_MAX, Math.max(1, Math.round(Number(v))))
-  if (c !== v) videoSegmentCount.value = c
-})
-
-/** 每段输入上限（与模板展示、占位文案共用，勿仅在模板内写反引号插值，易被编译成 undefined） */
-const VIDEO_SEGMENT_MAX_CHARS = 40
-
-function segmentInputPlaceholder(index1Based: number): string {
-  return `第 ${index1Based} 段口播（最多 ${VIDEO_SEGMENT_MAX_CHARS} 字）`
-}
-
-/** 受控输入，保证值为 string，避免 undefined 导致占位层与内容叠显 */
-function onVideoSegmentInput(index: number, v: string | null) {
-  videoScriptSegments.value[index] = (v ?? '').slice(0, VIDEO_SEGMENT_MAX_CHARS)
-}
-
-function estimateGenerateSeconds(scriptLen: number): number {
-  return Math.min(180, Math.max(15, Math.round(12 + scriptLen * 0.02)))
-}
-
-/** 口播分多段，由用户根据上方文案自行拆分；数组长度为上限，仅前 videoSegmentCount 格参与本批 */
-const videoScriptSegments = ref<string[]>(Array.from({ length: VIDEO_SEGMENT_MAX }, () => ''))
-
-type SegmentGenState = {
-  progress: number
-  processing: boolean
-  statusLabel: string
-  videoUrl: string | null
-  hint: string
-  optimizedScript: string
-  error?: string
-}
-
-function emptySegmentGenState(): SegmentGenState {
-  return {
-    progress: 0,
-    processing: false,
-    statusLabel: '',
-    videoUrl: null,
-    hint: '',
-    optimizedScript: '',
-    error: undefined,
-  }
-}
-
-const segmentGenStates = ref<SegmentGenState[]>(
-  Array.from({ length: VIDEO_SEGMENT_MAX }, emptySegmentGenState),
-)
-
-const segmentProgressTimers = ref<Array<ReturnType<typeof setInterval> | null>>(
-  Array(VIDEO_SEGMENT_MAX).fill(null),
-)
-
-function clearSegmentProgressTimer(i: number) {
-  const t = segmentProgressTimers.value[i]
-  if (t) {
-    clearInterval(t)
-    segmentProgressTimers.value[i] = null
-  }
-}
-
-function clearAllSegmentProgressTimers() {
-  for (let i = 0; i < VIDEO_SEGMENT_MAX; i++) clearSegmentProgressTimer(i)
-}
-
-/**
- * 从上方口播载入本步分段：
- * - 有换行：每行对一段，按顺序依次填入；行数多于本批 N 条则只取前 N 行
- * - 无换行（整段）：按每段最大字数从前往后**依次切分**到 N 格，不会只塞在第一格
- */
-function importSegmentsFromManualDraft() {
-  const raw = draft.manualScriptDraft.trim()
-  if (!raw) {
-    message.warning('请先在上方「口播文案」中填写内容')
-    return
-  }
-  const n = safeSegmentCount.value
-  const parts = raw
-    .split(/\r\n|\n|\r/)
-    .map((s) => s.trim())
-    .filter(Boolean)
-
-  for (let i = n; i < VIDEO_SEGMENT_MAX; i++) {
-    videoScriptSegments.value[i] = ''
-  }
-
-  /** 仅一段（无换行或整段一句）：从首字起按每段上限依次装入第 1～N 格 */
-  if (parts.length < 2) {
-    const t = parts[0] ?? ''
-    let pos = 0
-    for (let i = 0; i < n; i++) {
-      if (pos >= t.length) {
-        videoScriptSegments.value[i] = ''
-      } else {
-        videoScriptSegments.value[i] = t.slice(pos, pos + VIDEO_SEGMENT_MAX_CHARS)
-        pos += VIDEO_SEGMENT_MAX_CHARS
-      }
-    }
-    if (pos < t.length) {
-      message.warning(
-        `口播总字数超过本批 ${n} 段可装容量（每段最多 ${VIDEO_SEGMENT_MAX_CHARS} 字），未装入的尾部已略去。可增大本批条数后再次载入。`,
-      )
-    } else {
-      message.success(
-        t.length > 0
-          ? '已将口播从前往后依次拆入各段（整段无换行时按每段最多字数自动切段）'
-          : '已载入',
-      )
-    }
-    return
-  }
-
-  /** 多行：第 1 行→第 1 格，依次对应；行数多于 N 则只取前 N 行 */
-  for (let i = 0; i < n; i++) {
-    videoScriptSegments.value[i] = (parts[i] ?? '').slice(0, VIDEO_SEGMENT_MAX_CHARS)
-  }
-  if (parts.length > n) {
-    message.info(
-      `检测到 ${parts.length} 行，已按顺序填入前 ${n} 行；其余请增加本批条数后再载入，或自行复制。`,
-    )
-  } else {
-    message.success('已从上方口播按行依次载入各段')
-  }
-}
-
-const generateVideoLoading = ref(false)
-/** 当前批次里的 AbortController，用于「停止」时取消正在进行的单条 http 请求 */
-const generateBatchAbort = ref<AbortController | null>(null)
-/** 为 true 时：不再发起后续片段请求（队列在循环首检查与 abort  catch 中结算） */
-const generateQueueStopRequested = ref(false)
-/** 整批预估总秒数（仅参考） */
-const generateVideoEstimatedTotalSec = ref(0)
-
 function cancelGenerateQueue() {
   if (!generateVideoLoading.value) return
   generateQueueStopRequested.value = true
-  try {
-    generateBatchAbort.value?.abort()
-  } catch {
-    /* ignore */
-  }
-}
-
-const showSegmentResultBlocks = computed(
-  () =>
-    generateVideoLoading.value ||
-    segmentGenStates.value.some(
-      (s) => s.statusLabel || s.videoUrl || s.error || s.progress > 0 || s.processing,
-    ),
-)
-
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const r = new FileReader()
-    r.onload = () => resolve(r.result as string)
-    r.onerror = () => reject(new Error('读取图片失败'))
-    r.readAsDataURL(blob)
-  })
-}
-
-function startFakeProgressForSegment(i: number, estimatedSec: number) {
-  clearSegmentProgressTimer(i)
-  const started = Date.now()
-  const targetMs = Math.max(8_000, estimatedSec * 1000 * 0.92)
-  segmentGenStates.value[i].processing = true
-  segmentGenStates.value[i].progress = 0
-  segmentProgressTimers.value[i] = setInterval(() => {
-    const elapsed = Date.now() - started
-    const p = Math.min(92, Math.floor((elapsed / targetMs) * 92))
-    segmentGenStates.value[i].progress = p
-    if (p < 22) {
-      segmentGenStates.value[i].statusLabel = '① 提交口播文案…'
-    } else if (p < 48) {
-      segmentGenStates.value[i].statusLabel = '② 大模型优化口播稿中…'
-    } else if (p < 78) {
-      segmentGenStates.value[i].statusLabel = '③ 提交火山方舟图生视频…'
-    } else {
-      segmentGenStates.value[i].statusLabel = '④ 等待成片生成（轮询中）…'
-    }
-  }, 280)
-}
-
-/** 从 toRun[fromQi] 起标记为已取消；首条在请求中 abort 时传 firstWasAbortedRequest = true */
-function markGenerateSlotsCancelledFrom(
-  toRun: { s: string; idx: number }[],
-  fromQi: number,
-  firstWasAbortedRequest: boolean,
-) {
-  for (let r = fromQi; r < toRun.length; r++) {
-    const j = toRun[r].idx
-    clearSegmentProgressTimer(j)
-    const isFirst = r === fromQi
-    const statusLabel =
-      isFirst && firstWasAbortedRequest
-        ? '已取消（请求已中断）'
-        : '已取消（未向服务器请求）'
-    segmentGenStates.value[j] = {
-      ...emptySegmentGenState(),
-      progress: 0,
-      processing: false,
-      statusLabel,
-      videoUrl: null,
-      hint: '',
-      optimizedScript: '',
-      error: undefined,
-    }
-  }
+  generateBatchAbort.value?.abort()
 }
 
 async function onGenerateVideo() {
-  const link = validateSourceVideoInput(draft.videoUrl)
-  const sourceVideoUrl =
-    link.ok && link.normalizedUrl ? link.normalizedUrl : undefined
-  if (link.ok && link.normalizedUrl) {
-    draft.videoUrl = link.normalizedUrl
-  }
-  const n = safeSegmentCount.value
-  const segments = videoScriptSegments.value.slice(0, n).map((s) => s.trim())
+  const count = safeSegmentCount.value
+  const segments = videoScriptSegments.value.slice(0, count).map((segment) => segment.trim())
   const toRun = segments
-    .map((s, idx) => ({ s, idx }))
+    .map((segment, index) => ({ s: segment, idx: index }))
     .filter(({ s }) => s.length >= 2)
+
   if (toRun.length === 0) {
-    message.warning('请至少填写一条口播内容（不少于 2 个字），或点击「从上方口播载入」')
+    message.warning('请至少填写一条口播内容，或从上方文案一键载入')
     return
   }
-  if (draft.portraitMode === 'digital_human' && !dhStore.hasTemplate) {
-    message.warning('请先创建专属数字人形象；预览成片需用数字人图作为图生视频参考图。')
+  if (!selectedAvatarId.value) {
+    message.warning('请先选择一个数字人视频')
     return
   }
-  if (draft.portraitMode === 'custom' && !draft.photoFile) {
-    message.warning('请先在「口播形象照片」中上传照片，或改选「使用专属数字人形象」。')
+  if (!selectedVoiceId.value) {
+    message.warning('请先选择一个配音音色')
     return
   }
 
   clearAllSegmentProgressTimers()
   generateQueueStopRequested.value = false
-  const ac = new AbortController()
-  generateBatchAbort.value = ac
+  const controller = new AbortController()
+  generateBatchAbort.value = controller
   generateVideoLoading.value = true
-  segmentGenStates.value = Array.from({ length: VIDEO_SEGMENT_MAX }, emptySegmentGenState)
+  generateVideoEstimatedTotalSec.value = toRun.reduce(
+    (total, { s }) => total + Math.min(600, estimateGenerateSeconds(s.length) + 90),
+    0,
+  )
+  segmentGenStates.value = Array.from(
+    { length: VIDEO_SEGMENT_MAX },
+    emptySegmentGenState,
+  )
 
-  const totalEst = toRun.reduce((acc, { s }) => acc + Math.min(600, estimateGenerateSeconds(s.length) + 90), 0)
-  generateVideoEstimatedTotalSec.value = totalEst
-
-  let llmUsedAny = false
-  const optimizedPieces: string[] = Array.from({ length: n }, () => '')
-
-  for (let slot = 0; slot < n; slot++) {
-    if (segments[slot].length < 2) {
-      segmentGenStates.value[slot] = {
+  for (let i = 0; i < count; i += 1) {
+    if (segments[i].length < 2) {
+      segmentGenStates.value[i] = {
         ...emptySegmentGenState(),
         statusLabel: '未填写，已跳过',
-        progress: 0,
       }
     }
   }
-  toRun.forEach(({ idx }, i) => {
+
+  toRun.forEach(({ idx }, index) => {
     segmentGenStates.value[idx] = {
       ...emptySegmentGenState(),
-      statusLabel: `排队中（${i + 1}/${toRun.length}）`,
-      progress: 0,
+      statusLabel: `排队中（${index + 1}/${toRun.length}）`,
     }
   })
 
   let stoppedByUser = false
 
   try {
-    const imageDataUrl =
-      draft.portraitMode === 'custom' && draft.photoFile
-        ? await blobToDataUrl(draft.photoFile)
-        : await blobToDataUrl(await fetchDigitalHumanImageBlob())
-
-    if (generateQueueStopRequested.value) {
-      stoppedByUser = true
-      markGenerateSlotsCancelledFrom(toRun, 0, false)
-      message.info('已停止生成，未发起任一出片请求。')
-      return
-    }
-
-    for (let qi = 0; qi < toRun.length; qi++) {
+    for (let i = 0; i < toRun.length; i += 1) {
       if (generateQueueStopRequested.value) {
-        markGenerateSlotsCancelledFrom(toRun, qi, false)
         stoppedByUser = true
-        message.info('已停止生成，后续片段不会请求接口。')
+        markGenerateSlotsCancelledFrom(toRun, i, false)
         break
       }
 
-      const { s: script, idx } = toRun[qi]
-      const est = Math.min(600, estimateGenerateSeconds(script.length) + 90)
-      startFakeProgressForSegment(idx, est)
+      const { s: script, idx } = toRun[i]
+      const estimatedSec = Math.min(600, estimateGenerateSeconds(script.length) + 90)
+      startFakeProgressForSegment(idx, estimatedSec)
 
       try {
-        const res = await generateVideoPreview(
+        const result = await createLipSyncPreview(
           {
             script,
-            ...(sourceVideoUrl ? { sourceVideoUrl } : {}),
-            imageDataUrl,
+            avatarResourceId: selectedAvatarId.value,
+            voiceResourceId: selectedVoiceId.value,
           },
-          { signal: ac.signal },
+          { signal: controller.signal },
         )
         clearSegmentProgressTimer(idx)
-        optimizedPieces[idx] = res.optimizedScript
-        if (res.llmUsed) llmUsedAny = true
         segmentGenStates.value[idx] = {
           progress: 100,
           processing: false,
           statusLabel: '本段已完成',
-          videoUrl: res.videoUrl,
-          hint: res.hint,
-          optimizedScript: res.optimizedScript,
+          videoUrl: result.videoUrl,
+          hint: result.hint,
+          optimizedScript: result.optimizedScript,
         }
       } catch (e: unknown) {
         clearSegmentProgressTimer(idx)
         if (isRequestCanceled(e) || generateQueueStopRequested.value) {
           stoppedByUser = true
-          markGenerateSlotsCancelledFrom(toRun, qi, true)
-          message.info('已停止：本条请求已中断，后续片段未请求。')
+          markGenerateSlotsCancelledFrom(toRun, i, true)
           break
         }
-        const errMsg = describeHttpOrNetworkError(e)
         segmentGenStates.value[idx] = {
           progress: 100,
           processing: false,
@@ -804,39 +609,22 @@ async function onGenerateVideo() {
           videoUrl: null,
           hint: '',
           optimizedScript: '',
-          error: errMsg,
+          error: describeHttpOrNetworkError(e),
         }
       }
     }
 
-    const merged = optimizedPieces
-      .map((o) => o.trim())
-      .filter(Boolean)
-      .join('\n\n')
-    if (merged) {
-      draft.manualScriptDraft = merged
-      draft.commitManualScriptToPipeline()
-    }
-
-    const okCount = segmentGenStates.value.slice(0, n).filter((st) => st.videoUrl).length
+    const okCount = segmentGenStates.value.slice(0, count).filter((item) => item.videoUrl).length
     if (okCount > 0) {
-      if (stoppedByUser) {
-        message.success(
-          llmUsedAny
-            ? `已生成 ${okCount} 条预览成片并停止后续任务（含大模型优化口播稿）`
-            : `已生成 ${okCount} 条预览成片并停止后续任务（未配置 LLM 时保留原文）`,
-        )
-      } else {
-        message.success(
-          llmUsedAny
-            ? `已生成 ${okCount} 条预览成片（含大模型优化口播稿）`
-            : `已生成 ${okCount} 条预览成片（未配置 LLM 时保留原文）`,
-        )
-      }
-    } else if (toRun.length > 0 && !stoppedByUser) {
-      message.warning('本批分段均未成功出片，请查看各段错误说明后重试')
-    } else if (stoppedByUser && okCount === 0) {
-      message.info('已取消，未成功生成任一条。')
+      message.success(
+        stoppedByUser
+          ? `已生成 ${okCount} 条对口型视频，并停止了后续任务`
+          : `已生成 ${okCount} 条对口型视频`,
+      )
+    } else if (stoppedByUser) {
+      message.info('已取消，本次没有成功生成片段。')
+    } else {
+      message.warning('这一批片段都还没有成功出片，请查看错误后重试')
     }
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
@@ -847,483 +635,289 @@ async function onGenerateVideo() {
     generateVideoLoading.value = false
   }
 }
+
+onMounted(() => {
+  void loadRenderResources()
+  void refreshDyCookieStatus()
+  void refreshPipelineHealth()
+})
+
+onUnmounted(() => {
+  cancelStream()
+  clearAllSegmentProgressTimers()
+})
 </script>
 
 <template>
   <div class="page">
-    <n-alert
-      v-if="dhStore.ready && !dhStore.hasTemplate"
-      type="warning"
-      :show-icon="false"
-      class="studio-lock-banner studio-wide-canvas"
-    >
-      <n-space vertical :size="12">
-        <n-text strong style="font-size: 16px">口播制作已锁定</n-text>
-        <n-text depth="3" style="font-size: 14px; line-height: 1.7">
-          您尚未创建专属数字人，或已删除数字人形象。请先返回「专属数字人」页面上传自拍照并生成形象；创建前本页所有操作不可用。
-        </n-text>
-        <div>
-          <n-button type="primary" size="medium" @click="goCreateDigitalHuman">
-            前往专属数字人
-          </n-button>
-        </div>
-      </n-space>
-    </n-alert>
+    <HomeHero class="home-hero-slot" />
 
-    <n-card
-      v-if="dhStore.hasTemplate && dhStore.previewBlobUrl"
-      title="当前数字人形象"
-      size="large"
-      class="glass studio-dh-strip studio-wide-canvas"
-    >
-      <n-space align="center" style="flex-wrap: wrap" :size="16">
-        <img class="studio-dh-thumb" :src="dhStore.previewBlobUrl" alt="当前数字人形象" />
-        <n-space vertical :size="6">
-          <n-text v-if="dhStore.styleLabel">风格：{{ dhStore.styleLabel }}</n-text>
-          <n-text depth="3" style="font-size: 12px">以下口播制作将使用该形象作为你的数字人参考。</n-text>
-          <n-button type="error" secondary size="small" @click="confirmDeleteStudioDh">
-            删除数字人形象
-          </n-button>
-        </n-space>
-      </n-space>
-    </n-card>
+    <div class="page__content page__content--studio">
+      <div class="studio-workspace">
+        <section class="studio-panel studio-panel--source" aria-label="原视频与口播文案">
+          <n-card title="原视频与文案提取" size="large" class="glass">
+            <n-space vertical :size="18">
+              <VideoLinkInput v-model="draft.videoUrl" :invalid="urlInvalid" />
 
-    <n-text
-      v-if="!dhStore.ready"
-      depth="3"
-      style="display: block; text-align: center; padding: 20px 16px 8px"
-    >
-      正在同步数字人状态…
-    </n-text>
-
-    <div class="studio-body" :class="{ 'studio-body--locked': studioLocked }">
-      <HomeHero class="home-hero-slot" />
-
-      <div class="page__content page__content--studio">
-        <div class="studio-workspace">
-      <section class="studio-panel studio-panel--source" aria-label="原视频与口播文案">
-      <n-card title="原视频" size="large" class="glass">
-        <n-space vertical :size="18">
-          <VideoLinkInput v-model="draft.videoUrl" :invalid="urlInvalid" />
-          <n-space align="center" :size="12" style="flex-wrap: wrap">
-            <n-button
-              :disabled="!linkReady"
-              :loading="fetchBusy"
-              secondary
-              @click="onFetchVideoMeta"
-            >
-              获取视频信息
-            </n-button>
-            <!-- <n-space align="center" :size="8" style="flex-wrap: wrap">
-              <n-text depth="3" style="font-size: 12px">服务端 Cookie：</n-text>
-              <n-tag v-if="dyCookieUi === 'yes'" size="small" type="success" :bordered="false">
-                已配置
-              </n-tag>
-              <n-tag v-else-if="dyCookieUi === 'no'" size="small" type="warning" :bordered="false">
-                未配置
-              </n-tag>
-              <n-tag v-else-if="dyCookieUi === 'error'" size="small" type="error" :bordered="false">
-                检测失败（请确认后端已启动且可访问 /api）
-              </n-tag>
-              <n-text v-else depth="3" style="font-size: 12px">检测中…</n-text>
-              <n-button size="tiny" quaternary :loading="dyCookieUi === 'loading'" @click="refreshDyCookieStatus">
-                刷新
-              </n-button>
-            </n-space> -->
-            <!-- <n-space align="center" :size="8" style="flex-wrap: wrap; margin-top: 4px">
-              <n-tag v-if="pipelineLoading" size="small" :bordered="false">检测中…</n-tag>
-              <template v-else-if="pipelineHealth">
-                <n-tag
-                  size="small"
-                  :bordered="false"
-                  :type="pipelineHealth.videoSaveDir.writable ? 'success' : 'error'"
-                >
-                  保存目录{{ pipelineHealth.videoSaveDir.writable ? '可写' : '不可写' }}
-                </n-tag>
-                <n-tag size="small" :bordered="false" :type="pipelineHealth.ffmpeg.ok ? 'success' : 'error'">
-                  FFmpeg {{ pipelineHealth.ffmpeg.ok ? '可用' : '不可用' }}
-                </n-tag>
-                <n-tag size="small" :bordered="false" :type="pipelineHealth.asr.ok ? 'success' : 'warning'">
-                  ASR {{ pipelineHealth.asr.ok ? '已连接' : '未就绪' }}
-                </n-tag>
-                <n-tag
-                  size="small"
-                  :bordered="false"
-                  :type="pipelineHealth.dyCookieConfigured ? 'success' : 'default'"
-                >
-                  抖音 Cookie
-                </n-tag>
-              </template>
-              <n-tag v-else size="small" type="error" :bordered="false">链路检测失败</n-tag>
-              <n-button size="tiny" quaternary :loading="pipelineLoading" @click="refreshPipelineHealth">
-                刷新转写环境
-              </n-button>
-            </n-space> -->
-            <n-text
-              v-if="!pipelineLoading && pipelineHealthError"
-              depth="3"
-              style="font-size: 11px; display: block; margin-top: 4px"
-            >
-              {{ pipelineHealthError }}（请确认：1）在 <code>backend</code> 目录执行
-              <code>npm run start:dev</code>；2）浏览器通过 Vite 访问（如 http://localhost:5173 ）以便 /api 代理到
-              3000；3）若用独立前端域名，请配置 <code>VITE_API_BASE_URL</code>）
-            </n-text>
-            <n-text
-              v-if="pipelineHealth && !pipelineHealth.asr.transcribeUrlConfigured"
-              depth="3"
-              style="font-size: 11px; display: block; margin-top: 4px"
-            >
-              请在 backend/.env 配置千问 ASR：<code>DASHSCOPE_API_KEY</code>、<code>DASHSCOPE_BASE_URL</code>、
-              <code>QWEN_ASR_MODEL</code>（详见
-              <code>backend/.env.example</code>）。
-            </n-text>
-            <n-text
-              v-else-if="
-                pipelineHealth &&
-                pipelineHealth.asr.transcribeUrlConfigured &&
-                !pipelineHealth.asr.ok
-              "
-              depth="3"
-              style="font-size: 11px; display: block; margin-top: 4px"
-            >
-              ASR 健康检查未通过：{{ pipelineHealth.asr.error || '未知原因' }}
-              <template v-if="pipelineHealth.asr.healthUrl">
-                （探测 {{ pipelineHealth.asr.healthUrl }}）
-              </template>
-              。请确认密钥与网络可访问转写服务。
-            </n-text>
-            <n-text
-              v-if="pipelineHealth && !pipelineHealth.ffmpeg.ok"
-              depth="3"
-              style="font-size: 11px; display: block; margin-top: 2px"
-            >
-              请安装 FFmpeg 或放入 backend/ffmpeg/bin/ffmpeg.exe，或设置 FFMPEG_BIN。
-            </n-text>
-          </n-space>
-
-          <div class="script-block">
-            <n-text strong style="display: block; margin-bottom: 8px">口播文案（可编辑）</n-text>
-            <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 8px">
-              {{ scriptBlockHint }}
-            </n-text>
-            <template v-if="douyinPipeline">
-              <n-progress
-                type="line"
-                :percentage="pipelineProgress"
-                :processing="pipelineBarProcessing"
-                :show-indicator="true"
-                style="margin-bottom: 8px; max-width: 520px"
-              />
-              <n-text
-                depth="3"
-                style="font-size: 12px; display: block; margin-bottom: 8px; color: var(--n-primary-color)"
-              >
-                {{ pipelineStatusLabel }}
-              </n-text>
-            </template>
-            <n-text
-              v-if="isStreamingToScript"
-              depth="3"
-              style="font-size: 11px; display: block; margin-bottom: 6px; color: var(--n-primary-color)"
-            >
-              正在流式写入口播文案（点击输入框可立即补全文案并停止动画）…
-            </n-text>
-            <n-input
-              v-model:value="draft.manualScriptDraft"
-              type="textarea"
-              :rows="8"
-              placeholder="在此编辑口播文案…"
-              show-count
-              :maxlength="50000"
-              class="script-textarea"
-              @click="interruptStreamWithFullText"
-            />
-            <n-space align="center" style="margin-top: 12px; flex-wrap: wrap">
-              <n-button type="primary" secondary @click="onUseScript">使用文案</n-button>
-              <n-upload
-                :show-file-list="false"
-                :default-upload="false"
-                accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.webm,.mov,.mkv"
-                @change="onTranscribeUpload"
-              >
-                <n-button :loading="transcribeUploadLoading" size="small" secondary>
-                  上传音视频转写
+              <n-space align="center" :size="12" style="flex-wrap: wrap">
+                <n-button :disabled="!linkReady" :loading="loadingMeta || douyinPipeline" secondary @click="onFetchVideoMeta">
+                  获取视频信息
                 </n-button>
-              </n-upload>
-              <n-button
-                v-if="canTranscribeNonDouyinUrl"
-                size="small"
-                secondary
-                :loading="transcribeUrlLoading"
-                @click="onTranscribeNonDouyinFromUrl"
-              >
-                从当前链接转写（非抖音）
-              </n-button>
-              <n-button
-                v-if="lastSavedVideoBasename"
-                secondary
-                size="small"
-                :loading="retranscribingLocal"
-                @click="onRetranscribeFromLocal"
-              >
-                从本地文件转写口播
-              </n-button>
-              <n-text v-if="draft.scriptPipelineCommittedAt" depth="3" style="font-size: 12px">
-                已同步 · {{ new Date(draft.scriptPipelineCommittedAt).toLocaleString('zh-CN') }}
-              </n-text>
-            </n-space>
-          </div>
+                <n-tag v-if="dyCookieConfigured === true" size="small" type="success" :bordered="false">
+                  抖音 Cookie 已配置
+                </n-tag>
+                <n-tag v-else-if="dyCookieConfigured === false" size="small" type="warning" :bordered="false">
+                  抖音 Cookie 未配置
+                </n-tag>
+                <n-text v-if="pipelineHealthError" depth="3" style="font-size: 12px">
+                  {{ pipelineHealthError }}
+                </n-text>
+              </n-space>
 
-          <template v-if="draft.videoMeta">
-            <n-alert v-if="draft.videoMeta.warnings.length" type="warning" :show-icon="false">
-              <div v-for="(w, i) in draft.videoMeta.warnings" :key="i">{{ w }}</div>
-            </n-alert>
+              <div class="script-block">
+                <n-text strong style="display: block; margin-bottom: 8px">口播文案</n-text>
+                <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">
+                  {{ scriptBlockHint }}
+                </n-text>
 
-            <n-card title="视频信息" size="small" class="meta-feature-card" :bordered="true">
-              <n-space vertical :size="14">
-                <n-alert type="info" :show-icon="false">
-                  <div class="meta-hint-line">
-                    <n-text strong>源视频下载条件：</n-text>
-                    <n-text>{{ draft.videoMeta.sourceDownloadHint || '—' }}</n-text>
+                <template v-if="douyinPipeline">
+                  <n-progress
+                    type="line"
+                    :percentage="pipelineProgress"
+                    :processing="pipelineBarProcessing"
+                    indicator-placement="inside"
+                    style="margin-bottom: 8px"
+                  />
+                  <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">
+                    {{ pipelineStatusLabel }}
+                  </n-text>
+                </template>
+
+                <n-text
+                  v-if="isStreamingToScript"
+                  depth="3"
+                  style="font-size: 11px; display: block; margin-bottom: 8px; color: var(--primary)"
+                >
+                  正在流式写入口播文案，点击输入框可立即补全。
+                </n-text>
+
+                <n-input
+                  v-model:value="draft.manualScriptDraft"
+                  type="textarea"
+                  :rows="9"
+                  placeholder="在这里整理、改写并确认你要驱动配音的视频文案…"
+                  show-count
+                  :maxlength="50000"
+                  class="script-textarea"
+                  @click="interruptStreamWithFullText"
+                />
+
+                <n-space align="center" :size="10" style="margin-top: 12px; flex-wrap: wrap">
+                  <n-button type="primary" secondary @click="onUseScript">使用文案</n-button>
+                  <n-upload
+                    :show-file-list="false"
+                    :default-upload="false"
+                    accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.webm,.mov,.mkv"
+                    @change="onTranscribeUpload"
+                  >
+                    <n-button :loading="transcribeUploadLoading" size="small" secondary>
+                      上传音视频转写
+                    </n-button>
+                  </n-upload>
+                  <n-button
+                    v-if="canTranscribeNonDouyinUrl"
+                    size="small"
+                    secondary
+                    :loading="transcribeUrlLoading"
+                    @click="onTranscribeNonDouyinFromUrl"
+                  >
+                    从当前链接转写
+                  </n-button>
+                  <n-button
+                    v-if="lastSavedVideoBasename"
+                    size="small"
+                    secondary
+                    :loading="retranscribingLocal"
+                    @click="onRetranscribeFromLocal"
+                  >
+                    从本地保存视频重转写
+                  </n-button>
+                </n-space>
+              </div>
+
+              <template v-if="draft.videoMeta">
+                <n-alert v-if="draft.videoMeta.warnings.length" type="warning" :show-icon="false">
+                  <div v-for="(warning, index) in draft.videoMeta.warnings" :key="index">
+                    {{ warning }}
                   </div>
-                  <n-space v-if="draft.videoMeta.platform === 'douyin'" :size="8" style="margin-top: 8px; flex-wrap: wrap">
-                    <n-tag size="small" :bordered="false" :type="draft.videoMeta.videoAssetDetected ? 'success' : 'default'">
-                      页面视频线索：{{ draft.videoMeta.videoAssetDetected ? '已检测' : '未检测' }}
-                    </n-tag>
-                    <n-tag size="small" :bordered="false" :type="draft.videoMeta.dyCookieConfigured ? 'success' : 'warning'">
-                      服务端 Cookie：{{ draft.videoMeta.dyCookieConfigured ? '已配置' : '未配置' }}
-                    </n-tag>
-                  </n-space>
                 </n-alert>
 
-                <n-descriptions
-                  label-placement="left"
-                  bordered
-                  size="small"
-                  :column="1"
-                >
+                <n-descriptions label-placement="left" bordered size="small" :column="1">
                   <n-descriptions-item label="标题">
-                    {{ draft.videoMeta.title || '—' }}
+                    {{ draft.videoMeta.title || '暂无' }}
                   </n-descriptions-item>
-                  <n-descriptions-item label="标签">
-                    <n-space v-if="(draft.videoMeta.tags?.length ?? 0) > 0" size="small" style="flex-wrap: wrap">
-                      <n-tag v-for="(t, ti) in draft.videoMeta.tags" :key="ti" size="small" round>
-                        #{{ t }}
-                      </n-tag>
-                    </n-space>
-                    <n-text v-else depth="3">—</n-text>
-                  </n-descriptions-item>
-                  <n-descriptions-item label="获赞数">
+                  <n-descriptions-item label="点赞">
                     {{ formatStatCount(draft.videoMeta.likeCount) }}
                   </n-descriptions-item>
+                  <n-descriptions-item label="播放">
+                    {{ formatStatCount(draft.videoMeta.playCount) }}
+                  </n-descriptions-item>
+                  <n-descriptions-item label="内容">
+                    <div class="meta-readonly">
+                      {{ draft.videoMeta.content || draft.videoMeta.description || '暂无可解析内容' }}
+                    </div>
+                  </n-descriptions-item>
                 </n-descriptions>
-              </n-space>
-            </n-card>
-
-            <div class="meta-layout">
-              <img
-                v-if="draft.videoMeta.coverImageUrl"
-                class="meta-cover"
-                :src="draft.videoMeta.coverImageUrl"
-                alt="封面"
-                referrerpolicy="no-referrer"
-                loading="lazy"
-              />
-              <n-descriptions
-                label-placement="left"
-                bordered
-                size="small"
-                :column="1"
-                style="flex: 1; min-width: 0"
-              >
-                <n-descriptions-item label="内容">
-                  <div class="meta-readonly">
-                    {{ draft.videoMeta.content || '—' }}
-                  </div>
-                </n-descriptions-item>
-                <n-descriptions-item label="播放量">
-                  {{ formatStatCount(draft.videoMeta.playCount) }}
-                </n-descriptions-item>
-              </n-descriptions>
-            </div>
-          </template>
-        </n-space>
-      </n-card>
-      </section>
-
-      <section class="studio-panel studio-panel--output" aria-label="生成视频">
-      <n-card title="第二步：生成视频" size="large" class="glass step-generate-card">
-        <n-space vertical :size="14" class="generate-card-stack">
-          <n-text depth="3" class="generate-intro">
-            请根据自己的视频长度，需要生成多少条视频，选择<strong>本批生成条数</strong>，<strong>每格生成一条</strong>演示成片，单批至少 1 条、最多
-            {{ VIDEO_SEGMENT_MAX }} 条。
-            推荐：视频长度 15 秒以内，生成 1 条；视频长度 15-30 秒，生成 2 条；视频长度 30-45 秒，生成 3 条；视频长度 45-60 秒，生成 4 条；
-          </n-text>
-          <n-space align="center" class="segment-count-bar" :size="12">
-            <n-text strong>本批生成条数</n-text>
-            <n-input-number
-              v-model:value="videoSegmentCount"
-              :min="1"
-              :max="VIDEO_SEGMENT_MAX"
-              :disabled="generateVideoLoading"
-              size="small"
-            />
-            <n-text depth="3" style="font-size: 12px">（1～{{ VIDEO_SEGMENT_MAX }} 条）</n-text>
-          </n-space>
-          <n-space vertical :size="10" class="segment-editor">
-            <n-space align="center" class="segment-toolbar" :size="12">
-              <n-text strong>口播分段（{{ safeSegmentCount }} 格）</n-text>
-              <n-button size="small" secondary :disabled="generateVideoLoading" @click="importSegmentsFromManualDraft">
-                从上方口播载入
-              </n-button>
+              </template>
             </n-space>
-            <!-- <n-alert type="default" :show-icon="false" style="background: rgba(30, 41, 59, 0.65); font-size: 12px">
-              每段最多 {{ VIDEO_SEGMENT_MAX_CHARS }} 字；
-            </n-alert> -->
-            <div
-              v-for="idx in safeSegmentCount"
-              :key="idx"
-              class="video-segment-row"
-            >
-              <n-text class="video-segment-label" depth="3">第 {{ idx }} 段</n-text>
-              <n-input
-                :value="videoScriptSegments[idx - 1] ?? ''"
-                type="text"
-                :placeholder="segmentInputPlaceholder(idx)"
-                clearable
-                :maxlength="VIDEO_SEGMENT_MAX_CHARS"
-                show-count
-                :disabled="generateVideoLoading"
-                class="video-segment-input"
-                @update:value="(v) => onVideoSegmentInput(idx - 1, v)"
-              />
-            </div>
-          </n-space>
-          <div>
-            <n-text strong style="display: block; margin-bottom: 8px">口播形象照片</n-text>
-            <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 10px">
-              默认使用你在「专属数字人」中的形象；也可改用本机其他照片。
-            </n-text>
-            <n-radio-group
-              v-model:value="draft.portraitMode"
-              name="portrait-mode"
-              :disabled="portraitSyncing || !dhStore.hasTemplate"
-            >
-              <n-space vertical :size="8">
-                <n-radio value="digital_human">使用专属数字人形象（默认）</n-radio>
-                <n-radio value="custom">自行上传其他照片</n-radio>
-              </n-space>
-            </n-radio-group>
-            <div
-              v-if="draft.portraitMode === 'digital_human' && dhStore.hasTemplate"
-              class="dh-portrait-block"
-            >
-              <n-text depth="3" style="font-size: 12px; display: block; margin-top: 12px">
-                {{
-                  portraitSyncing
-                    ? '正在同步数字人形象…'
-                    : '已选用当前保存的数字人形象，创建任务时将作为口播照片提交。'
-                }}
-              </n-text>
-              <div v-if="!portraitSyncing && draft.photoPreviewUrl" class="dh-portrait-preview">
-                <img :src="draft.photoPreviewUrl" alt="口播形象预览" />
-              </div>
-            </div>
-            <PhotoUploader
-              v-else
-              v-model:preview-url="draft.photoPreviewUrl"
-              :show-header="false"
-              @update:file="draft.setPhotoFromUserUpload"
-            />
-          </div>
+          </n-card>
+        </section>
 
-          <n-space align="center" style="flex-wrap: wrap" :size="12">
-            <n-button
-              type="primary"
-              size="large"
-              :disabled="!canGenerateVideoPreview || generateVideoLoading"
-              :loading="generateVideoLoading"
-              @click="onGenerateVideo"
-            >
-              生成视频（本批 {{ safeSegmentCount }} 条）
-            </n-button>
-            <n-button
-              v-if="generateVideoLoading"
-              size="large"
-              secondary
-              type="error"
-              @click="cancelGenerateQueue"
-            >
-              停止生成
-            </n-button>
-          </n-space>
-          <n-text
-            v-if="canGenerateVideoPreview && !linkReady"
-            depth="3"
-            style="font-size: 12px; display: block; margin-top: 4px; color: var(--n-text-color-2)"
-          >
-            未填「原视频」有效链接时也可生成；填写并校验通过后，大模型会多一层原片上下文。获取视频信息、抖音转写仍需要上方有效链接。
-          </n-text>
-          <n-text v-if="generateVideoLoading" depth="3" style="font-size: 12px; display: block; margin-top: 6px">
-            当前为<strong>串行队列</strong>
-          </n-text>
-          <n-text v-if="generateVideoLoading || generateVideoEstimatedTotalSec > 0" depth="3" style="font-size: 12px">
-            本批合计预估约 <n-text tag="span" strong>{{ generateVideoEstimatedTotalSec }}</n-text> 秒（本批各段累加，仅供参考）
-          </n-text>
-          <n-text v-if="showSegmentResultBlocks" strong style="display: block; margin-top: 12px">分段预览结果</n-text>
-          <n-space v-if="showSegmentResultBlocks" vertical :size="16" style="width: 100%; margin-top: 8px">
-            <div
-              v-for="slot in safeSegmentCount"
-              :key="`seg-out-${slot}`"
-              class="video-segment-result"
-            >
-              <n-text strong style="display: block; margin-bottom: 6px">第 {{ slot }} 段</n-text>
-              <n-progress
-                type="line"
-                :percentage="segmentGenStates[slot - 1]?.progress ?? 0"
-                :processing="segmentGenStates[slot - 1]?.processing ?? false"
-                :show-indicator="true"
-                style="max-width: 100%"
-              />
-              <n-text
-                v-if="segmentGenStates[slot - 1]?.statusLabel"
-                depth="3"
-                style="font-size: 12px; margin-top: 4px; display: block"
-              >
-                {{ segmentGenStates[slot - 1].statusLabel }}
-              </n-text>
-              <n-alert
-                v-if="segmentGenStates[slot - 1]?.error"
-                type="error"
-                :show-icon="false"
-                style="margin-top: 6px; font-size: 12px"
-              >
-                {{ segmentGenStates[slot - 1].error }}
-              </n-alert>
-              <n-alert
-                v-if="segmentGenStates[slot - 1]?.hint && !segmentGenStates[slot - 1]?.error"
-                type="info"
-                :show-icon="false"
-                style="margin-top: 6px; font-size: 12px"
-              >
-                {{ segmentGenStates[slot - 1].hint }}
-              </n-alert>
-              <div v-if="segmentGenStates[slot - 1]?.videoUrl" class="video-preview-wrap">
-                <video
-                  class="video-preview"
-                  controls
-                  playsinline
-                  preload="metadata"
-                  :src="segmentGenStates[slot - 1].videoUrl ?? undefined"
-                />
+        <section class="studio-panel studio-panel--output" aria-label="数字人生成">
+          <n-card title="数字人对口型预览" size="large" class="glass step-generate-card">
+            <n-space vertical :size="16" class="generate-card-stack">
+              <div class="resource-pickers">
+                <div>
+                  <n-text strong style="display: block; margin-bottom: 8px">选择数字人视频</n-text>
+                  <n-select
+                    v-model:value="selectedAvatarId"
+                    :options="avatarOptions"
+                    :loading="renderResourceLoading"
+                    placeholder="从数字人库中选择一个出镜视频"
+                  />
+                  <n-space size="small" style="margin-top: 10px">
+                    <n-button text type="primary" @click="router.push({ name: 'resource-library', query: { tab: 'avatars' } })">
+                      去数字人库添加视频
+                    </n-button>
+                  </n-space>
+                </div>
+
+                <div>
+                  <n-text strong style="display: block; margin-bottom: 8px">选择配音音色</n-text>
+                  <n-select
+                    v-model:value="selectedVoiceId"
+                    :options="voiceOptions"
+                    :loading="renderResourceLoading"
+                    placeholder="从音色库中选择一个克隆声音"
+                  />
+                  <n-space size="small" style="margin-top: 10px">
+                    <n-button text type="primary" @click="router.push({ name: 'resource-library', query: { tab: 'voices' } })">
+                      去音色库管理音色
+                    </n-button>
+                  </n-space>
+                </div>
               </div>
-            </div>
-          </n-space>
-        </n-space>
-      </n-card>
-      </section>
-        </div>
-    </div>
+
+              <div class="segment-count-bar">
+                <n-text strong>本批生成条数</n-text>
+                <n-input-number
+                  v-model:value="videoSegmentCount"
+                  :min="1"
+                  :max="VIDEO_SEGMENT_MAX"
+                  :disabled="generateVideoLoading"
+                  size="small"
+                />
+                <n-text depth="3" style="font-size: 12px">支持 1 到 {{ VIDEO_SEGMENT_MAX }} 条</n-text>
+              </div>
+
+              <div class="segment-editor">
+                <div class="segment-toolbar">
+                  <n-text strong>口播片段</n-text>
+                  <n-button size="small" secondary :disabled="generateVideoLoading" @click="importSegmentsFromManualDraft">
+                    从上方文案载入
+                  </n-button>
+                </div>
+                <div v-for="index in safeSegmentCount" :key="index" class="video-segment-row">
+                  <n-text class="video-segment-label" depth="3">第 {{ index }} 段</n-text>
+                  <n-input
+                    :value="videoScriptSegments[index - 1] ?? ''"
+                    :placeholder="segmentInputPlaceholder(index)"
+                    clearable
+                    :maxlength="VIDEO_SEGMENT_MAX_CHARS"
+                    show-count
+                    :disabled="generateVideoLoading"
+                    class="video-segment-input"
+                    @update:value="(value) => onVideoSegmentInput(index - 1, value)"
+                  />
+                </div>
+              </div>
+
+              <n-space align="center" :size="12" style="flex-wrap: wrap">
+                <n-button
+                  type="primary"
+                  size="large"
+                  :disabled="!canGenerateVideoPreview || generateVideoLoading"
+                  :loading="generateVideoLoading"
+                  @click="onGenerateVideo"
+                >
+                  生成对口型视频（本批 {{ safeSegmentCount }} 条）
+                </n-button>
+                <n-button
+                  v-if="generateVideoLoading"
+                  size="large"
+                  secondary
+                  type="error"
+                  @click="cancelGenerateQueue"
+                >
+                  停止生成
+                </n-button>
+              </n-space>
+
+              <n-text v-if="generateVideoLoading || generateVideoEstimatedTotalSec > 0" depth="3" style="font-size: 12px">
+                本批预计总耗时约 {{ generateVideoEstimatedTotalSec }} 秒，仅作参考。
+              </n-text>
+
+              <n-space v-if="showSegmentResultBlocks" vertical :size="16" style="width: 100%">
+                <div
+                  v-for="slot in safeSegmentCount"
+                  :key="`segment-result-${slot}`"
+                  class="video-segment-result"
+                >
+                  <n-text strong style="display: block; margin-bottom: 6px">第 {{ slot }} 段</n-text>
+                  <n-progress
+                    type="line"
+                    :percentage="segmentGenStates[slot - 1]?.progress ?? 0"
+                    :processing="segmentGenStates[slot - 1]?.processing ?? false"
+                    indicator-placement="inside"
+                  />
+                  <n-text
+                    v-if="segmentGenStates[slot - 1]?.statusLabel"
+                    depth="3"
+                    style="font-size: 12px; display: block; margin-top: 6px"
+                  >
+                    {{ segmentGenStates[slot - 1]?.statusLabel }}
+                  </n-text>
+                  <n-alert
+                    v-if="segmentGenStates[slot - 1]?.error"
+                    type="error"
+                    :show-icon="false"
+                    style="margin-top: 8px"
+                  >
+                    {{ segmentGenStates[slot - 1]?.error }}
+                  </n-alert>
+                  <n-alert
+                    v-else-if="segmentGenStates[slot - 1]?.hint"
+                    type="info"
+                    :show-icon="false"
+                    style="margin-top: 8px"
+                  >
+                    {{ segmentGenStates[slot - 1]?.hint }}
+                  </n-alert>
+                  <div v-if="segmentGenStates[slot - 1]?.videoUrl" class="video-preview-wrap">
+                    <video
+                      class="video-preview"
+                      controls
+                      playsinline
+                      preload="metadata"
+                      :src="segmentGenStates[slot - 1]?.videoUrl ?? undefined"
+                    />
+                  </div>
+                </div>
+              </n-space>
+            </n-space>
+          </n-card>
+        </section>
+      </div>
     </div>
   </div>
 </template>
@@ -1354,58 +948,9 @@ async function onGenerateVideo() {
   mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.78), transparent 82%);
 }
 
-/* 与下方双栏同宽，避免头尾窄、内容宽的割裂感 */
-.studio-wide-canvas {
-  position: relative;
-  z-index: 1;
-  max-width: min(1680px, 100%);
-  margin-left: auto;
-  margin-right: auto;
-}
-
-.studio-lock-banner {
-  font-size: 15px;
-  padding: 5px;
-  margin: 0 auto 18px;
-  border-color: rgba(251, 191, 36, 0.34);
-  border-radius: 22px;
-  background:
-    linear-gradient(90deg, rgba(251, 191, 36, 0.12), rgba(22, 242, 139, 0.06)),
-    var(--bg-card);
-}
-
-.studio-dh-strip {
-  margin: 0 auto 18px;
-  border-radius: 26px;
-}
-
-.studio-dh-thumb {
-  width: 120px;
-  height: 120px;
-  max-width: 100%;
-  object-fit: cover;
-  border: 1px solid var(--border-soft);
-  border-radius: 18px;
-  box-shadow: var(--shadow-soft);
-}
-
-/* 未创建数字人时整区不可点；略提亮度避免在部分屏幕上像「白屏/内容消失」 */
-.studio-body--locked {
-  pointer-events: none;
-  user-select: none;
-  opacity: 0.72;
-  filter: grayscale(0.12);
-}
-
 .page__content {
   position: relative;
   z-index: 1;
-  max-width: 1080px;
-  margin: 0 auto;
-}
-
-/* 口播制作：宽屏双栏，左源视频+文案、右生成；窄屏仍单列 */
-.page__content--studio {
   max-width: min(1680px, 100%);
   margin: 0 auto;
   width: 100%;
@@ -1416,16 +961,14 @@ async function onGenerateVideo() {
   grid-template-columns: 1fr;
   gap: 22px;
   align-items: start;
-  width: 100%;
 }
 
 @media (min-width: 1180px) {
   .studio-workspace {
-    grid-template-columns: minmax(0, 1.12fr) minmax(0, 0.88fr);
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
     gap: 26px;
   }
 
-  /* 仅做轻微吸顶，避免 max-height+overflow 在部分环境下造成布局/滚动异常；双栏已减少纵向长度 */
   .studio-panel--output {
     position: sticky;
     top: 80px;
@@ -1433,321 +976,93 @@ async function onGenerateVideo() {
   }
 }
 
-.studio-panel--source .n-card,
-.studio-panel--output .n-card {
-  min-width: 0;
-}
-
-/* 与 grid gap 二选一，避免右栏与上栏再叠出一段空白 */
-.page__content--studio .step-generate-card {
-  margin-top: 0;
-}
-
-.step-generate-card :deep(.n-card__content),
-.step-generate-card :deep(.n-card-content) {
-  color: var(--text-main);
-}
-
-.generate-card-stack {
-  width: 100%;
-}
-
-.generate-intro {
-  display: block;
-  padding: 14px 16px;
-  border: 1px solid var(--border-soft);
-  border-radius: 18px;
-  color: var(--text-sub);
-  font-size: 13px;
-  line-height: 1.85;
-  background:
-    radial-gradient(circle at 100% 0%, rgba(22, 242, 139, 0.08), transparent 32%),
-    var(--bg-soft);
-}
-
-.generate-intro strong {
-  color: var(--text-main);
-  font-weight: 700;
-}
-
-.segment-count-bar {
-  flex-wrap: wrap;
-  padding: 12px 14px;
-  border: 1px solid var(--border-soft);
-  border-radius: 18px;
-  background:
-    linear-gradient(135deg, rgba(22, 242, 139, 0.06), rgba(0, 210, 106, 0.04)),
-    var(--bg-soft);
-}
-
-.segment-count-bar :deep(.n-text--strong),
-.segment-toolbar :deep(.n-text--strong) {
-  color: var(--text-main);
-  letter-spacing: 0.02em;
-}
-
-.segment-editor {
-  width: 100%;
-  padding: 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 22px;
-  background:
-    radial-gradient(circle at 0% 0%, rgba(22, 242, 139, 0.08), transparent 32%),
-    var(--bg-card);
-}
-
-/* Hero 在宽屏时压缩纵向占位 */
-.home-hero-slot {
-  max-width: min(1680px, 100%);
-  margin: 0 auto;
-}
-
-.video-segment-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 16px;
-  background: var(--bg-card);
-}
-
-.segment-toolbar {
-  flex-wrap: wrap;
-  padding: 12px 14px;
-  border: 1px solid var(--border-soft);
-  border-radius: 18px;
-  background:
-    linear-gradient(135deg, rgba(22, 242, 139, 0.08), rgba(0, 210, 106, 0.06)),
-    var(--bg-card);
-  box-shadow: var(--shadow-soft);
-}
-
-.video-segment-label {
-  flex: 0 0 52px;
-  color: var(--accent-blue);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.video-segment-input {
-  flex: 1;
-  min-width: 0;
-}
-
-.video-segment-result {
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.video-segment-result:last-child {
-  border-bottom: none;
-}
-
-.dh-portrait-block {
-  margin-top: 4px;
-}
-
-.dh-portrait-preview {
-  margin-top: 10px;
-  overflow: hidden;
-  max-width: 280px;
-  border: 1px solid var(--border-soft);
-  border-radius: 18px;
-  box-shadow: var(--shadow-soft);
-}
-
-.dh-portrait-preview img {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-.video-preview-wrap {
-  margin-top: 8px;
-}
-
-.video-preview {
-  width: 100%;
-  max-width: 420px;
-  border: 1px solid var(--border-soft);
-  border-radius: 18px;
-  background: var(--bg-soft);
-  box-shadow: var(--shadow-soft);
-}
-
-.meta-feature-card {
-  margin-top: 4px;
-  border-radius: 20px;
-  background:
-    radial-gradient(circle at 100% 0%, rgba(22, 242, 139, 0.08), transparent 30%),
-    var(--bg-soft);
-}
-
-.meta-hint-line {
-  line-height: 1.6;
-}
-
-.meta-layout {
-  display: flex;
-  gap: 16px;
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-
-.meta-cover {
-  width: 200px;
-  max-width: 100%;
-  border: 1px solid var(--border-soft);
-  border-radius: 18px;
-  object-fit: cover;
-  aspect-ratio: 3 / 4;
-  background: var(--bg-soft);
-  box-shadow: var(--shadow-soft);
-}
-
-.meta-readonly {
-  font-size: 13px;
-  line-height: 1.65;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-sub);
-  max-height: 220px;
-  overflow-y: auto;
-}
-
-.script-block {
-  margin-top: 4px;
-  padding: 16px;
-  border: 1px solid var(--border-soft);
-  border-radius: 22px;
-  background:
-    radial-gradient(circle at 100% 0%, rgba(22, 242, 139, 0.08), transparent 30%),
-    var(--bg-soft);
-}
-
-.script-textarea {
-  font-size: 14px;
-}
-
 .glass {
   border: 1px solid var(--border-soft);
-  border-radius: 28px;
   background: linear-gradient(180deg, rgba(8, 28, 21, 0.78), rgba(2, 10, 7, 0.86));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.04),
     var(--shadow-soft);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
-  transition:
-    border-color var(--transition-fast),
-    box-shadow var(--transition-fast),
-    transform var(--transition-smooth);
 }
 
-.glass:hover {
-  border-color: var(--border-strong);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    0 18px 44px rgba(0, 0, 0, 0.38),
-    0 0 30px rgba(22, 242, 139, 0.12);
-  transform: translateY(-3px);
-}
-
-.page :deep(.n-card-header) {
+.glass :deep(.n-card-header__main),
+.glass :deep(.n-card__content),
+.glass :deep(.n-card-content),
+.glass :deep(.n-descriptions-header),
+.glass :deep(.n-descriptions-table-content),
+.glass :deep(.n-descriptions-table-header) {
   color: var(--text-main);
-  font-weight: 700;
 }
 
-.page :deep(.n-alert) {
+.script-textarea :deep(.n-input),
+.script-textarea :deep(.n-input-wrapper),
+.video-segment-input :deep(.n-input),
+.video-segment-input :deep(.n-input-wrapper) {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.script-block,
+.segment-editor,
+.video-segment-result,
+.resource-pickers > div {
+  padding: 16px;
+  border: 1px solid var(--border-soft);
   border-radius: 18px;
+  background: rgba(255, 255, 255, 0.03);
 }
 
-.page :deep(.n-input),
-.page :deep(.n-input-number) {
-  --n-color: var(--bg-card) !important;
-  --n-color-focus: var(--bg-card) !important;
-  --n-border: 1px solid var(--border-soft) !important;
-  --n-border-hover: 1px solid var(--border-strong) !important;
-  --n-border-focus: 1px solid var(--primary) !important;
-  --n-box-shadow-focus: 0 0 0 2px rgba(22, 242, 139, 0.14) !important;
+.resource-pickers {
+  display: grid;
+  gap: 14px;
 }
 
-.page :deep(.n-tag) {
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
+.segment-count-bar,
+.segment-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
-.page :deep(.n-descriptions-table) {
-  background: var(--bg-card);
+.segment-editor {
+  display: grid;
+  gap: 12px;
 }
 
-.page :deep(.n-descriptions-table-bordered) {
-  border-color: var(--border-soft);
+.video-segment-row {
+  display: grid;
+  gap: 8px;
+}
+
+.video-segment-label {
+  font-size: 12px;
+}
+
+.meta-readonly {
+  white-space: pre-wrap;
+  line-height: 1.7;
+}
+
+.video-preview-wrap {
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.video-preview {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  background: #020b08;
 }
 
 @media (max-width: 900px) {
   .page {
-    padding: 10px 16px 32px;
-    padding-left: max(16px, var(--app-safe-left, 0px));
-    padding-right: max(16px, var(--app-safe-right, 0px));
-    padding-bottom: max(32px, var(--app-safe-bottom, 0px));
-  }
-
-  .studio-lock-banner {
-    margin-left: 0;
-    margin-right: 0;
-  }
-}
-
-@media (max-width: 640px) {
-  .page {
-    padding: 8px 12px 28px;
-    padding-left: max(12px, var(--app-safe-left, 0px));
-    padding-right: max(12px, var(--app-safe-right, 0px));
-    padding-bottom: max(28px, var(--app-safe-bottom, 0px));
-  }
-
-  .studio-dh-thumb {
-    width: 100px;
-    height: 100px;
-  }
-
-  .video-segment-row {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 6px;
-  }
-
-  .video-segment-label {
-    flex: 0 0 auto;
-  }
-
-  .meta-layout {
-    flex-direction: column;
-  }
-
-  .meta-cover {
-    width: 100%;
-    max-width: 240px;
-    margin: 0 auto;
-  }
-
-  .meta-readonly {
-    max-height: 180px;
-  }
-
-  .script-textarea {
-    font-size: 16px; /* 减轻 iOS 自动放大 */
-  }
-}
-
-/* 单栏时取消右栏吸顶，避免与顶栏/安全区叠层 */
-@media (max-width: 1179px) {
-  .studio-panel--output {
-    position: static;
-    top: auto;
+    padding: 12px 16px 36px;
   }
 }
 </style>

@@ -34,8 +34,4 @@ const visible = computed({
   </n-modal>
 </template>
 
-<style scoped>
-.delete-modal {
-  width: min(420px, calc(100vw - 32px));
-}
-</style>
+<style scoped></style>

@@ -163,6 +163,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         is_recommended INTEGER NOT NULL DEFAULT 0,
         audio_url TEXT,
         clone_status TEXT NOT NULL DEFAULT 'ready',
+        provider TEXT,
+        provider_voice TEXT,
+        provider_model TEXT,
+        sample_duration_ms INTEGER,
+        clone_error TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -209,6 +214,26 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       db.exec(
         `ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'`,
       );
+    }
+
+    const voiceCols = db
+      .prepare(`PRAGMA table_info(voice_resources)`)
+      .all() as { name: string }[];
+    const voiceNames = new Set(voiceCols.map((c) => c.name));
+    if (!voiceNames.has('provider')) {
+      db.exec(`ALTER TABLE voice_resources ADD COLUMN provider TEXT`);
+    }
+    if (!voiceNames.has('provider_voice')) {
+      db.exec(`ALTER TABLE voice_resources ADD COLUMN provider_voice TEXT`);
+    }
+    if (!voiceNames.has('provider_model')) {
+      db.exec(`ALTER TABLE voice_resources ADD COLUMN provider_model TEXT`);
+    }
+    if (!voiceNames.has('sample_duration_ms')) {
+      db.exec(`ALTER TABLE voice_resources ADD COLUMN sample_duration_ms INTEGER`);
+    }
+    if (!voiceNames.has('clone_error')) {
+      db.exec(`ALTER TABLE voice_resources ADD COLUMN clone_error TEXT`);
     }
   }
 
@@ -277,6 +302,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         is_recommended TINYINT NOT NULL DEFAULT 0,
         audio_url VARCHAR(2048) NULL,
         clone_status VARCHAR(32) NOT NULL DEFAULT 'ready',
+        provider VARCHAR(64) NULL,
+        provider_voice VARCHAR(255) NULL,
+        provider_model VARCHAR(128) NULL,
+        sample_duration_ms INT NULL,
+        clone_error TEXT NULL,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL,
         INDEX idx_voice_resources_user (user_id),
@@ -327,6 +357,27 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       await pool.query(
         `ALTER TABLE users ADD COLUMN account_status VARCHAR(16) NOT NULL DEFAULT 'active'`,
       );
+    }
+    if (!(await hasCol('voice_resources', 'provider'))) {
+      await pool.query(`ALTER TABLE voice_resources ADD COLUMN provider VARCHAR(64) NULL`);
+    }
+    if (!(await hasCol('voice_resources', 'provider_voice'))) {
+      await pool.query(
+        `ALTER TABLE voice_resources ADD COLUMN provider_voice VARCHAR(255) NULL`,
+      );
+    }
+    if (!(await hasCol('voice_resources', 'provider_model'))) {
+      await pool.query(
+        `ALTER TABLE voice_resources ADD COLUMN provider_model VARCHAR(128) NULL`,
+      );
+    }
+    if (!(await hasCol('voice_resources', 'sample_duration_ms'))) {
+      await pool.query(
+        `ALTER TABLE voice_resources ADD COLUMN sample_duration_ms INT NULL`,
+      );
+    }
+    if (!(await hasCol('voice_resources', 'clone_error'))) {
+      await pool.query(`ALTER TABLE voice_resources ADD COLUMN clone_error TEXT NULL`);
     }
 
     await pool.query(`

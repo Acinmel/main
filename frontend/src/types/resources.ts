@@ -26,6 +26,11 @@ export interface AvatarResource extends ResourceBase {
 export interface VoiceResource extends ResourceBase {
   audioUrl: string
   cloneStatus: 'ready' | 'processing' | 'failed'
+  provider: string | null
+  providerVoice: string | null
+  providerModel: string | null
+  sampleDurationMs: number | null
+  cloneError: string | null
 }
 
 export interface SubtitleTemplateResource extends ResourceBase {
@@ -47,9 +52,17 @@ export interface CreateAvatarResourceBody {
   styleId?: string
 }
 
+export interface CreateAvatarResourceDraft extends CreateAvatarResourceBody {
+  uploadFile?: File
+}
+
 export interface CreateVoiceResourceBody {
   name: string
   audioUrl?: string
+}
+
+export interface CreateVoiceResourceDraft extends CreateVoiceResourceBody {
+  sampleFile?: File
 }
 
 export interface CreateSubtitleTemplateBody {

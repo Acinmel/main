@@ -1,7 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { RewriteStyle } from '../../modules/tasks/tasks.types';
-import { mockSuggest } from './ai-mock.util';
+import { mockHookedOralScript, mockSuggest } from './ai-mock.util';
+import {
+  pickRandomOralScriptStrategy,
+  type OralScriptStrategy,
+} from './oral-script-strategies';
 import {
   resolveChatCompletionsUrl,
   resolveRewriteApiKey,
@@ -13,10 +17,15 @@ type ChatCompletionMessage = {
   content: string;
 };
 
-/**
- * 文案改写 / 一键增强：OpenAI 兼容 Chat Completions。
- * 未配 OPENAI_* 时自动走火山方舟：ARK_BASE_URL + ARK_API_KEY（与 Python OpenAI 客户端改 base_url 一致）。
- */
+export interface HookedOralScriptResult {
+  hook3s: string;
+  hook10s: string;
+  optimizedScript: string;
+  strategyId: string;
+  strategyLabel: string;
+  llmUsed: boolean;
+}
+
 @Injectable()
 export class RewriteAiService {
   private readonly logger = new Logger(RewriteAiService.name);
@@ -30,34 +39,81 @@ export class RewriteAiService {
   }): Promise<string> {
     const apiKey = resolveRewriteApiKey(this.config);
     if (!apiKey) {
-      this.logger.warn('OPENAI_API_KEY / ARK_API_KEY 均未配置，改写使用本地 mock');
+      this.logger.warn('OPENAI_API_KEY / ARK_API_KEY 未配置，改写使用本地 mock');
       return mockSuggest(params.source, params.style, params.sourceVideoUrl);
+    }
+
+    try {
+      return await this.requestChatCompletion(this.buildMessages(params), 0.7);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(`LLM 调用失败，回退 mock：${msg}`);
+      return mockSuggest(params.source, params.style, params.sourceVideoUrl);
+    }
+  }
+
+  async optimizeHookedOralScript(params: {
+    source: string;
+    sourceVideoUrl?: string;
+  }): Promise<HookedOralScriptResult> {
+    const rawSource = params.source.trim();
+    const strategy = pickRandomOralScriptStrategy();
+    if (!rawSource) {
+      return mockHookedOralScript(params.source, strategy);
+    }
+
+    const apiKey = resolveRewriteApiKey(this.config);
+    if (!apiKey) {
+      this.logger.warn('OPENAI_API_KEY / ARK_API_KEY 未配置，口播优化使用本地 mock');
+      return mockHookedOralScript(rawSource, strategy);
+    }
+
+    try {
+      const content = await this.requestChatCompletion(
+        this.buildHookedOralScriptMessages({
+          source: rawSource,
+          sourceVideoUrl: params.sourceVideoUrl?.trim() || '',
+          strategy,
+        }),
+        strategy.temperature,
+      );
+      return this.parseHookedOralScriptResult(content, rawSource, strategy, true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.warn(`口播优化调用失败，回退 mock：${msg}`);
+      return mockHookedOralScript(rawSource, strategy);
+    }
+  }
+
+  private async requestChatCompletion(
+    messages: ChatCompletionMessage[],
+    temperature: number,
+  ): Promise<string> {
+    const apiKey = resolveRewriteApiKey(this.config);
+    if (!apiKey) {
+      throw new Error('rewrite api key missing');
     }
 
     const url = resolveChatCompletionsUrl(this.config);
     const model = resolveRewriteModel(this.config);
     const timeoutMs = Number(this.config.get('OPENAI_TIMEOUT_MS') ?? 60_000);
 
-    const messages = this.buildMessages(params);
-    const body = {
-      model,
-      temperature: 0.7,
-      messages,
-    };
-
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
       const res = await fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          model,
+          temperature,
+          messages,
+        }),
         signal: controller.signal,
       });
-      clearTimeout(timer);
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
@@ -68,12 +124,12 @@ export class RewriteAiService {
         choices?: { message?: { content?: string } }[];
       };
       const text = json.choices?.[0]?.message?.content?.trim();
-      if (!text) throw new Error('模型返回空内容');
+      if (!text) {
+        throw new Error('model returned empty content');
+      }
       return text;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      this.logger.warn(`LLM 调用失败，回退 mock：${msg}`);
-      return mockSuggest(params.source, params.style, params.sourceVideoUrl);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -83,27 +139,115 @@ export class RewriteAiService {
     sourceVideoUrl: string;
   }): ChatCompletionMessage[] {
     const styleGuide: Record<RewriteStyle, string> = {
-      conservative: '保守改写：保留主题与逻辑，降低重复表达，适合口播朗读。',
-      viral: '爆款增强：开头加钩子，中段加情绪与反差，结尾引导互动或关注。',
-      commerce: '带货转化：痛点-方案-证明-行动号召，语气真诚有说服力。',
-      knowledge: '知识分享：结构化输出（定义→步骤→例子→小结），便于理解记忆。',
+      conservative: '保守改写：保留主题与逻辑，减少重复表达，适合直接口播。',
+      viral: '爆款增强：开头更有钩子，中段加强反差和情绪张力，结尾加互动引导。',
+      commerce: '带货转化：突出痛点、方案、结果和行动号召，语气真诚有说服力。',
+      knowledge: '知识分享：结构清楚，适合把概念、步骤和案例讲明白。',
     };
 
     return [
       {
         role: 'system',
         content:
-          '你是中文短视频口播编剧。输出一段可直接口播的连贯文案，不要 Markdown，不要分点列表（除非知识分享风格确有必要）。',
+          '你是中文短视频口播编剧。请输出一段可直接朗读的成稿，不要使用 Markdown，不要输出多余说明。',
       },
       {
         role: 'user',
         content: [
           `改写风格：${styleGuide[params.style]}`,
-          `原视频链接（仅供参考，勿逐字复述链接）：${params.sourceVideoUrl}`,
-          '--- 原文案 ---',
+          `来源链接（仅供理解主题，不要复述链接）：${params.sourceVideoUrl}`,
+          '--- 原始内容 ---',
           params.source,
         ].join('\n'),
       },
     ];
+  }
+
+  private buildHookedOralScriptMessages(params: {
+    source: string;
+    sourceVideoUrl: string;
+    strategy: OralScriptStrategy;
+  }): ChatCompletionMessage[] {
+    return [
+      {
+        role: 'system',
+        content: [
+          '你是中文短视频口播编剧。',
+          '你的任务是把转写或爬取得到的原始内容，改写成适合数字人口播的视频脚本。',
+          '要求：',
+          '1. 保留原文核心信息，不要编造原文没有提到的事实。',
+          '2. 去掉口头禅、重复、跑题和明显不适合口播的表达。',
+          '3. 单独生成一个 3 秒钩子和一个 10 秒钩子。',
+          '4. optimizedScript 必须把 hook3s 和 hook10s 自然融入开头，然后继续完整正文。',
+          '5. 输出必须是严格 JSON，不要 Markdown，不要解释。',
+          '6. JSON 结构必须是 {"hook3s":"...","hook10s":"...","optimizedScript":"..."}',
+          `7. 本次必须采用「${params.strategy.label}」方案。`,
+          ...params.strategy.systemHints.map((hint, index) => `${index + 8}. ${hint}`),
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: [
+          params.sourceVideoUrl
+            ? `来源链接（仅供理解上下文，不要复述链接）：${params.sourceVideoUrl}`
+            : '',
+          '请把下面这段原始内容整理成可直接给客户使用的口播文案：',
+          params.source,
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+      },
+    ];
+  }
+
+  private parseHookedOralScriptResult(
+    raw: string,
+    source: string,
+    strategy: OralScriptStrategy,
+    llmUsed: boolean,
+  ): HookedOralScriptResult {
+    const fallback = mockHookedOralScript(source, strategy);
+    const candidate = this.extractJsonObject(raw);
+    if (!candidate) {
+      return {
+        ...fallback,
+        optimizedScript: raw.trim() || fallback.optimizedScript,
+        llmUsed,
+      };
+    }
+
+    try {
+      const json = JSON.parse(candidate) as Partial<HookedOralScriptResult>;
+      const hook3s = json.hook3s?.trim() || fallback.hook3s;
+      const hook10s = json.hook10s?.trim() || fallback.hook10s;
+      const optimizedScript = json.optimizedScript?.trim() || fallback.optimizedScript;
+      return {
+        hook3s,
+        hook10s,
+        optimizedScript,
+        strategyId: strategy.id,
+        strategyLabel: strategy.label,
+        llmUsed,
+      };
+    } catch {
+      return {
+        ...fallback,
+        optimizedScript: raw.trim() || fallback.optimizedScript,
+        llmUsed,
+      };
+    }
+  }
+
+  private extractJsonObject(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      return trimmed;
+    }
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      return trimmed.slice(start, end + 1);
+    }
+    return null;
   }
 }

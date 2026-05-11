@@ -3,6 +3,14 @@ import { onBeforeUnmount, ref } from 'vue'
 export function useSingleAudioPlayer() {
   const playingId = ref<string | null>(null)
   let audio: HTMLAudioElement | null = null
+  let objectUrl: string | null = null
+
+  function revokeObjectUrl() {
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl)
+      objectUrl = null
+    }
+  }
 
   function stop() {
     if (audio) {
@@ -10,20 +18,40 @@ export function useSingleAudioPlayer() {
       audio.src = ''
       audio = null
     }
+    revokeObjectUrl()
     playingId.value = null
   }
 
-  function toggle(id: string, url: string) {
+  async function resolveAudioSource(url: string) {
+    if (/^(https?:|data:|blob:)/i.test(url)) return url
+    const token = localStorage.getItem('kb_token')
+    const res = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    })
+    if (!res.ok) {
+      throw new Error(`audio fetch failed: ${res.status}`)
+    }
+    const blob = await res.blob()
+    objectUrl = URL.createObjectURL(blob)
+    return objectUrl
+  }
+
+  async function toggle(id: string, url: string) {
     if (playingId.value === id) {
       stop()
       return
     }
     stop()
-    audio = new Audio(url)
-    playingId.value = id
-    audio.addEventListener('ended', stop, { once: true })
-    audio.addEventListener('error', stop, { once: true })
-    void audio.play().catch(stop)
+    try {
+      const src = await resolveAudioSource(url)
+      audio = new Audio(src)
+      playingId.value = id
+      audio.addEventListener('ended', stop, { once: true })
+      audio.addEventListener('error', stop, { once: true })
+      await audio.play()
+    } catch {
+      stop()
+    }
   }
 
   onBeforeUnmount(stop)

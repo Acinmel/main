@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { NAlert, NButton, NEmpty, NSpin, useMessage } from 'naive-ui'
-import { cloneVoiceResource, listVoiceResources } from '@/api/resources'
+import {
+  cloneVoiceResource,
+  cloneVoiceResourceUpload,
+  listVoiceResources,
+} from '@/api/resources'
 import DeleteConfirmModal from '@/components/resources/DeleteConfirmModal.vue'
 import HeaderFilter from '@/components/resources/HeaderFilter.vue'
 import VoiceCloneModal from '@/components/resources/VoiceCloneModal.vue'
@@ -10,7 +14,8 @@ import { useCursorList } from '@/composables/useCursorList'
 import { useDebouncedInfiniteScroll } from '@/composables/useDebouncedInfiniteScroll'
 import { useResourceActions } from '@/composables/useResourceActions'
 import { useSingleAudioPlayer } from '@/composables/useSingleAudioPlayer'
-import type { CreateVoiceResourceBody, ResourceScope, VoiceResource } from '@/types/resources'
+import type { CreateVoiceResourceDraft, ResourceScope, VoiceResource } from '@/types/resources'
+import { describeHttpOrNetworkError } from '@/utils/httpErrorMessage'
 
 const props = withDefaults(
   defineProps<{
@@ -99,15 +104,17 @@ async function confirmDelete() {
   }
 }
 
-async function cloneVoice(body: CreateVoiceResourceBody) {
+async function cloneVoice(body: CreateVoiceResourceDraft) {
   cloning.value = true
   try {
-    const item = await cloneVoiceResource(body)
+    const item = body.sampleFile
+      ? await cloneVoiceResourceUpload(body)
+      : await cloneVoiceResource(body)
     list.prepend(item)
     cloneOpen.value = false
     message.success('声音克隆已创建')
-  } catch {
-    message.error('声音克隆失败')
+  } catch (e) {
+    message.error(describeHttpOrNetworkError(e))
   } finally {
     cloning.value = false
   }
@@ -174,8 +181,8 @@ async function cloneVoice(body: CreateVoiceResourceBody) {
   padding: 26px 28px 48px;
   color: var(--text-main);
   background:
-    radial-gradient(circle at 88% 18%, rgba(22, 242, 139, 0.1), transparent 28%),
-    linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.12));
+    radial-gradient(circle at 88% 18%, rgba(75, 107, 255, 0.1), transparent 24%),
+    linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16));
 }
 
 .voice-grid {

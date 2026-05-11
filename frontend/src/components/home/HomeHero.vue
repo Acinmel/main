@@ -5,10 +5,12 @@ import { NGradientText, NSpace, NTag, NText } from 'naive-ui'
 <template>
   <section class="hero">
     <n-space vertical :size="14" align="center">
-      <n-tag size="small" round type="info" bordered>第 2 步 · 口播制作</n-tag>
-      <n-gradient-text class="hero__title" :size="32" type="info">把爆款口播，换成你的脸</n-gradient-text>
+      <n-tag size="small" round type="info" bordered>视频创作工作台</n-tag>
+      <n-gradient-text class="hero__title" :size="32" type="info">
+        抖音文案进来，数字人成片出去
+      </n-gradient-text>
       <n-text class="hero__sub" depth="2">
-        你已在「专属数字人」中保存形象；在此粘贴视频链接、获取信息与口播，并进入生成与任务流水线。若需更换数字人，请从顶部导航返回上一步。
+        先抓取视频文案，再从数字人库选择出镜视频，从音色库选择克隆声音，最后直接生成对口型预览。
       </n-text>
     </n-space>
   </section>
@@ -58,13 +60,12 @@ import { NGradientText, NSpace, NTag, NText } from 'naive-ui'
 }
 
 .hero__sub {
-  max-width: 640px;
-  color: var(--text-sub);
-  line-height: 1.7;
+  max-width: 680px;
   margin: 0 auto;
   display: block;
+  color: var(--text-sub);
+  line-height: 1.7;
   text-align: center;
-  padding: 0 4px;
 }
 
 @media (max-width: 900px) {

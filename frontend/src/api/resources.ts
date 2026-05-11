@@ -2,8 +2,10 @@ import { http } from '@/api/http'
 import type {
   AvatarResource,
   CreateAvatarResourceBody,
+  CreateAvatarResourceDraft,
   CreateSubtitleTemplateBody,
   CreateVoiceResourceBody,
+  CreateVoiceResourceDraft,
   CursorPage,
   ListResourcesParams,
   SubtitleTemplateResource,
@@ -32,6 +34,22 @@ export async function createAvatarResource(body: CreateAvatarResourceBody) {
   return data
 }
 
+export async function uploadAvatarResource(body: CreateAvatarResourceDraft) {
+  if (!body.uploadFile) {
+    throw new Error('缺少上传视频文件')
+  }
+  const form = new FormData()
+  form.append('file', body.uploadFile)
+  form.append('name', body.name)
+  if (body.coverUrl) form.append('coverUrl', body.coverUrl)
+  if (body.styleId) form.append('styleId', body.styleId)
+  const { data } = await http.post<AvatarResource>('v1/resources/avatars/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 300_000,
+  })
+  return data
+}
+
 export async function listVoiceResources(params: ListResourcesParams) {
   const { data } = await http.get<CursorPage<VoiceResource>>('v1/resources/voices', {
     params: listParams(params),
@@ -41,6 +59,20 @@ export async function listVoiceResources(params: ListResourcesParams) {
 
 export async function cloneVoiceResource(body: CreateVoiceResourceBody) {
   const { data } = await http.post<VoiceResource>('v1/resources/voices/clone', body)
+  return data
+}
+
+export async function cloneVoiceResourceUpload(body: CreateVoiceResourceDraft) {
+  if (!body.sampleFile) {
+    throw new Error('缺少音频样本文件')
+  }
+  const form = new FormData()
+  form.append('file', body.sampleFile)
+  form.append('name', body.name)
+  const { data } = await http.post<VoiceResource>('v1/resources/voices/clone-upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 180_000,
+  })
   return data
 }
 

@@ -1,5 +1,23 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
-import type { Request } from 'express';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  NotFoundException,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Req,
+  Res,
+  StreamableFile,
+  UploadedFile,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import { createReadStream, existsSync } from 'node:fs';
+import * as path from 'node:path';
+import type { Express, Request, Response } from 'express';
 import { ResourcesService } from './resources.service';
 import type { ResourceScope } from './resources.types';
 
@@ -18,6 +36,20 @@ function scopeOf(value?: string): ResourceScope {
 function limitOf(value?: string): number | undefined {
   const n = Number(value);
   return Number.isFinite(n) ? n : undefined;
+}
+
+function guessAudioMimeFromFilename(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.aac': 'audio/aac',
+    '.ogg': 'audio/ogg',
+    '.flac': 'audio/flac',
+    '.webm': 'audio/webm',
+  };
+  return map[ext] ?? 'application/octet-stream';
 }
 
 @Controller('v1/resources')
@@ -41,6 +73,16 @@ export class ResourcesController {
   @Post('avatars')
   createAvatar(@Req() req: Request, @Body() body: Record<string, unknown>) {
     return this.resources.createAvatar(req.userId!, body ?? {});
+  }
+
+  @Post('avatars/upload')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 300 * 1024 * 1024 } }))
+  createAvatarFromUpload(
+    @Req() req: Request,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.resources.createAvatarFromUpload(req.userId!, file!, body ?? {});
   }
 
   @Patch('avatars/:id')
@@ -79,7 +121,17 @@ export class ResourcesController {
 
   @Post('voices/clone')
   cloneVoice(@Req() req: Request, @Body() body: Record<string, unknown>) {
-    return this.resources.createVoice(req.userId!, body ?? {});
+    return this.resources.cloneVoice(req.userId!, body ?? {});
+  }
+
+  @Post('voices/clone-upload')
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  cloneVoiceFromUpload(
+    @Req() req: Request,
+    @UploadedFile() file: Express.Multer.File | undefined,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.resources.createVoiceFromUpload(req.userId!, file!, body ?? {});
   }
 
   @Patch('voices/:id')
@@ -95,6 +147,20 @@ export class ResourcesController {
   @Post('voices/batch-delete')
   batchDeleteVoices(@Req() req: Request, @Body() body: BatchDeleteDto) {
     return this.resources.deleteMany('voice_resources', req.userId!, body?.ids);
+  }
+
+  @Get('voice-files/:fileName/stream')
+  streamVoiceFile(
+    @Param('fileName') fileName: string,
+    @Res({ passthrough: true }) res: Response,
+  ): StreamableFile {
+    const full = this.resources.resolveVoiceSamplePathOrThrow(fileName);
+    if (!existsSync(full)) {
+      throw new NotFoundException('音频样本不存在');
+    }
+    res.setHeader('Content-Type', guessAudioMimeFromFilename(full));
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return new StreamableFile(createReadStream(full));
   }
 
   @Get('subtitle-templates')

@@ -1,26 +1,25 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   NAlert,
   NButton,
   NForm,
   NFormItem,
-  NIcon,
   NInput,
   NModal,
-  NProgress,
   NRadio,
   NRadioGroup,
+  NSelect,
   NSpace,
   NText,
   NUpload,
-  NUploadDragger,
   useMessage,
 } from 'naive-ui'
+import { fetchSavedVideoBlob, listSavedVideos } from '@/api/task'
+import SavedVideoPreview from '@/components/resources/SavedVideoPreview.vue'
+import { describeHttpOrNetworkError } from '@/utils/httpErrorMessage'
 import type { UploadFileInfo } from 'naive-ui'
-import { CloudUploadOutline } from '@vicons/ionicons5'
-import { fetchDigitalHumanImageBlob, generateDigitalHumanImage, getDigitalHumanStyles } from '@/api/task'
-import type { CreateAvatarResourceBody } from '@/types/resources'
+import type { CreateAvatarResourceDraft } from '@/types/resources'
 
 const props = defineProps<{
   show: boolean
@@ -29,7 +28,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:show': [value: boolean]
-  submit: [body: CreateAvatarResourceBody]
+  submit: [body: CreateAvatarResourceDraft]
 }>()
 
 const visible = computed({
@@ -39,240 +38,318 @@ const visible = computed({
 
 const message = useMessage()
 
-const fallbackStyles: { id: string; label: string }[] = [
-  { id: 'suit', label: '西装版' },
-  { id: 'ancient', label: '古风版' },
-  { id: 'casual', label: '休闲版' },
-  { id: 'taoist', label: '道士版' },
-  { id: 'fashion', label: '时尚版' },
-  { id: 'lawyer', label: '律师版' },
-  { id: 'programmer', label: '程序员版' },
-  { id: 'finance', label: '财务版' },
-  { id: 'chef', label: '厨师版' },
-]
+const sourceMode = ref<'saved' | 'upload' | 'manual'>('saved')
+const loadingSavedVideos = ref(false)
+const savedVideoDirectory = ref('')
+const savedVideoOptions = ref<Array<{ label: string; value: string }>>([])
+const uploadedVideoFile = ref<File | null>(null)
+const savedVideoPreviewUrl = ref('')
+const savedVideoPreviewLoading = ref(false)
+const savedVideoPreviewError = ref('')
+const savedVideoViewerOpen = ref(false)
+let savedVideoPreviewRequest = 0
 
 const form = reactive({
   name: '',
+  savedVideoName: '',
   originalVideoUrl: '',
-  styleId: 'suit',
+  coverUrl: '',
 })
 
-const styles = ref([...fallbackStyles])
-const selfieFile = ref<File | null>(null)
-const selfiePreview = ref<string | null>(null)
-const generating = ref(false)
-const progress = ref(0)
-const progressProcessing = ref(false)
-const hint = ref('')
-let progressTimer: ReturnType<typeof window.setInterval> | null = null
+const hasSavedVideos = computed(() => savedVideoOptions.value.length > 0)
 
-const busy = computed(() => props.loading || generating.value)
+const submitDisabled = computed(() => {
+  if (props.loading) return true
+  if (sourceMode.value === 'saved') return !form.savedVideoName.trim()
+  if (sourceMode.value === 'upload') return !uploadedVideoFile.value
+  return !form.originalVideoUrl.trim()
+})
 
-function clearProgressTimer() {
-  if (progressTimer) {
-    window.clearInterval(progressTimer)
-    progressTimer = null
+function revokeSavedVideoPreviewUrl() {
+  if (savedVideoPreviewUrl.value.startsWith('blob:')) {
+    URL.revokeObjectURL(savedVideoPreviewUrl.value)
   }
+  savedVideoPreviewUrl.value = ''
 }
 
-function startProgress() {
-  clearProgressTimer()
-  progress.value = 6
-  progressProcessing.value = true
-  progressTimer = window.setInterval(() => {
-    if (progress.value >= 88) return
-    const delta = progress.value < 38 ? 2.8 : progress.value < 62 ? 1.4 : 0.5
-    progress.value = Math.min(88, Math.round((progress.value + delta) * 10) / 10)
-  }, 380)
+function clearSavedVideoPreview() {
+  savedVideoPreviewRequest += 1
+  revokeSavedVideoPreviewUrl()
+  savedVideoPreviewLoading.value = false
+  savedVideoPreviewError.value = ''
+  savedVideoViewerOpen.value = false
 }
 
-function revokeSelfiePreview() {
-  if (selfiePreview.value) {
-    URL.revokeObjectURL(selfiePreview.value)
-    selfiePreview.value = null
-  }
-}
+async function refreshSavedVideoPreview() {
+  const fileName = form.savedVideoName.trim()
+  savedVideoPreviewRequest += 1
+  const requestId = savedVideoPreviewRequest
 
-function onUploadChange(options: { fileList: UploadFileInfo[] }) {
-  const raw = options.fileList[0]?.file
-  const file = raw instanceof File ? raw : null
-  revokeSelfiePreview()
-  selfieFile.value = file
-  hint.value = ''
-  if (file) selfiePreview.value = URL.createObjectURL(file)
-}
+  revokeSavedVideoPreviewUrl()
+  savedVideoPreviewError.value = ''
+  savedVideoViewerOpen.value = false
 
-function blobToDataUrl(blob: Blob) {
-  return new Promise<string>((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error)
-    reader.readAsDataURL(blob)
-  })
-}
-
-async function loadStyles() {
-  try {
-    const list = await getDigitalHumanStyles()
-    if (list.length) styles.value = list
-  } catch {
-    styles.value = [...fallbackStyles]
-  }
-}
-
-async function submit() {
-  const file = selfieFile.value
-  if (!file?.size) {
-    message.warning('请先上传一张自拍照')
+  if (!visible.value || sourceMode.value !== 'saved' || !fileName) {
+    savedVideoPreviewLoading.value = false
     return
   }
 
-  generating.value = true
-  hint.value = ''
-  startProgress()
+  savedVideoPreviewLoading.value = true
   try {
-    const result = await generateDigitalHumanImage({ file, styleId: form.styleId })
-    clearProgressTimer()
-    progress.value = 100
-    progressProcessing.value = false
-
-    let coverUrl = result.imageUrl || ''
-    if (!coverUrl) {
-      const blob = await fetchDigitalHumanImageBlob()
-      coverUrl = await blobToDataUrl(blob)
+    const blob = await fetchSavedVideoBlob(fileName)
+    const nextUrl = URL.createObjectURL(blob)
+    if (requestId !== savedVideoPreviewRequest) {
+      URL.revokeObjectURL(nextUrl)
+      return
     }
-
-    hint.value = result.hint ?? ''
-    message.success(`已生成数字人形象（${result.styleLabel}）`)
-    await new Promise((resolve) => window.setTimeout(resolve, 260))
-
-  emit('submit', {
-    name: form.name.trim() || '我的数字人',
-      coverUrl,
-    originalVideoUrl: form.originalVideoUrl.trim() || undefined,
-      styleId: result.styleId,
-  })
-  } catch {
-    clearProgressTimer()
-    progress.value = 0
-    progressProcessing.value = false
-    message.error('数字人生成失败，请稍后重试')
+    savedVideoPreviewUrl.value = nextUrl
+  } catch (error) {
+    if (requestId === savedVideoPreviewRequest) {
+      savedVideoPreviewError.value = describeHttpOrNetworkError(error)
+    }
   } finally {
-    clearProgressTimer()
-    generating.value = false
-    progress.value = 0
-    progressProcessing.value = false
+    if (requestId === savedVideoPreviewRequest) {
+      savedVideoPreviewLoading.value = false
+    }
   }
 }
 
-onMounted(() => {
-  void loadStyles()
+function openSavedVideoViewer() {
+  if (!savedVideoPreviewUrl.value) {
+    message.warning(savedVideoPreviewLoading.value ? '视频预览还在加载中' : '请先选择一个可预览的视频')
+    return
+  }
+  savedVideoViewerOpen.value = true
+}
+
+function resetForm() {
+  form.name = ''
+  form.savedVideoName = ''
+  form.originalVideoUrl = ''
+  form.coverUrl = ''
+  uploadedVideoFile.value = null
+  clearSavedVideoPreview()
+  sourceMode.value = hasSavedVideos.value ? 'saved' : 'manual'
+}
+
+async function loadSavedVideos() {
+  loadingSavedVideos.value = true
+  try {
+    const data = await listSavedVideos()
+    savedVideoDirectory.value = data.directory
+    savedVideoOptions.value = data.files.map((item) => ({
+      label: `${item.name} · ${new Date(item.mtime).toLocaleString('zh-CN')}`,
+      value: item.name,
+    }))
+    if (!form.savedVideoName && savedVideoOptions.value.length) {
+      form.savedVideoName = savedVideoOptions.value[0].value
+    }
+    if (!savedVideoOptions.value.length) {
+      form.savedVideoName = ''
+      if (sourceMode.value === 'saved') {
+        sourceMode.value = 'manual'
+      }
+    }
+  } catch {
+    savedVideoOptions.value = []
+    if (sourceMode.value === 'saved') {
+      sourceMode.value = 'manual'
+    }
+  } finally {
+    loadingSavedVideos.value = false
+  }
+}
+
+function submit() {
+  if (sourceMode.value === 'upload') {
+    if (!uploadedVideoFile.value) {
+      message.warning('请先上传一个数字人视频文件')
+      return
+    }
+    emit('submit', {
+      name: form.name.trim() || '我的数字人',
+      coverUrl: form.coverUrl.trim() || undefined,
+      styleId: 'uploaded-video',
+      uploadFile: uploadedVideoFile.value,
+    })
+    return
+  }
+
+  const originalVideoUrl =
+    sourceMode.value === 'saved'
+      ? form.savedVideoName.trim()
+      : form.originalVideoUrl.trim()
+
+  if (!originalVideoUrl) {
+    message.warning('请先选择一个视频来源')
+    return
+  }
+
+  emit('submit', {
+    name: form.name.trim() || '我的数字人',
+    coverUrl: form.coverUrl.trim() || undefined,
+    originalVideoUrl,
+    styleId: sourceMode.value === 'saved' ? 'saved-video' : 'custom-video',
+  })
+}
+
+watch(visible, (value) => {
+  if (value) {
+    void loadSavedVideos()
+  } else if (!props.loading) {
+    resetForm()
+  }
 })
 
+watch([visible, sourceMode, () => form.savedVideoName], () => {
+  if (visible.value && sourceMode.value === 'saved' && form.savedVideoName.trim()) {
+    void refreshSavedVideoPreview()
+    return
+  }
+  clearSavedVideoPreview()
+})
+
+watch(
+  () => props.loading,
+  (loading) => {
+    if (!loading && !visible.value) {
+      resetForm()
+    }
+  },
+)
+
+function onUploadChange(fileList: UploadFileInfo[]) {
+  const raw = fileList[0]?.file
+  uploadedVideoFile.value = raw instanceof File ? raw : null
+}
+
 onBeforeUnmount(() => {
-  clearProgressTimer()
-  revokeSelfiePreview()
+  clearSavedVideoPreview()
 })
 </script>
 
 <template>
   <n-modal v-model:show="visible" preset="card" class="resource-modal" title="添加数字人">
     <n-form label-placement="top">
-      <n-form-item label="名称">
-        <n-input v-model:value="form.name" placeholder="例如：商务讲解数字人" />
-      </n-form-item>
-      <n-form-item label="上传自拍照">
-        <n-upload
-          directory-dnd
-          :max="1"
-          accept=".jpg,.jpeg,.png,image/jpeg,image/png"
-          :default-upload="false"
-          :disabled="busy"
-          list-type="image"
-          @change="onUploadChange"
-        >
-          <n-upload-dragger>
-            <div class="upload-icon">
-              <n-icon size="38" :depth="3">
-                <CloudUploadOutline />
-              </n-icon>
-            </div>
-            <n-text>拖拽或点击上传（单张最大 8MB）</n-text>
-          </n-upload-dragger>
-        </n-upload>
+      <n-form-item label="标题">
+        <n-input v-model:value="form.name" placeholder="例如：带货讲解数字人" />
       </n-form-item>
 
-      <div v-if="selfiePreview" class="selfie-preview">
-        <img :src="selfiePreview" alt="自拍照预览" />
-      </div>
-
-      <n-form-item label="数字人风格">
-        <n-radio-group v-model:value="form.styleId" name="avatar-style">
-          <n-space size="small" class="style-options">
-            <n-radio v-for="style in styles" :key="style.id" :value="style.id" :disabled="busy">
-              {{ style.label }}
-            </n-radio>
+      <n-form-item label="视频来源">
+        <n-radio-group v-model:value="sourceMode" name="avatar-video-source">
+          <n-space size="small" class="source-options">
+            <n-radio value="saved">从已保存视频中选择</n-radio>
+            <n-radio value="upload">直接上传视频</n-radio>
+            <n-radio value="manual">手动填写 URL / 文件名</n-radio>
           </n-space>
         </n-radio-group>
       </n-form-item>
 
-      <n-form-item label="原始视频 URL">
-        <n-input v-model:value="form.originalVideoUrl" placeholder="可选，用于弹窗预览" />
+      <template v-if="sourceMode === 'saved'">
+        <n-form-item label="已保存视频">
+          <n-select
+            v-model:value="form.savedVideoName"
+            :options="savedVideoOptions"
+            :loading="loadingSavedVideos"
+            :placeholder="
+              hasSavedVideos ? '选择已通过抖音抓取并保存的视频' : '当前目录还没有已保存视频'
+            "
+          />
+        </n-form-item>
+
+        <n-alert type="info" :show-icon="false" style="margin-bottom: 16px">
+          <n-text depth="3">
+            当前会直接引用后端保存目录中的视频文件：{{ savedVideoDirectory || '正在读取…' }}
+          </n-text>
+        </n-alert>
+
+        <SavedVideoPreview
+          :file-name="form.savedVideoName"
+          :video-url="savedVideoPreviewUrl"
+          :loading="savedVideoPreviewLoading"
+          :error="savedVideoPreviewError"
+          :directory="savedVideoDirectory"
+          @open="openSavedVideoViewer"
+        />
+
+        <n-alert
+          v-if="!loadingSavedVideos && !hasSavedVideos"
+          type="warning"
+          :show-icon="false"
+          style="margin-bottom: 16px"
+        >
+          这个目录里还没有可选视频。你可以先在创作页抓取抖音视频，或直接切到手动模式填写视频地址。
+        </n-alert>
+      </template>
+
+      <n-form-item v-else-if="sourceMode === 'upload'" label="上传数字人视频">
+        <n-upload
+          :max="1"
+          accept="video/*,.mp4,.mov,.webm,.mkv,.m4v"
+          :default-upload="false"
+          @update:file-list="onUploadChange"
+        >
+          <n-button secondary>选择本地视频</n-button>
+        </n-upload>
       </n-form-item>
 
-      <div v-if="generating" class="progress">
-        <n-text depth="3">正在上传并调用大模型生成形象，请稍候...</n-text>
-        <n-progress
-          type="line"
-          :percentage="progress"
-          :processing="progressProcessing"
-          indicator-placement="inside"
+      <n-form-item v-else label="视频 URL / 文件名">
+        <n-input
+          v-model:value="form.originalVideoUrl"
+          placeholder="支持公网视频 URL，或 VIDEO_SAVE_DIR 目录下的文件名"
         />
-      </div>
+      </n-form-item>
 
-      <n-alert v-if="hint" type="info" :show-icon="false">{{ hint }}</n-alert>
+      <n-form-item label="封面图 URL">
+        <n-input
+          v-model:value="form.coverUrl"
+          placeholder="可选，留空则使用默认封面"
+        />
+      </n-form-item>
     </n-form>
+
     <template #footer>
       <n-space justify="end">
-        <n-button :disabled="busy" @click="visible = false">取消</n-button>
-        <n-button type="primary" :loading="busy" @click="submit">生成并添加</n-button>
+        <n-button :disabled="props.loading" @click="visible = false">取消</n-button>
+        <n-button type="primary" :loading="props.loading" :disabled="submitDisabled" @click="submit">
+          添加视频
+        </n-button>
       </n-space>
     </template>
+  </n-modal>
+
+  <n-modal
+    v-model:show="savedVideoViewerOpen"
+    preset="card"
+    class="saved-video-viewer-modal"
+    :title="form.savedVideoName || '视频预览'"
+  >
+    <video
+      v-if="savedVideoPreviewUrl"
+      class="saved-video-viewer-modal__video"
+      :src="savedVideoPreviewUrl"
+      controls
+      autoplay
+      preload="metadata"
+    />
   </n-modal>
 </template>
 
 <style scoped>
-.resource-modal {
-  width: min(760px, calc(100vw - 32px));
-}
-
-.upload-icon {
-  margin-bottom: 8px;
-}
-
-.selfie-preview {
-  width: min(220px, 100%);
-  margin: -8px 0 18px;
-  overflow: hidden;
-  border: 1px solid var(--border-soft);
-  border-radius: 16px;
-  background: var(--bg-soft);
-}
-
-.selfie-preview img {
-  display: block;
-  width: 100%;
-  max-height: 260px;
-  object-fit: cover;
-}
-
-.style-options {
+.source-options {
   flex-wrap: wrap;
 }
 
-.progress {
-  display: grid;
-  gap: 8px;
-  margin-bottom: 16px;
+:global(.saved-video-viewer-modal) {
+  width: min(920px, calc(100vw - 32px));
+}
+
+:global(.saved-video-viewer-modal__video) {
+  display: block;
+  width: 100%;
+  max-height: 72vh;
+  border-radius: 18px;
+  background: #0f172a;
+  box-shadow: 0 24px 60px rgba(15, 23, 42, 0.18);
 }
 </style>
