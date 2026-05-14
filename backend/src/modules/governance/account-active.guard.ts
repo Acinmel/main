@@ -18,7 +18,6 @@ import { IS_PUBLIC_KEY } from '../auth/public.decorator';
  */
 @Injectable()
 export class AccountActiveGuard implements CanActivate {
-
   constructor(
     private readonly reflector: Reflector,
     private readonly auth: AuthService,

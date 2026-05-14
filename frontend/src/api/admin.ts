@@ -26,21 +26,33 @@ export interface AdminStats {
 }
 
 export async function fetchAdminStats() {
-  const { data } = await http.get<AdminStats>('v1/admin/stats', { timeout: 30_000 })
-  return data
-}
-
-export async function fetchAdminUsers(opts: { q?: string; offset?: number; limit?: number }) {
-  const { data } = await http.get<{ items: AdminUserRow[]; total: number }>('v1/admin/users', {
-    params: opts,
+  const { data } = await http.get<AdminStats>('v1/admin/stats', {
     timeout: 30_000,
   })
   return data
 }
 
+export async function fetchAdminUsers(opts: {
+  q?: string
+  offset?: number
+  limit?: number
+}) {
+  const { data } = await http.get<{ items: AdminUserRow[]; total: number }>(
+    'v1/admin/users',
+    {
+      params: opts,
+      timeout: 30_000,
+    },
+  )
+  return data
+}
+
 export async function patchAdminUser(
   id: string,
-  body: Partial<{ role: 'user' | 'admin'; accountStatus: 'pending' | 'active' | 'disabled' }>,
+  body: Partial<{
+    role: 'user' | 'admin'
+    accountStatus: 'pending' | 'active' | 'disabled'
+  }>,
 ) {
   const { data } = await http.patch<{ ok: true }>(
     `v1/admin/users/${encodeURIComponent(id)}`,
@@ -50,7 +62,11 @@ export async function patchAdminUser(
   return data
 }
 
-export async function fetchAdminAuditLogs(opts: { q?: string; offset?: number; limit?: number }) {
+export async function fetchAdminAuditLogs(opts: {
+  q?: string
+  offset?: number
+  limit?: number
+}) {
   const { data } = await http.get<{
     total: number
     items: {
@@ -88,11 +104,52 @@ export interface AdminDigitalHumanRow {
   updatedAt: string
 }
 
-export async function fetchAdminUserWorks(opts: { q?: string; offset?: number; limit?: number }) {
-  const { data } = await http.get<{ items: AdminUserWorkRow[]; total: number }>('v1/admin/user-works', {
-    params: opts,
-    timeout: 30_000,
-  })
+export async function fetchAdminUserWorks(opts: {
+  q?: string
+  offset?: number
+  limit?: number
+}) {
+  const { data } = await http.get<{ items: AdminUserWorkRow[]; total: number }>(
+    'v1/admin/user-works',
+    {
+      params: opts,
+      timeout: 30_000,
+    },
+  )
+  return data
+}
+
+export type AdminResourceKind = 'avatars' | 'voices' | 'subtitle-templates'
+
+export interface AdminResourceRow {
+  id: string
+  kind: AdminResourceKind
+  userId: string | null
+  email: string | null
+  owner: 'user' | 'recommended'
+  name: string
+  recommended: boolean
+  mediaUrl: string | null
+  detail: string | null
+  provider: string | null
+  cloneStatus: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export async function fetchAdminResources(opts: {
+  kind: AdminResourceKind
+  q?: string
+  offset?: number
+  limit?: number
+}) {
+  const { data } = await http.get<{ items: AdminResourceRow[]; total: number }>(
+    'v1/admin/resources',
+    {
+      params: opts,
+      timeout: 30_000,
+    },
+  )
   return data
 }
 
@@ -101,9 +158,9 @@ export async function fetchAdminDigitalHumanTemplates(opts: {
   offset?: number
   limit?: number
 }) {
-  const { data } = await http.get<{ items: AdminDigitalHumanRow[]; total: number }>(
-    'v1/admin/digital-human-templates',
-    { params: opts, timeout: 30_000 },
-  )
+  const { data } = await http.get<{
+    items: AdminDigitalHumanRow[]
+    total: number
+  }>('v1/admin/digital-human-templates', { params: opts, timeout: 30_000 })
   return data
 }

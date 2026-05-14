@@ -3,8 +3,6 @@ import {
   NAlert,
   NButton,
   NCard,
-  NDescriptions,
-  NDescriptionsItem,
   NInput,
   NInputNumber,
   NProgress,
@@ -42,6 +40,13 @@ import {
 import axios from 'axios'
 
 type SelectOption = { label: string; value: string }
+
+const hiddenRecommendedVoiceIds = new Set([
+  'rec-voice-female',
+  'rec-voice-male',
+  'rec-voice-narration',
+  'rec-voice-bright-young-female',
+])
 
 type SegmentGenState = {
   progress: number
@@ -288,10 +293,12 @@ async function loadRenderResources() {
     avatarOptions.value = avatars.items
       .filter((item) => Boolean(item.originalVideoUrl))
       .map((item) => ({ label: item.name, value: item.id }))
-    voiceOptions.value = voices.items.map((item) => ({
-      label: item.name,
-      value: item.id,
-    }))
+    voiceOptions.value = voices.items
+      .filter((item) => !hiddenRecommendedVoiceIds.has(item.id))
+      .map((item) => ({
+        label: item.name,
+        value: item.id,
+      }))
 
     const routeAvatarId =
       typeof route.query.avatarId === 'string' ? route.query.avatarId.trim() : ''
@@ -304,7 +311,10 @@ async function loadRenderResources() {
       selectedAvatarId.value = avatarOptions.value[0].value
     }
 
-    if (!selectedVoiceId.value && voiceOptions.value.length) {
+    if (
+      !voiceOptions.value.some((item) => item.value === selectedVoiceId.value) &&
+      voiceOptions.value.length
+    ) {
       selectedVoiceId.value = voiceOptions.value[0].value
     }
   } catch {
@@ -752,22 +762,47 @@ onUnmounted(() => {
                   </div>
                 </n-alert>
 
-                <n-descriptions label-placement="left" bordered size="small" :column="1">
-                  <n-descriptions-item label="标题">
-                    {{ draft.videoMeta.title || '暂无' }}
-                  </n-descriptions-item>
-                  <n-descriptions-item label="点赞">
-                    {{ formatStatCount(draft.videoMeta.likeCount) }}
-                  </n-descriptions-item>
-                  <n-descriptions-item label="播放">
-                    {{ formatStatCount(draft.videoMeta.playCount) }}
-                  </n-descriptions-item>
-                  <n-descriptions-item label="内容">
-                    <div class="meta-readonly">
-                      {{ draft.videoMeta.content || draft.videoMeta.description || '暂无可解析内容' }}
+                <div class="meta-board">
+                  <div class="meta-board__header">
+                    <div>
+                      <span class="meta-board__eyebrow">获取信息</span>
+                      <strong>视频基础内容</strong>
                     </div>
-                  </n-descriptions-item>
-                </n-descriptions>
+                    <n-tag size="small" round :bordered="false" type="success">已解析</n-tag>
+                  </div>
+
+                  <div class="meta-board__summary">
+                    <div class="meta-chip meta-chip--title">
+                      <span>标题</span>
+                      <strong>{{ draft.videoMeta.title || '暂无标题' }}</strong>
+                    </div>
+                    <div class="meta-chip">
+                      <span>点赞</span>
+                      <strong>{{ formatStatCount(draft.videoMeta.likeCount) }}</strong>
+                    </div>
+                  </div>
+
+                  <div class="meta-section">
+                    <span>内容</span>
+                    <p>{{ draft.videoMeta.content || draft.videoMeta.description || '暂无可解析内容' }}</p>
+                  </div>
+
+                  <div class="meta-section meta-section--tags">
+                    <span>标签</span>
+                    <div v-if="draft.videoMeta.tags?.length" class="meta-tag-list">
+                      <n-tag
+                        v-for="(tag, index) in (draft.videoMeta.tags ?? []).slice(0, 8)"
+                        :key="`${tag}-${index}`"
+                        size="small"
+                        round
+                        :bordered="false"
+                      >
+                        #{{ tag.replace(/^#/, '') }}
+                      </n-tag>
+                    </div>
+                    <p v-else class="meta-empty">暂无标签</p>
+                  </div>
+                </div>
               </template>
             </n-space>
           </n-card>
@@ -988,10 +1023,7 @@ onUnmounted(() => {
 
 .glass :deep(.n-card-header__main),
 .glass :deep(.n-card__content),
-.glass :deep(.n-card-content),
-.glass :deep(.n-descriptions-header),
-.glass :deep(.n-descriptions-table-content),
-.glass :deep(.n-descriptions-table-header) {
+.glass :deep(.n-card-content) {
   color: var(--text-main);
 }
 
@@ -1040,9 +1072,108 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-.meta-readonly {
+.meta-board {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid rgba(118, 255, 196, 0.16);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 14% 0%, rgba(73, 255, 188, 0.12), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.06),
+    0 16px 34px rgba(0, 0, 0, 0.12);
+}
+
+.meta-board__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meta-board__header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.meta-board__header strong {
+  color: var(--text-main);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.meta-board__eyebrow,
+.meta-chip span,
+.meta-section > span {
+  color: rgba(209, 231, 220, 0.66);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.meta-board__summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(112px, 0.28fr);
+  gap: 10px;
+}
+
+.meta-chip,
+.meta-section {
+  border: 1px solid rgba(193, 255, 226, 0.12);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.meta-chip {
+  display: grid;
+  gap: 6px;
+  min-height: 76px;
+  padding: 13px 14px;
+}
+
+.meta-chip strong {
+  color: var(--text-main);
+  font-size: 18px;
+  line-height: 1.35;
+}
+
+.meta-chip--title strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 15px;
+}
+
+.meta-section {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+}
+
+.meta-section p {
+  margin: 0;
+  color: var(--text-sub);
+  font-size: 13px;
+  line-height: 1.75;
   white-space: pre-wrap;
-  line-height: 1.7;
+}
+
+.meta-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-tag-list :deep(.n-tag) {
+  color: var(--accent);
+  background: rgba(73, 255, 188, 0.1);
+}
+
+.meta-empty {
+  color: rgba(209, 231, 220, 0.58);
 }
 
 .video-preview-wrap {
@@ -1063,6 +1194,10 @@ onUnmounted(() => {
 @media (max-width: 900px) {
   .page {
     padding: 12px 16px 36px;
+  }
+
+  .meta-board__summary {
+    grid-template-columns: 1fr;
   }
 }
 </style>

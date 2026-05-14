@@ -11,6 +11,7 @@ const DOUYIN_MIX_PATTERN = /collection\/([^/?]*)/
 const DOUYIN_LIVE_PATTERN = /live\/([^/?]*)/
 const DOUYIN_LIVE_PATTERN2 = /https?:\/\/live\.douyin\.com\/(\d+)/
 const DOUYIN_ROOM_PATTERN = /reflow\/([^/?]*)/
+const SEC_USER_ID_PATTERN = /^MS4wLj[\w-]{10,}$/
 
 export type DouyinUrlType = 'user' | 'video' | 'note' | 'mix' | 'live' | 'unknown'
 
@@ -136,6 +137,16 @@ export async function getSecUserId(url: string): Promise<string> {
 
   const parsedUrl = new URL(validUrl)
   const host = parsedUrl.hostname
+  const userMatch = DOUYIN_USER_PATTERN.exec(parsedUrl.pathname)
+  const directSecUserId =
+    parsedUrl.searchParams.get('sec_user_id') ||
+    parsedUrl.searchParams.get('sec_uid') ||
+    parsedUrl.searchParams.get('secUid') ||
+    (userMatch?.[1] ? decodeURIComponent(userMatch[1]) : '')
+
+  if (SEC_USER_ID_PATTERN.test(directSecUserId.trim())) {
+    return directSecUserId.trim()
+  }
 
   const pattern =
     host === 'v.douyin.com' || host.endsWith('.v.douyin.com')

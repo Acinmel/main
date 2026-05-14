@@ -5,7 +5,8 @@ import type { SubtitleTemplateResource } from '@/types/resources'
 
 const props = defineProps<{
   item: SubtitleTemplateResource
-  selected: boolean
+  selected?: boolean
+  readOnly?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -32,7 +33,7 @@ function saveName() {
     <div class="resource-card__media" @mouseenter="hover = true" @mouseleave="hover = false">
       <img :src="hover ? item.previewCoverUrl : item.coverUrl" :alt="item.name" loading="lazy" />
       <n-checkbox
-        v-if="item.owner === 'mine'"
+        v-if="item.owner === 'mine' && !readOnly"
         class="resource-card__check"
         :checked="selected"
         @update:checked="emit('update:selected', $event)"
@@ -53,7 +54,7 @@ function saveName() {
           {{ item.owner === 'mine' ? '我的' : '推荐' }}
         </n-tag>
       </n-space>
-      <n-space class="resource-card__actions" size="small">
+      <n-space v-if="!readOnly" class="resource-card__actions" size="small">
         <n-button size="tiny" @click="emit('copy')">复制样式</n-button>
         <n-button v-if="item.owner === 'mine'" size="tiny" @click="emit('edit')">编辑模板</n-button>
         <n-button v-if="item.owner === 'mine'" size="tiny" @click="editing = true">编辑名称</n-button>
@@ -61,6 +62,9 @@ function saveName() {
           删除
         </n-button>
       </n-space>
+      <n-text v-else class="resource-card__readonly" depth="3">
+        系统模板，仅可在创作流程中选择使用
+      </n-text>
     </div>
   </n-card>
 </template>
@@ -126,5 +130,12 @@ function saveName() {
 
 .resource-card__actions {
   margin-top: 12px;
+}
+
+.resource-card__readonly {
+  display: block;
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

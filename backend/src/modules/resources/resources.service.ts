@@ -4,12 +4,14 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
+import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import { DatabaseService } from '../../database/database.service';
 import { QwenVoiceCloneService } from '../../integrations/ai/qwen-voice-clone.service';
 import { FfmpegAudioService } from '../../integrations/media/ffmpeg-audio.service';
@@ -27,23 +29,28 @@ type ResourceTable = 'avatar_resources' | 'voice_resources' | 'subtitle_template
 const PAGE_LIMIT_MAX = 40;
 const AVATAR_UPLOAD_PREFIX = 'avatar-upload';
 const VOICE_UPLOAD_PREFIX = 'voice-sample';
+const LOCAL_UPLOAD_VOICE_PROVIDER = 'local-upload';
+const AVATAR_VIDEO_MAX_SECONDS = 10 * 60;
+const AVATAR_VIDEO_DURATION_TOLERANCE_SECONDS = 1;
 const VOICE_SAMPLE_MAX_BYTES = 10 * 1024 * 1024;
-const VOICE_SAMPLE_MIN_SECONDS = 10;
+const VOICE_SAMPLE_MIN_SECONDS = 0.5;
 const VOICE_SAMPLE_MAX_SECONDS = 15;
 const VOICE_SAMPLE_DURATION_TOLERANCE_SECONDS = 0.5;
+const DEFAULT_UPLOAD_RESOURCE_TTL_DAYS = 7;
+const DEFAULT_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const UPLOAD_RESOURCE_CLEANUP_BATCH_SIZE = 80;
+const RETIRED_RECOMMENDED_VOICE_IDS = [
+  'rec-voice-female',
+  'rec-voice-male',
+  'rec-voice-narration',
+  'rec-voice-bright-young-female',
+] as const;
 const RECOMMENDED_DESIGNED_VOICES = [
   {
     id: 'rec-voice-market-male',
     name: '市井低沙男声',
     fileName: 'rec-voice-market-male.mp3',
     providerVoice: 'qwen-tts-vd-market_male-voice-20260510192748379-0a08',
-    providerModel: 'qwen3-tts-vd-2026-01-26',
-  },
-  {
-    id: 'rec-voice-bright-young-female',
-    name: '清亮机灵女声',
-    fileName: 'rec-voice-bright-young-female.mp3',
-    providerVoice: 'qwen-tts-vd-bright_female-voice-20260510192758850-6cdf',
     providerModel: 'qwen3-tts-vd-2026-01-26',
   },
   {
@@ -71,6 +78,12 @@ const RECOMMENDED_DESIGNED_VOICES = [
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+function addDaysIso(sourceIso: string, days: number): string {
+  const sourceMs = Date.parse(sourceIso);
+  const baseMs = Number.isFinite(sourceMs) ? sourceMs : Date.now();
+  return new Date(baseMs + days * 24 * 60 * 60 * 1000).toISOString();
 }
 
 function sanitizeUploadFilename(filename: string, fallbackExt: string): string {
@@ -106,10 +119,12 @@ function decodeCursor(cursor?: string): { updatedAt: string; id: string } | null
 }
 
 @Injectable()
-export class ResourcesService {
+export class ResourcesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ResourcesService.name);
   private seeded = false;
   private seedPromise: Promise<void> | null = null;
+  private cleanupTimer: NodeJS.Timeout | null = null;
+  private cleanupRunning = false;
 
   constructor(
     private readonly db: DatabaseService,
@@ -117,6 +132,24 @@ export class ResourcesService {
     private readonly qwenVoiceClone: QwenVoiceCloneService,
     private readonly ffmpegAudio: FfmpegAudioService,
   ) {}
+
+  onModuleInit() {
+    void this.runExpiredUploadCleanup('startup');
+    const intervalMs = this.getCleanupIntervalMs();
+    if (intervalMs > 0) {
+      this.cleanupTimer = setInterval(() => {
+        void this.runExpiredUploadCleanup('interval');
+      }, intervalMs);
+      this.cleanupTimer.unref?.();
+    }
+  }
+
+  onModuleDestroy() {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+  }
 
   async listAvatars(userId: string, opts: { scope: ResourceScope; cursor?: string; limit?: number }) {
     await this.ensureSeeded();
@@ -184,13 +217,14 @@ export class ResourcesService {
       cover_url: this.optionalString(body.coverUrl) || this.placeholder('avatar'),
       source_video_url: this.optionalString(body.originalVideoUrl),
       style_id: this.optionalString(body.styleId) || 'custom',
+      expires_at: this.expiresAtFrom(now),
       created_at: now,
       updated_at: now,
     };
     await this.db.execute(
       `INSERT INTO avatar_resources
-       (id, user_id, name, is_recommended, cover_url, source_video_url, style_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, name, is_recommended, cover_url, source_video_url, style_id, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.id,
         row.user_id,
@@ -199,6 +233,7 @@ export class ResourcesService {
         row.cover_url,
         row.source_video_url,
         row.style_id,
+        row.expires_at,
         row.created_at,
         row.updated_at,
       ],
@@ -217,6 +252,7 @@ export class ResourcesService {
     body: Record<string, unknown>,
   ) {
     this.assertAvatarVideoFile(file);
+    await this.validateAvatarVideoDuration(file);
     const dir = this.getVideoSaveDir();
     await fs.mkdir(dir, { recursive: true });
     const ext = sanitizeUploadFilename(file.originalname, '.mp4');
@@ -237,19 +273,20 @@ export class ResourcesService {
       name: trimName(body.name, '我的克隆音色'),
       is_recommended: 0,
       audio_url: this.optionalString(body.audioUrl) || this.placeholderAudio(),
-      clone_status: 'ready',
+      clone_status: this.voiceCloneStatus(body.cloneStatus),
       provider: this.optionalString(body.provider),
       provider_voice: this.optionalString(body.providerVoice),
       provider_model: this.optionalString(body.providerModel),
       sample_duration_ms: this.optionalNumber(body.sampleDurationMs),
       clone_error: this.optionalString(body.cloneError),
+      expires_at: this.expiresAtFrom(now),
       created_at: now,
       updated_at: now,
     };
     await this.db.execute(
       `INSERT INTO voice_resources
-       (id, user_id, name, is_recommended, audio_url, clone_status, provider, provider_voice, provider_model, sample_duration_ms, clone_error, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, name, is_recommended, audio_url, clone_status, provider, provider_voice, provider_model, sample_duration_ms, clone_error, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.id,
         row.user_id,
@@ -262,6 +299,7 @@ export class ResourcesService {
         row.provider_model,
         row.sample_duration_ms,
         row.clone_error,
+        row.expires_at,
         row.created_at,
         row.updated_at,
       ],
@@ -295,8 +333,13 @@ export class ResourcesService {
         sampleDurationMs: remoteSample.durationMs,
       });
     } catch (error) {
-      await this.removeVoiceSampleByUrl(stored.audioUrl);
-      throw error;
+      return this.createVoice(userId, {
+        name: trimName(body.name, '我的上传音频'),
+        audioUrl: stored.audioUrl,
+        provider: LOCAL_UPLOAD_VOICE_PROVIDER,
+        sampleDurationMs: remoteSample.durationMs,
+        cloneError: this.toProviderErrorMessage(error),
+      });
     }
   }
 
@@ -321,12 +364,15 @@ export class ResourcesService {
     });
 
     try {
+      const providerSampleUrl = this.buildProviderVoiceSampleUrl(stored.audioUrl);
       const cloned = await this.qwenVoiceClone.createVoiceClone({
         preferredName: trimName(body.name, '鎴戠殑鍏嬮殕闊宠壊'),
-        sample: {
-          buffer: file.buffer,
-          mimeType: this.normalizeVoiceSampleMimeType(file.mimetype, file.originalname),
-        },
+        sample: providerSampleUrl
+          ? { url: providerSampleUrl }
+          : {
+              buffer: file.buffer,
+              mimeType: this.normalizeVoiceSampleMimeType(file.mimetype, file.originalname),
+            },
         transcriptText: this.optionalString(body.sampleText),
         language: this.optionalString(body.language) || 'zh',
       });
@@ -340,12 +386,18 @@ export class ResourcesService {
         sampleDurationMs: sample.durationMs,
       });
     } catch (error) {
-      await this.removeVoiceSampleByUrl(stored.audioUrl);
-      throw error;
+      return this.createVoice(userId, {
+        name: trimName(body.name, '我的上传音频'),
+        audioUrl: stored.audioUrl,
+        provider: LOCAL_UPLOAD_VOICE_PROVIDER,
+        sampleDurationMs: sample.durationMs,
+        cloneError: this.toProviderErrorMessage(error),
+      });
     }
   }
 
   async createSubtitleTemplate(userId: string, body: Record<string, unknown>) {
+    this.assertMutableResourceTable('subtitle_template_resources');
     const now = nowIso();
     const styleJson = this.stylePayload(body.styleJson);
     const row: ResourceRow = {
@@ -379,6 +431,7 @@ export class ResourcesService {
   }
 
   async copySubtitleTemplate(userId: string, id: string) {
+    this.assertMutableResourceTable('subtitle_template_resources');
     const row = await this.findRow('subtitle_template_resources', id);
     if (!row) throw new NotFoundException('字幕模板不存在');
     const now = nowIso();
@@ -411,6 +464,7 @@ export class ResourcesService {
   }
 
   async updateSubtitleTemplate(userId: string, id: string, body: Record<string, unknown>) {
+    this.assertMutableResourceTable('subtitle_template_resources');
     const row = await this.assertOwned('subtitle_template_resources', userId, id);
     const name = trimName(body.name, row.name);
     const styleJson =
@@ -444,6 +498,7 @@ export class ResourcesService {
   }
 
   async rename(table: ResourceTable, userId: string, id: string, name: unknown) {
+    this.assertMutableResourceTable(table);
     const row = await this.assertOwned(table, userId, id);
     const nextName = trimName(name, row.name);
     const updatedAt = nowIso();
@@ -457,6 +512,7 @@ export class ResourcesService {
   }
 
   async deleteOne(table: ResourceTable, userId: string, id: string) {
+    this.assertMutableResourceTable(table);
     const row = await this.assertOwned(table, userId, id);
     await this.db.execute(`DELETE FROM ${table} WHERE id = ? AND user_id = ?`, [id, userId]);
     await this.cleanupOwnedLocalAsset(table, row);
@@ -464,6 +520,7 @@ export class ResourcesService {
   }
 
   async deleteMany(table: ResourceTable, userId: string, ids: unknown) {
+    this.assertMutableResourceTable(table);
     const idList = Array.isArray(ids)
       ? ids.filter((id): id is string => typeof id === 'string' && id.length > 0)
       : [];
@@ -490,6 +547,43 @@ export class ResourcesService {
     return full;
   }
 
+  resolveProviderVoiceSamplePathOrThrow(
+    fileName: string,
+    token?: string,
+    expires?: string,
+  ): string {
+    const base = this.assertSafeBasename(fileName);
+    this.assertProviderVoiceSampleToken(base, token, expires);
+    return this.resolveVoiceSamplePathOrThrow(base);
+  }
+
+  async readManagedVoiceSample(audioUrl?: string | null): Promise<{
+    buffer: Buffer;
+    originalname: string;
+    mimetype: string;
+  } | null> {
+    const fileName = this.extractManagedVoiceSampleName(audioUrl);
+    if (!fileName) return null;
+    const full = this.resolveVoiceSamplePathOrThrow(fileName);
+    const buffer = await fs.readFile(full);
+    return {
+      buffer,
+      originalname: fileName,
+      mimetype: this.normalizeVoiceSampleMimeType('', fileName),
+    };
+  }
+
+  private resolveSavedVideoPathOrThrow(fileName: string): string {
+    const base = this.assertSafeBasename(fileName);
+    const dir = path.resolve(this.getVideoSaveDir());
+    const full = path.resolve(path.join(dir, base));
+    const rel = path.relative(dir, full);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new BadRequestException('非法视频文件路径');
+    }
+    return full;
+  }
+
   private async listRows(
     table: ResourceTable,
     userId: string,
@@ -508,6 +602,11 @@ export class ResourcesService {
     } else {
       where.push('(user_id = ? OR is_recommended = 1)');
       args.push(userId);
+    }
+
+    if (table === 'voice_resources') {
+      where.push(`id NOT IN (${RETIRED_RECOMMENDED_VOICE_IDS.map(() => '?').join(', ')})`);
+      args.push(...RETIRED_RECOMMENDED_VOICE_IDS);
     }
 
     if (cursor) {
@@ -536,6 +635,12 @@ export class ResourcesService {
     return row;
   }
 
+  private assertMutableResourceTable(table: ResourceTable) {
+    if (table === 'subtitle_template_resources') {
+      throw new ForbiddenException('字幕模板由系统统一维护，用户不可新建、编辑或删除');
+    }
+  }
+
   private async findOwnedRow(table: ResourceTable, userId: string, id: string) {
     return this.db.queryOne<ResourceRow>(`SELECT * FROM ${table} WHERE id = ? AND user_id = ?`, [
       id,
@@ -547,15 +652,109 @@ export class ResourcesService {
     return this.db.queryOne<ResourceRow>(`SELECT * FROM ${table} WHERE id = ?`, [id]);
   }
 
-  private async cleanupOwnedLocalAsset(table: ResourceTable, row: ResourceRow) {
-    if (table !== 'voice_resources') return;
-    if (row.provider === 'aliyun-qwen-vc' && row.provider_voice) {
-      await this.qwenVoiceClone.deleteVoice(row.provider_voice);
+  private async deleteRetiredRecommendedVoices() {
+    for (const id of RETIRED_RECOMMENDED_VOICE_IDS) {
+      await this.db.execute(
+        `DELETE FROM voice_resources WHERE id = ? AND user_id IS NULL AND is_recommended = 1`,
+        [id],
+      );
     }
-    const fileName = this.extractManagedVoiceSampleName(row.audio_url);
-    if (!fileName) return;
-    const full = this.resolveVoiceSamplePathOrThrow(fileName);
-    await fs.rm(full, { force: true }).catch(() => undefined);
+  }
+
+  private async runExpiredUploadCleanup(reason: 'startup' | 'interval') {
+    if (this.cleanupRunning) return;
+    this.cleanupRunning = true;
+    try {
+      await this.backfillMissingUploadExpirations();
+      const avatarDeleted = await this.deleteExpiredRows('avatar_resources');
+      const voiceDeleted = await this.deleteExpiredRows('voice_resources');
+      const total = avatarDeleted + voiceDeleted;
+      if (total > 0) {
+        this.logger.log(
+          `已清理过期用户素材 ${total} 条（视频 ${avatarDeleted}，音频 ${voiceDeleted}，触发：${reason}）`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `清理过期用户素材失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      this.cleanupRunning = false;
+    }
+  }
+
+  private async backfillMissingUploadExpirations() {
+    const ttlDays = this.getUploadResourceTtlDays();
+    for (const table of ['avatar_resources', 'voice_resources'] as const) {
+      const rows = await this.db.queryAll<Pick<ResourceRow, 'id' | 'created_at' | 'updated_at'>>(
+        `SELECT id, created_at, updated_at FROM ${table}
+         WHERE user_id IS NOT NULL AND is_recommended = 0 AND expires_at IS NULL
+         LIMIT ?`,
+        [UPLOAD_RESOURCE_CLEANUP_BATCH_SIZE],
+      );
+      for (const row of rows) {
+        const expiresAt = addDaysIso(row.created_at || row.updated_at || nowIso(), ttlDays);
+        await this.db.execute(`UPDATE ${table} SET expires_at = ? WHERE id = ?`, [
+          expiresAt,
+          row.id,
+        ]);
+      }
+    }
+  }
+
+  private async deleteExpiredRows(table: 'avatar_resources' | 'voice_resources'): Promise<number> {
+    const rows = await this.db.queryAll<ResourceRow>(
+      `SELECT * FROM ${table}
+       WHERE user_id IS NOT NULL AND is_recommended = 0 AND expires_at IS NOT NULL AND expires_at <= ?
+       ORDER BY expires_at ASC, id ASC LIMIT ?`,
+      [nowIso(), UPLOAD_RESOURCE_CLEANUP_BATCH_SIZE],
+    );
+    let deleted = 0;
+    for (const row of rows) {
+      await this.db.execute(`DELETE FROM ${table} WHERE id = ? AND user_id = ?`, [
+        row.id,
+        row.user_id,
+      ]);
+      await this.cleanupOwnedLocalAsset(table, row);
+      deleted += 1;
+    }
+    return deleted;
+  }
+
+  private expiresAtFrom(createdAt: string): string {
+    return addDaysIso(createdAt, this.getUploadResourceTtlDays());
+  }
+
+  private getUploadResourceTtlDays(): number {
+    const configured = Number(this.config.get('USER_UPLOAD_RESOURCE_TTL_DAYS') ?? '');
+    if (Number.isFinite(configured) && configured > 0) return configured;
+    return DEFAULT_UPLOAD_RESOURCE_TTL_DAYS;
+  }
+
+  private getCleanupIntervalMs(): number {
+    const configured = Number(this.config.get('USER_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS') ?? '');
+    if (Number.isFinite(configured) && configured >= 0) return configured;
+    return DEFAULT_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS;
+  }
+
+  private async cleanupOwnedLocalAsset(table: ResourceTable, row: ResourceRow) {
+    if (table === 'avatar_resources') {
+      const fileName = this.extractManagedAvatarVideoName(row.source_video_url);
+      if (!fileName) return;
+      const full = this.resolveSavedVideoPathOrThrow(fileName);
+      await fs.rm(full, { force: true }).catch(() => undefined);
+      return;
+    }
+
+    if (table === 'voice_resources') {
+      if (row.provider === 'aliyun-qwen-vc' && row.provider_voice) {
+        await this.qwenVoiceClone.deleteVoice(row.provider_voice);
+      }
+      const fileName = this.extractManagedVoiceSampleName(row.audio_url);
+      if (!fileName) return;
+      const full = this.resolveVoiceSamplePathOrThrow(fileName);
+      await fs.rm(full, { force: true }).catch(() => undefined);
+    }
   }
 
   private toAvatar(row: ResourceRow, userId: string): AvatarResourceDto {
@@ -567,6 +766,7 @@ export class ResourcesService {
       coverUrl: row.cover_url || this.placeholder('avatar'),
       originalVideoUrl: row.source_video_url || null,
       styleId: row.style_id || null,
+      expiresAt: row.expires_at || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -587,6 +787,7 @@ export class ResourcesService {
       sampleDurationMs:
         typeof row.sample_duration_ms === 'number' ? row.sample_duration_ms : null,
       cloneError: row.clone_error || null,
+      expiresAt: row.expires_at || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -636,20 +837,7 @@ export class ResourcesService {
         [id, name, this.placeholder('avatar'), null, styleId, now, now],
       );
     }
-    const voices = [
-      ['rec-voice-female', '清亮女声', 'ready'],
-      ['rec-voice-male', '磁性男声', 'ready'],
-      ['rec-voice-narration', '旁白讲述音', 'ready'],
-    ];
-    for (const [id, name, status] of voices) {
-      if (await this.findRow('voice_resources', id)) continue;
-      await this.db.execute(
-        `INSERT INTO voice_resources
-         (id, user_id, name, is_recommended, audio_url, clone_status, provider, provider_voice, provider_model, sample_duration_ms, clone_error, created_at, updated_at)
-         VALUES (?, NULL, ?, 1, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
-        [id, name, this.placeholderAudio(), status, now, now],
-      );
-    }
+    await this.deleteRetiredRecommendedVoices();
     await this.upsertRecommendedDesignedVoices(now);
     const subtitles: [string, string, Record<string, unknown>][] = [
       ['rec-subtitle-minimal', '极简白字', { color: '#ffffff', stroke: '#111827', size: 42 }],
@@ -968,6 +1156,14 @@ export class ResourcesService {
     return Number.isFinite(num) ? num : null;
   }
 
+  private voiceCloneStatus(value: unknown): 'ready' | 'processing' | 'failed' {
+    return value === 'processing' || value === 'failed' ? value : 'ready';
+  }
+
+  private toProviderErrorMessage(error: unknown): string {
+    return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+  }
+
   private async validateVoiceSampleBuffer(file: {
     buffer: Buffer;
     originalname: string;
@@ -1085,6 +1281,22 @@ export class ResourcesService {
     }
   }
 
+  private async validateAvatarVideoDuration(file: {
+    buffer: Buffer;
+    originalname: string;
+  }): Promise<void> {
+    const durationSeconds = await this.ffmpegAudio.probeDurationSeconds({
+      buffer: file.buffer,
+      originalname: file.originalname,
+    });
+    if (!durationSeconds || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
+      throw new BadRequestException('无法识别数字人视频时长，请上传可正常播放的视频文件');
+    }
+    if (durationSeconds > AVATAR_VIDEO_MAX_SECONDS + AVATAR_VIDEO_DURATION_TOLERANCE_SECONDS) {
+      throw new BadRequestException('数字人视频最长支持 10 分钟，请重新选择更短的视频');
+    }
+  }
+
   private assertVoiceSampleFile(file: {
     mimetype: string;
     originalname: string;
@@ -1110,6 +1322,9 @@ export class ResourcesService {
   private assertVoiceSampleDuration(durationSeconds: number) {
     const min = VOICE_SAMPLE_MIN_SECONDS - VOICE_SAMPLE_DURATION_TOLERANCE_SECONDS;
     const max = VOICE_SAMPLE_MAX_SECONDS + VOICE_SAMPLE_DURATION_TOLERANCE_SECONDS;
+    if (durationSeconds > max) {
+      throw new BadRequestException(`音频素材请控制在 15 秒以内，当前约 ${durationSeconds.toFixed(1)} 秒`);
+    }
     if (durationSeconds < min || durationSeconds > max) {
       throw new BadRequestException(
         `声音克隆样本建议控制在 10-15 秒之间，当前约 ${durationSeconds.toFixed(
@@ -1139,17 +1354,11 @@ export class ResourcesService {
   }
 
   private getVideoSaveDir(): string {
-    const fromEnv = this.config.get<string>('VIDEO_SAVE_DIR')?.trim();
-    if (fromEnv) return path.resolve(fromEnv);
-    return process.platform === 'win32'
-      ? 'C:\\downloadVideo'
-      : path.join(os.homedir(), 'downloadVideo');
+    return resolveConfiguredDir(this.config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
   }
 
   private getVoiceSampleDir(): string {
-    const fromEnv = this.config.get<string>('VOICE_SAMPLE_DIR')?.trim();
-    if (fromEnv) return path.resolve(fromEnv);
-    return path.join(process.cwd(), 'data', 'voice-samples');
+    return resolveConfiguredDir(this.config.get<string>('VOICE_SAMPLE_DIR'), 'voice-samples');
   }
 
   private assertSafeBasename(name: string): string {
@@ -1168,6 +1377,65 @@ export class ResourcesService {
     if (!match?.[1]) return null;
     const decoded = decodeURIComponent(match[1]);
     return decoded.startsWith(VOICE_UPLOAD_PREFIX) ? decoded : null;
+  }
+
+  private buildProviderVoiceSampleUrl(audioUrl?: string | null): string | null {
+    const fileName = this.extractManagedVoiceSampleName(audioUrl);
+    const baseUrl = this.config.get<string>('PUBLIC_BASE_URL')?.trim();
+    const secret = this.providerVoiceSampleSecret();
+    if (!fileName || !baseUrl || !secret) return null;
+
+    const expires = String(Date.now() + 15 * 60_000);
+    const token = this.signProviderVoiceSample(fileName, expires, secret);
+    const base = baseUrl.replace(/\/+$/, '');
+    const encoded = encodeURIComponent(fileName);
+    return `${base}/api/v1/resources/voice-files/${encoded}/provider-stream?expires=${expires}&token=${token}`;
+  }
+
+  private providerVoiceSampleSecret(): string {
+    return (
+      this.config.get<string>('VOICE_PROVIDER_STREAM_SECRET')?.trim() ||
+      this.config.get<string>('JWT_SECRET')?.trim() ||
+      this.config.get<string>('DASHSCOPE_API_KEY')?.trim() ||
+      ''
+    );
+  }
+
+  private signProviderVoiceSample(fileName: string, expires: string, secret: string): string {
+    return createHmac('sha256', secret)
+      .update(`${fileName}:${expires}`)
+      .digest('hex');
+  }
+
+  private assertProviderVoiceSampleToken(
+    fileName: string,
+    token?: string,
+    expires?: string,
+  ): void {
+    const secret = this.providerVoiceSampleSecret();
+    if (!secret || !token || !expires) {
+      throw new ForbiddenException('音频样本访问令牌无效');
+    }
+    const expiresMs = Number(expires);
+    if (!Number.isFinite(expiresMs) || expiresMs < Date.now()) {
+      throw new ForbiddenException('音频样本访问令牌已过期');
+    }
+    const expected = this.signProviderVoiceSample(fileName, expires, secret);
+    const actualBuffer = Buffer.from(token, 'hex');
+    const expectedBuffer = Buffer.from(expected, 'hex');
+    if (
+      actualBuffer.length !== expectedBuffer.length ||
+      !timingSafeEqual(actualBuffer, expectedBuffer)
+    ) {
+      throw new ForbiddenException('音频样本访问令牌无效');
+    }
+  }
+
+  private extractManagedAvatarVideoName(sourceVideoUrl?: string | null): string | null {
+    const value = sourceVideoUrl?.trim();
+    if (!value || /^https?:\/\//i.test(value) || /^data:/i.test(value)) return null;
+    const base = path.basename(value);
+    return base.startsWith(AVATAR_UPLOAD_PREFIX) ? base : null;
   }
 
   private stylePayload(value: unknown): Record<string, unknown> {

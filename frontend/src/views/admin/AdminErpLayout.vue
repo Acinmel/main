@@ -13,6 +13,7 @@ import {
   type MenuOption,
 } from 'naive-ui'
 import {
+  AlbumsOutline,
   BarChartOutline,
   CubeOutline,
   DocumentTextOutline,
@@ -38,6 +39,11 @@ const menuOptions: MenuOption[] = [
     icon: () => h(NIcon, { component: PeopleOutline }),
   },
   {
+    label: '数据管理',
+    key: 'erp-data',
+    icon: () => h(NIcon, { component: AlbumsOutline }),
+  },
+  {
     label: '操作日志',
     key: 'erp-audit',
     icon: () => h(NIcon, { component: DocumentTextOutline }),
@@ -58,12 +64,15 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
       show-trigger
       collapse-mode="width"
       :collapsed-width="72"
-      :width="230"
+      :width="264"
       :native-scrollbar="false"
-      content-style="display: flex; flex-direction: column; padding: 16px 10px;"
+      content-style="display: flex; flex-direction: column; padding: 22px 16px;"
       class="erp-sider"
     >
-      <div class="erp-sider__brand" @click="router.push({ name: 'erp-dashboard' })">
+      <div
+        class="erp-sider__brand"
+        @click="router.push({ name: 'erp-dashboard' })"
+      >
         <div class="erp-sider__logo">
           <n-icon :component="CubeOutline" :size="26" />
         </div>
@@ -74,14 +83,15 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
       </div>
       <n-menu
         class="erp-sider__menu"
-        inverted
         :value="activeMenu"
         :options="menuOptions"
         accordion
         @update:value="handleMenu"
       />
     </n-layout-sider>
-    <n-layout content-style="display: flex; flex-direction: column; min-height: 100%">
+    <n-layout
+      content-style="display: flex; flex-direction: column; min-height: 100%"
+    >
       <n-layout-header bordered class="erp-header">
         <div class="erp-header__left">
           <h1 class="erp-header__title">{{ pageTitle }}</h1>
@@ -108,62 +118,90 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
 
 <style scoped>
 .erp-shell {
-  --erp-header-h: 56px;
+  --erp-header-h: 68px;
+  background: #edf3fb;
 }
 
 .erp-sider :deep(.n-layout-sider-scroll-container) {
-  background: linear-gradient(
-    165deg,
-    rgba(17, 24, 39, 0.98) 0%,
-    rgba(2, 6, 23, 0.99) 100%
-  );
-  border-right: 1px solid rgba(148, 163, 184, 0.12);
+  background:
+    radial-gradient(circle at 10% 0%, rgba(50, 111, 255, 0.16), transparent 30%),
+    linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+  border-right: 1px solid rgba(115, 135, 171, 0.18);
+  box-shadow: 14px 0 34px rgba(42, 66, 110, 0.08);
 }
 
 .erp-sider__brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 4px 6px 16px;
-  margin-bottom: 4px;
+  gap: 12px;
+  padding: 8px 8px 20px;
+  margin-bottom: 10px;
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: 18px;
   user-select: none;
 }
 .erp-sider__brand:hover {
-  background: rgba(56, 189, 248, 0.08);
+  background: rgba(255, 255, 255, 0.74);
 }
 .erp-sider__logo {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
+  width: 46px;
+  height: 46px;
+  border-radius: 16px;
   display: grid;
   place-items: center;
-  color: #e0f2fe;
-  background: linear-gradient(145deg, rgba(56, 189, 248, 0.45), rgba(15, 23, 42, 0.4));
-  border: 1px solid rgba(56, 189, 248, 0.25);
+  color: #ffffff;
+  background: linear-gradient(145deg, #346bff, #19bca8);
+  border: 1px solid rgba(255, 255, 255, 0.66);
+  box-shadow: 0 18px 36px rgba(52, 107, 255, 0.22);
   flex-shrink: 0;
 }
 .erp-sider__titles strong {
   display: block;
-  font-size: 14px;
+  font-size: 16px;
   letter-spacing: 0.03em;
-  color: #f1f5f9;
+  color: #10203a;
 }
 .erp-sider__titles span {
   display: block;
-  margin-top: 2px;
+  margin-top: 4px;
   font-size: 11px;
-  opacity: 0.55;
-  color: #94a3b8;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: #6f7f9d;
 }
 
 .erp-sider__menu :deep(.n-menu-item-content) {
-  border-radius: 8px !important;
-  margin-bottom: 2px;
+  min-height: 46px;
+  margin-bottom: 8px;
+  padding-left: 14px !important;
+  border: 1px solid transparent;
+  border-radius: 16px !important;
+  color: #334155;
+  font-weight: 750;
+  transition:
+    transform 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease;
 }
 .erp-sider__menu :deep(.n-menu-item-content::before) {
   display: none;
+}
+.erp-sider__menu :deep(.n-menu-item-content:hover) {
+  color: #153b7a;
+  border-color: rgba(52, 107, 255, 0.2);
+  background: rgba(255, 255, 255, 0.82);
+  transform: translateX(2px);
+}
+.erp-sider__menu :deep(.n-menu-item-content--selected) {
+  color: #ffffff;
+  border-color: rgba(52, 107, 255, 0.26);
+  background: linear-gradient(135deg, #346bff, #24b7aa);
+  box-shadow: 0 16px 32px rgba(52, 107, 255, 0.2);
+}
+.erp-sider__menu :deep(.n-menu-item-content--selected .n-menu-item-content__icon),
+.erp-sider__menu :deep(.n-menu-item-content--selected .n-menu-item-content-header) {
+  color: #ffffff;
 }
 
 .erp-header {
@@ -172,17 +210,17 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 0 20px 0 22px !important;
-  background: rgba(15, 23, 42, 0.75) !important;
-  backdrop-filter: blur(10px);
-  border-bottom-color: rgba(148, 163, 184, 0.12) !important;
+  padding: 0 32px !important;
+  background: rgba(248, 251, 255, 0.88) !important;
+  backdrop-filter: blur(16px);
+  border-bottom-color: rgba(115, 135, 171, 0.16) !important;
 }
 
 .erp-header__title {
   margin: 0;
-  font-size: 17px;
-  font-weight: 650;
-  color: #f1f5f9;
+  font-size: 20px;
+  font-weight: 800;
+  color: #10203a;
   letter-spacing: -0.02em;
 }
 
@@ -196,14 +234,21 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
   flex: 1;
   min-height: 0 !important;
   background:
-    radial-gradient(ellipse 80% 60% at 50% -20%, rgba(56, 189, 248, 0.12), transparent 55%),
-    linear-gradient(180deg, #0b1224 0%, #020617 45%, #000 100%) !important;
+    radial-gradient(
+      ellipse 70% 48% at 50% -16%,
+      rgba(52, 107, 255, 0.13),
+      transparent 55%
+    ),
+    linear-gradient(180deg, #f5f8fd 0%, #edf3fb 52%, #eaf1fa 100%) !important;
 }
 
 .erp-app {
   min-height: 100%;
-  padding: 18px 24px 36px;
-  color: #e2e8f0;
+  max-width: 1680px;
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 30px 36px 52px;
+  color: #1d2b42;
 }
 
 .erp-app.adm {

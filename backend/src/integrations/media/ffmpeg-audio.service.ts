@@ -2,12 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+const requireFromService = createRequire(__filename);
 
 /** 与 VideoMediaDownloadService 下载结果一致 */
 export type TranscribeMediaInput = {
@@ -45,7 +47,7 @@ export class FfmpegAudioService {
     const bin = this.resolveFfmpegBinary();
 
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-'));
-    const outAudio = path.join(tmpDir, 'for-transcription.mp3');
+    const outAudio = path.join(tmpDir, 'for-transcription.wav');
 
     try {
       const inputPath =
@@ -62,8 +64,8 @@ export class FfmpegAudioService {
       const base = path.basename(media.originalname, path.extname(media.originalname)) || 'audio';
       return {
         buffer: audio,
-        originalname: `${base}.mp3`,
-        mimetype: 'audio/mpeg',
+        originalname: `${base}.wav`,
+        mimetype: 'audio/wav',
         size: audio.length,
       };
     } catch (e) {
@@ -144,6 +146,8 @@ export class FfmpegAudioService {
     for (const p of candidates) {
       if (existsSync(p)) return p;
     }
+    const fromPackage = this.resolveFfmpegStaticBinary();
+    if (fromPackage) return fromPackage;
     return exe;
   }
 
@@ -165,6 +169,8 @@ export class FfmpegAudioService {
     for (const p of candidates) {
       if (existsSync(p)) return p;
     }
+    const fromPackage = this.resolveFfprobeStaticBinary();
+    if (fromPackage) return fromPackage;
     return exe;
   }
 
@@ -173,6 +179,24 @@ export class FfmpegAudioService {
     const p = path.join(dir, `input${ext}`);
     await fs.writeFile(p, media.buffer);
     return p;
+  }
+
+  private resolveFfmpegStaticBinary(): string | null {
+    try {
+      const binary = requireFromService('ffmpeg-static') as string | null;
+      return binary && existsSync(binary) ? binary : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private resolveFfprobeStaticBinary(): string | null {
+    try {
+      const mod = requireFromService('ffprobe-static') as { path?: string } | null;
+      return mod?.path && existsSync(mod.path) ? mod.path : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -359,6 +383,80 @@ export class FfmpegAudioService {
     });
   }
 
+  async prepareVideoForAliLipSync(params: {
+    inputVideoPath: string;
+    outputVideoPath: string;
+    clipSeconds?: number;
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      params.inputVideoPath,
+    ];
+    if (params.clipSeconds && params.clipSeconds > 0) {
+      args.push('-t', String(params.clipSeconds));
+    }
+    args.push(
+      '-an',
+      '-vf',
+      "scale=w=2048:h=2048:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=w='max(iw,640)':h='max(ih,640)':x='(ow-iw)/2':y='(oh-ih)/2':color=black,setsar=1",
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '20',
+      '-pix_fmt',
+      'yuv420p',
+      '-movflags',
+      '+faststart',
+      params.outputVideoPath,
+    );
+    await execFileAsync(bin, args, {
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
+  async clipAudio(params: {
+    inputAudioPath: string;
+    outputAudioPath: string;
+    clipSeconds?: number;
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      params.inputAudioPath,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-c:a',
+      'pcm_s16le',
+      '-f',
+      'wav',
+    ];
+    if (params.clipSeconds && params.clipSeconds > 0) {
+      args.push('-t', String(params.clipSeconds));
+    }
+    args.push(params.outputAudioPath);
+    await execFileAsync(bin, args, {
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
   private escapeFilterPath(filePath: string): string {
     return path
       .resolve(filePath)
@@ -386,9 +484,9 @@ export class FfmpegAudioService {
       '-ar',
       '16000',
       '-c:a',
-      'libmp3lame',
-      '-b:a',
-      '24k',
+      'pcm_s16le',
+      '-f',
+      'wav',
       outputAudioPath,
     ];
     await execFileAsync(ffmpegBin, args, {

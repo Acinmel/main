@@ -31,6 +31,26 @@ export function useTranscriptDraftStream() {
     draft.manualScriptDraft = full
   }
 
+  function isInternalPipelineScriptLine(line: string) {
+    const normalized = line.replace(/\s+/g, ' ').trim()
+    return (
+      normalized.includes('模拟口播原文稿') ||
+      normalized.includes('原视频链接占位') ||
+      normalized.includes('真实链路') ||
+      (normalized.includes('FFmpeg') && normalized.includes('ASR') && normalized.includes('回填')) ||
+      /^https?:\/\/\S+$/i.test(normalized)
+    )
+  }
+
+  function sanitizeTranscriptText(value: string) {
+    return value
+      .split(/\r\n|\n|\r/)
+      .map((line) => line.trim())
+      .filter((line) => line && !isInternalPipelineScriptLine(line))
+      .join('\n')
+      .trim()
+  }
+
   /**
    * 先写入 store 中的 transcript/分段（供后续任务流），再向 manualScriptDraft 流式填充。
    */
@@ -41,8 +61,9 @@ export function useTranscriptDraftStream() {
     rewriteSuggestion?: string
   }) {
     cancelStream()
-    const fullText = (payload.fullText ?? '').trim()
-    draft.setTranscriptFromApi(fullText, payload.segments, {
+    const fullText = sanitizeTranscriptText(payload.fullText ?? '')
+    const segments = payload.segments.filter((segment) => !isInternalPipelineScriptLine(segment.text))
+    draft.setTranscriptFromApi(fullText, segments, {
       transcriptId: payload.transcriptId,
       rewriteSuggestion: payload.rewriteSuggestion,
     })

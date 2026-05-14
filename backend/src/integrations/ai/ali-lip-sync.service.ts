@@ -1,9 +1,9 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { resolveConfiguredDir } from '../../common/resource-paths.util';
 
 export interface AliLipSyncResult {
   videoUrl: string | null;
@@ -11,7 +11,22 @@ export interface AliLipSyncResult {
   hint?: string;
 }
 
-type LipSyncProvider = 'aliyun-videoretalk' | 'generic-form';
+export type LipSyncProvider = 'aliyun-videoretalk' | 'generic-form';
+
+export interface LipSyncReadiness {
+  provider: LipSyncProvider;
+  configured: boolean;
+  reasons: string[];
+  apiKeyConfigured: boolean;
+  apiUrl: string;
+  apiUrlConfigured: boolean;
+  taskBaseUrl: string;
+  model: string;
+  publicBaseUrl: string;
+  publicBaseUrlUsable: boolean;
+  tempUploadEnabled: boolean;
+  uploadsUrl: string;
+}
 
 type MediaPayload = {
   buffer: Buffer;
@@ -30,24 +45,35 @@ type ResolvedLipSyncConfig = {
   pollIntervalMs: number;
   publicBaseUrl: string;
   allowPrivatePublicUrl: boolean;
+  tempUploadEnabled: boolean;
+  uploadsUrl: string;
   videoFieldName: string;
   durationFieldName: string;
   videoExtension: boolean;
   queryFaceThreshold?: number;
 };
 
+type DashScopeUploadPolicy = {
+  policy: string;
+  signature: string;
+  upload_dir: string;
+  upload_host: string;
+  oss_access_key_id: string;
+  x_oss_object_acl: string;
+  x_oss_forbid_overwrite: string;
+  max_file_size_mb?: number;
+};
+
 function getVideoSaveDir(config: ConfigService): string {
-  const fromEnv = config.get<string>('VIDEO_SAVE_DIR')?.trim();
-  if (fromEnv) return path.resolve(fromEnv);
-  return process.platform === 'win32'
-    ? 'C:\\downloadVideo'
-    : path.join(os.homedir(), 'downloadVideo');
+  return resolveConfiguredDir(config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
 }
 
 function getLipSyncPublicDir(config: ConfigService, kind: 'videos' | 'audios'): string {
-  const root = config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR')?.trim();
-  if (root) return path.join(path.resolve(root), kind);
-  return path.join(getVideoSaveDir(config), 'lip-sync-public', kind);
+  const root = resolveConfiguredDir(
+    config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR'),
+    'lip-sync-public',
+  );
+  return path.join(root, kind);
 }
 
 function safeExtFromMedia(media: MediaPayload, fallback: string): string {
@@ -83,15 +109,51 @@ export class AliLipSyncService {
   constructor(private readonly config: ConfigService) {}
 
   isConfigured(): boolean {
+    return this.getReadiness().configured;
+  }
+
+  getReadiness(): LipSyncReadiness {
     const cfg = this.resolveConfig();
+    const reasons: string[] = [];
+    const publicBaseUrlUsable = Boolean(
+      cfg.publicBaseUrl &&
+        this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl),
+    );
+
     if (cfg.provider === 'aliyun-videoretalk') {
-      return Boolean(
-        cfg.apiKey &&
-          cfg.publicBaseUrl &&
-          this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl),
-      );
+      if (!cfg.apiKey) reasons.push('缺少 DASHSCOPE_API_KEY/LIP_SYNC_API_KEY');
+      if (!cfg.tempUploadEnabled && !cfg.publicBaseUrl) {
+        reasons.push('缺少 PUBLIC_BASE_URL 或 LIP_SYNC_PUBLIC_BASE_URL，云端无法拉取视频和音频');
+      } else if (!cfg.tempUploadEnabled && !publicBaseUrlUsable) {
+        reasons.push('PUBLIC_BASE_URL 必须是公网 HTTP(S) 域名，不能是 localhost/内网地址');
+      }
+    } else {
+      if (!cfg.apiUrl) reasons.push('缺少 LIP_SYNC_API_URL/ALI_LIP_SYNC_API_URL');
+      if (!cfg.apiKey) reasons.push('缺少 LIP_SYNC_API_KEY/ALI_LIP_SYNC_API_KEY/DASHSCOPE_API_KEY');
     }
-    return Boolean(cfg.apiUrl && cfg.apiKey);
+
+    return {
+      provider: cfg.provider,
+      configured: reasons.length === 0,
+      reasons,
+      apiKeyConfigured: Boolean(cfg.apiKey),
+      apiUrl: cfg.apiUrl,
+      apiUrlConfigured: Boolean(cfg.apiUrl),
+      taskBaseUrl: cfg.taskBaseUrl,
+      model: cfg.model,
+      publicBaseUrl: cfg.publicBaseUrl,
+      publicBaseUrlUsable,
+      tempUploadEnabled: cfg.tempUploadEnabled,
+      uploadsUrl: cfg.uploadsUrl,
+    };
+  }
+
+  ensureConfigured(): LipSyncReadiness {
+    const readiness = this.getReadiness();
+    if (readiness.configured) return readiness;
+    throw new BadRequestException(
+      `VideoReTalk 未就绪：${readiness.reasons.join('；')}。默认会使用 DashScope 临时 OSS 上传；如关闭临时上传，则需要配置公网后端地址，例如 PUBLIC_BASE_URL=https://api.your-domain.com`,
+    );
   }
 
   async submitVideo(params: {
@@ -144,25 +206,30 @@ export class AliLipSyncService {
     if (!params.audio?.buffer?.length) {
       throw new BadRequestException('Aliyun VideoRetalk requires both video and audio inputs');
     }
-    if (!cfg.publicBaseUrl) {
+    if (!cfg.tempUploadEnabled && !cfg.publicBaseUrl) {
       throw new BadRequestException(
         'PUBLIC_BASE_URL or LIP_SYNC_PUBLIC_BASE_URL is required so Aliyun can fetch media files',
       );
     }
-    if (!this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl)) {
+    if (
+      !cfg.tempUploadEnabled &&
+      !this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl)
+    ) {
       throw new BadRequestException(
         'PUBLIC_BASE_URL must be a public HTTP(S) domain, not localhost or a private LAN address',
       );
     }
 
-    const videoUrl = await this.persistPublicMedia('videos', params.video, cfg.publicBaseUrl);
-    const audioUrl = await this.persistPublicMedia('audios', params.audio, cfg.publicBaseUrl);
+    const { videoUrl, audioUrl, inputMode } = await this.prepareAliyunInputUrls(cfg, {
+      video: params.video,
+      audio: params.audio,
+    });
     const payload = {
       model: cfg.model,
       input: {
         video_url: videoUrl,
         audio_url: audioUrl,
-        ...(params.refImageUrl?.trim() ? { ref_image_url: params.refImageUrl.trim() } : {}),
+        ref_image_url: params.refImageUrl?.trim() || '',
       },
       parameters: {
         video_extension: params.videoExtension ?? cfg.videoExtension,
@@ -176,6 +243,9 @@ export class AliLipSyncService {
         Authorization: `Bearer ${cfg.apiKey}`,
         'Content-Type': 'application/json',
         'X-DashScope-Async': 'enable',
+        ...(inputMode === 'dashscope-temp-upload'
+          ? { 'X-DashScope-OssResourceResolve': 'enable' }
+          : {}),
       },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(cfg.timeoutMs),
@@ -201,7 +271,7 @@ export class AliLipSyncService {
       providerResponse: {
         provider: 'aliyun-videoretalk',
         taskId,
-        input: { videoUrl, audioUrl },
+        input: { videoUrl, audioUrl, inputMode },
         submitResponse,
         resultResponse,
       },
@@ -348,6 +418,107 @@ export class AliLipSyncService {
     return `${publicBaseUrl.replace(/\/+$/, '')}/api/v1/tools/lip-sync-public/${kind}/${encodeURIComponent(fileName)}/stream`;
   }
 
+  private async prepareAliyunInputUrls(
+    cfg: ResolvedLipSyncConfig,
+    media: { video: MediaPayload; audio: MediaPayload },
+  ): Promise<{ videoUrl: string; audioUrl: string; inputMode: 'dashscope-temp-upload' | 'public-url' }> {
+    if (cfg.tempUploadEnabled) {
+      const policy = await this.getDashScopeUploadPolicy(cfg);
+      const [videoUrl, audioUrl] = await Promise.all([
+        this.uploadDashScopeTempFile(policy, media.video),
+        this.uploadDashScopeTempFile(policy, media.audio),
+      ]);
+      return { videoUrl, audioUrl, inputMode: 'dashscope-temp-upload' };
+    }
+
+    const [videoUrl, audioUrl] = await Promise.all([
+      this.persistPublicMedia('videos', media.video, cfg.publicBaseUrl),
+      this.persistPublicMedia('audios', media.audio, cfg.publicBaseUrl),
+    ]);
+    return { videoUrl, audioUrl, inputMode: 'public-url' };
+  }
+
+  private async getDashScopeUploadPolicy(
+    cfg: ResolvedLipSyncConfig,
+  ): Promise<DashScopeUploadPolicy> {
+    const url = new URL(cfg.uploadsUrl);
+    url.searchParams.set('action', 'getPolicy');
+    url.searchParams.set('model', cfg.model);
+
+    const json = await this.fetchJson(url.toString(), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${cfg.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
+    const data = json.data as Partial<DashScopeUploadPolicy> | undefined;
+    const required: Array<keyof DashScopeUploadPolicy> = [
+      'policy',
+      'signature',
+      'upload_dir',
+      'upload_host',
+      'oss_access_key_id',
+      'x_oss_object_acl',
+      'x_oss_forbid_overwrite',
+    ];
+    for (const key of required) {
+      if (typeof data?.[key] !== 'string' || !data[key]) {
+        throw new Error(`DashScope upload policy missing ${key}`);
+      }
+    }
+    return data as DashScopeUploadPolicy;
+  }
+
+  private async uploadDashScopeTempFile(
+    policy: DashScopeUploadPolicy,
+    media: MediaPayload,
+  ): Promise<string> {
+    if (
+      policy.max_file_size_mb &&
+      media.buffer.length > policy.max_file_size_mb * 1024 * 1024
+    ) {
+      throw new BadRequestException(
+        `文件超过 DashScope 临时存储限制：${policy.max_file_size_mb}MB`,
+      );
+    }
+
+    const ext = safeExtFromMedia(media, media.mimeType.startsWith('video/') ? '.mp4' : '.wav');
+    const safeBase =
+      path
+        .basename(media.filename || `media${ext}`, path.extname(media.filename || ''))
+        .replace(/[^\w.-]+/g, '_')
+        .slice(0, 80) || 'media';
+    const fileName = `${Date.now()}_${randomUUID().slice(0, 10)}_${safeBase}${ext}`;
+    const key = `${policy.upload_dir.replace(/\/+$/, '')}/${fileName}`;
+    const form = new FormData();
+    form.append('OSSAccessKeyId', policy.oss_access_key_id);
+    form.append('Signature', policy.signature);
+    form.append('policy', policy.policy);
+    form.append('x-oss-object-acl', policy.x_oss_object_acl);
+    form.append('x-oss-forbid-overwrite', policy.x_oss_forbid_overwrite);
+    form.append('key', key);
+    form.append('success_action_status', '200');
+    form.append(
+      'file',
+      new Blob([new Uint8Array(media.buffer)], {
+        type: media.mimeType || 'application/octet-stream',
+      }),
+      fileName,
+    );
+
+    const res = await fetch(policy.upload_host, {
+      method: 'POST',
+      body: form,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`DashScope temporary file upload failed: HTTP ${res.status} ${text.slice(0, 800)}`);
+    }
+    return `oss://${key}`;
+  }
+
   private resolveConfig(): ResolvedLipSyncConfig {
     const genericApiUrl =
       this.config.get<string>('LIP_SYNC_API_URL')?.trim() ||
@@ -393,6 +564,13 @@ export class AliLipSyncService {
         this.config.get<string>('BACKEND_PUBLIC_BASE_URL')?.trim() ||
         this.config.get<string>('API_PUBLIC_BASE_URL')?.trim() ||
         '',
+      tempUploadEnabled: readBool(
+        this.config.get<string>('ALI_VIDEORETALK_USE_TEMP_UPLOAD'),
+        true,
+      ),
+      uploadsUrl:
+        this.config.get<string>('ALI_VIDEORETALK_UPLOADS_URL')?.trim() ||
+        `${normalizedDashScopeBase}/uploads`,
       allowPrivatePublicUrl: readBool(
         this.config.get<string>('LIP_SYNC_ALLOW_PRIVATE_PUBLIC_URL'),
         false,
@@ -405,7 +583,7 @@ export class AliLipSyncService {
         this.config.get<string>('LIP_SYNC_DURATION_FIELD')?.trim() ||
         this.config.get<string>('ALI_LIP_SYNC_DURATION_FIELD')?.trim() ||
         'duration_seconds',
-      videoExtension: readBool(this.config.get<string>('ALI_VIDEORETALK_VIDEO_EXTENSION'), true),
+      videoExtension: readBool(this.config.get<string>('ALI_VIDEORETALK_VIDEO_EXTENSION'), false),
       queryFaceThreshold: Number.isFinite(queryFaceThreshold)
         ? Math.max(120, Math.min(200, Math.round(queryFaceThreshold)))
         : undefined,

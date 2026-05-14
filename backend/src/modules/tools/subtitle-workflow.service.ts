@@ -2,12 +2,15 @@ import { BadRequestException, Injectable, Logger, NotFoundException } from '@nes
 import { ConfigService } from '@nestjs/config';
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
+import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import { AliLipSyncService } from '../../integrations/ai/ali-lip-sync.service';
-import { SpeechAiService } from '../../integrations/ai/speech-ai.service';
+import {
+  SpeechAiService,
+  type VoiceTuningOptions,
+} from '../../integrations/ai/speech-ai.service';
 import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.service';
 import type { TranscriptSegmentDto } from '../../integrations/transcription/transcript.types';
 import {
@@ -77,17 +80,11 @@ function nowIso(): string {
 }
 
 function getVideoSaveDir(config: ConfigService): string {
-  const fromEnv = config.get<string>('VIDEO_SAVE_DIR')?.trim();
-  if (fromEnv) return path.resolve(fromEnv);
-  return process.platform === 'win32'
-    ? 'C:\\downloadVideo'
-    : path.join(os.homedir(), 'downloadVideo');
+  return resolveConfiguredDir(config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
 }
 
 function getPreviewVideoSaveDir(config: ConfigService): string {
-  const fromEnv = config.get<string>('PREVIEW_VIDEO_SAVE_DIR')?.trim();
-  if (fromEnv) return path.resolve(fromEnv);
-  return path.join(getVideoSaveDir(config), 'preview-videos');
+  return resolveConfiguredDir(config.get<string>('PREVIEW_VIDEO_SAVE_DIR'), 'preview-videos');
 }
 
 function sanitizeFilenameForDisk(name: string, fallback = 'video.mp4'): string {
@@ -141,6 +138,7 @@ export class SubtitleWorkflowService {
       voiceResourceId: string;
       subtitleTemplateId: string;
       previewSeconds?: number;
+      voiceTuning?: VoiceTuningOptions;
     },
   ): Promise<{
     draftId: string;
@@ -149,6 +147,8 @@ export class SubtitleWorkflowService {
     hint: string;
     ttsMode: TtsMode;
     timelineSource: TimelineSource;
+    lipSyncApplied: boolean;
+    providerResponse?: unknown;
   }> {
     const rawScript = body.script?.trim() ?? '';
     const script = this.sanitizeUserScript(rawScript);
@@ -173,17 +173,21 @@ export class SubtitleWorkflowService {
 
     const hints: string[] = [];
     const sourceVideo = await this.readVideoFromSourceRef(avatar.originalVideoUrl);
+    this.aliLipSync.ensureConfigured();
     const speech = await this.buildSpeechAudio(script, {
       id: voice.id,
       name: voice.name,
       provider: voice.provider,
       providerVoice: voice.providerVoice,
       providerModel: voice.providerModel,
-    });
+      audioUrl: voice.audioUrl,
+    }, body.voiceTuning);
     if (speech.ttsMode === 'mock') {
+      throw new BadRequestException('TTS 未生成真实音频，无法进入 5 秒 VideoReTalk 口型预览');
       hints.push('当前未走通真实 TTS，已自动生成本地占位音轨用于联调。');
     } else {
       hints.push(`已按“${voice.name}”生成 TTS 音轨。`);
+      if (speech.styleHint) hints.push(speech.styleHint);
     }
 
     const timeline = await this.buildSubtitleTimeline(
@@ -213,9 +217,11 @@ export class SubtitleWorkflowService {
       speech.originalname,
       this.audioExtensionForMime(speech.mimeType),
     );
+    const sourceVideoPath = path.join(draftDir, sourceVideoFileName);
+    const speechAudioPath = path.join(draftDir, speechAudioFileName);
     await Promise.all([
-      fs.writeFile(path.join(draftDir, sourceVideoFileName), sourceVideo.buffer),
-      fs.writeFile(path.join(draftDir, speechAudioFileName), speech.buffer),
+      fs.writeFile(sourceVideoPath, sourceVideo.buffer),
+      fs.writeFile(speechAudioPath, speech.buffer),
     ]);
 
     const muxedVideoFileName = `muxed_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`;
@@ -246,9 +252,17 @@ export class SubtitleWorkflowService {
     const previewPath = path.join(this.outputDir(), previewFileName);
     await fs.mkdir(this.outputDir(), { recursive: true });
 
+    const lipSyncedPreview = await this.buildLipSyncedPreviewVideo({
+      draftDir,
+      sourceVideoPath,
+      speechAudioPath,
+      previewSeconds,
+    });
+    hints.push(lipSyncedPreview.hint || '已生成 5 秒 VideoReTalk 对口型预览。');
+
     try {
       await this.ffmpegAudio.burnAssSubtitles({
-        inputVideoPath: muxedVideoPath,
+        inputVideoPath: lipSyncedPreview.videoPath,
         subtitleAssPath,
         outputVideoPath: previewPath,
         clipSeconds: previewSeconds,
@@ -291,7 +305,71 @@ export class SubtitleWorkflowService {
       hint: hints.join(' '),
       ttsMode: speech.ttsMode,
       timelineSource: timeline.timelineSource,
+      lipSyncApplied: true,
+      providerResponse: lipSyncedPreview.providerResponse,
     };
+  }
+
+  private async buildLipSyncedPreviewVideo(params: {
+    draftDir: string;
+    sourceVideoPath: string;
+    speechAudioPath: string;
+    previewSeconds: number;
+  }): Promise<{ videoPath: string; providerResponse: unknown; hint?: string }> {
+    const sourcePreviewPath = path.join(
+      params.draftDir,
+      `preview-source_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`,
+    );
+    const speechPreviewPath = path.join(
+      params.draftDir,
+      `preview-speech_${Date.now()}_${randomUUID().slice(0, 8)}.wav`,
+    );
+
+    try {
+      await Promise.all([
+        this.ffmpegAudio.prepareVideoForAliLipSync({
+          inputVideoPath: params.sourceVideoPath,
+          outputVideoPath: sourcePreviewPath,
+          clipSeconds: params.previewSeconds,
+        }),
+        this.ffmpegAudio.clipAudio({
+          inputAudioPath: params.speechAudioPath,
+          outputAudioPath: speechPreviewPath,
+          clipSeconds: params.previewSeconds,
+        }),
+      ]);
+
+      const [videoBuffer, audioBuffer] = await Promise.all([
+        fs.readFile(sourcePreviewPath),
+        fs.readFile(speechPreviewPath),
+      ]);
+      const result = await this.aliLipSync.submitLipSync({
+        video: {
+          buffer: videoBuffer,
+          filename: path.basename(sourcePreviewPath),
+          mimeType: 'video/mp4',
+        },
+        audio: {
+          buffer: audioBuffer,
+          filename: path.basename(speechPreviewPath),
+          mimeType: 'audio/wav',
+        },
+        videoExtension: false,
+      });
+      if (!result.videoUrl?.trim()) {
+        throw new Error('VideoReTalk 服务未返回预览视频地址');
+      }
+      const videoPath = await this.persistResultVideoToDraft(result.videoUrl, params.draftDir);
+      return {
+        videoPath,
+        providerResponse: result.providerResponse,
+        hint: result.hint,
+      };
+    } catch (e) {
+      throw new BadRequestException(
+        `5 秒 VideoReTalk 口型预览失败：${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
   }
 
   async finalizeDraft(
@@ -330,22 +408,29 @@ export class SubtitleWorkflowService {
     let providerResponse: unknown;
     let fallback = true;
 
+    this.aliLipSync.ensureConfigured();
     if (this.aliLipSync.isConfigured()) {
       try {
         if (!speechAudioPath || !existsSync(speechAudioPath)) {
           throw new BadRequestException('lip-sync audio input is missing from the draft');
         }
+        const aliSourceVideoPath = path.join(
+          draftDir,
+          `ali-lipsync-source_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`,
+        );
+        await this.ffmpegAudio.prepareVideoForAliLipSync({
+          inputVideoPath: sourceVideoPath,
+          outputVideoPath: aliSourceVideoPath,
+        });
         const [videoBuffer, audioBuffer] = await Promise.all([
-          fs.readFile(sourceVideoPath),
+          fs.readFile(aliSourceVideoPath),
           fs.readFile(speechAudioPath),
         ]);
         const result = await this.aliLipSync.submitLipSync({
           video: {
             buffer: videoBuffer,
-            filename: meta.sourceVideoFileName || 'lip-sync-source.mp4',
-            mimeType:
-              meta.sourceVideoMimeType ||
-              guessMimeFromFilename(meta.sourceVideoFileName || meta.muxedVideoFileName),
+            filename: path.basename(aliSourceVideoPath),
+            mimeType: 'video/mp4',
           },
           audio: {
             buffer: audioBuffer,
@@ -356,16 +441,15 @@ export class SubtitleWorkflowService {
           },
         });
         providerResponse = result.providerResponse;
-        if (result.videoUrl?.trim()) {
-          workingVideoPath = await this.persistResultVideoToDraft(result.videoUrl, draftDir);
-          fallback = false;
-          hints.push(result.hint || '已完成 GPU 对口型。');
-        } else {
-          hints.push('对口型服务未返回视频地址，已回退到换音轨版本继续出片。');
+        if (!result.videoUrl?.trim()) {
+          throw new Error('VideoReTalk 服务未返回视频地址');
         }
+        workingVideoPath = await this.persistResultVideoToDraft(result.videoUrl, draftDir);
+        fallback = false;
+        hints.push(result.hint || '已完成 GPU 对口型。');
       } catch (e) {
-        hints.push(
-          `GPU 对口型调用失败，已回退到换音轨版本继续合成。${e instanceof Error ? e.message : String(e)}`,
+        throw new BadRequestException(
+          `VideoReTalk 对口型失败，已停止最终合成：${e instanceof Error ? e.message : String(e)}`,
         );
       }
     } else {
@@ -410,13 +494,31 @@ export class SubtitleWorkflowService {
       provider: string | null;
       providerVoice: string | null;
       providerModel: string | null;
+      audioUrl: string | null;
     },
+    voiceTuning?: VoiceTuningOptions,
   ): Promise<{
     buffer: Buffer;
     mimeType: string;
     originalname: string;
     ttsMode: TtsMode;
+    styleHint?: string;
   }> {
+    if (voice.provider === 'local-upload') {
+      const localAudio = await this.resources.readManagedVoiceSample(voice.audioUrl);
+      if (!localAudio) {
+        throw new BadRequestException('未找到本地上传音频文件，请重新上传音色素材');
+      }
+      return {
+        buffer: localAudio.buffer,
+        mimeType: localAudio.mimetype,
+        originalname: localAudio.originalname,
+        ttsMode: 'provider',
+        styleHint:
+          '当前使用本地上传音频，不会重新应用情绪/强度；如需动态配音，请选择 TTS 音色。',
+      };
+    }
+
     try {
       const speech = await this.speechAi.synthesizeAudio({
         text: script,
@@ -425,12 +527,14 @@ export class SubtitleWorkflowService {
         provider: voice.provider,
         providerVoice: voice.providerVoice,
         providerModel: voice.providerModel,
+        voiceTuning,
       });
       return {
         buffer: speech.buffer,
         mimeType: speech.mimeType,
         originalname: this.audioFileNameForMime(speech.mimeType),
         ttsMode: 'provider',
+        styleHint: speech.styleHint,
       };
     } catch (e) {
       this.logger.warn(`TTS fallback to mock audio: ${e instanceof Error ? e.message : String(e)}`);
@@ -472,10 +576,19 @@ export class SubtitleWorkflowService {
             mimetype: audio.mimeType,
             size: audio.buffer.length,
           });
-          if (transcript.segments.length > 0) {
+          if (
+            transcript.segments.length > 0 &&
+            this.isTimelineTranscriptCompleteEnough(script, transcript.fullText)
+          ) {
             segments = transcript.segments;
             language = transcript.language || 'zh-CN';
             timelineSource = 'asr-fallback';
+          } else if (transcript.segments.length > 0) {
+            this.logger.warn(
+              `ASR fallback timeline ignored because transcript is shorter than source script: source=${this.normalizedTextLength(
+                script,
+              )}, transcript=${this.normalizedTextLength(transcript.fullText)}`,
+            );
           }
         } catch (e) {
           this.logger.warn(`ASR fallback timeline failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -576,6 +689,18 @@ export class SubtitleWorkflowService {
     });
   }
 
+  private isTimelineTranscriptCompleteEnough(script: string, transcriptText: string): boolean {
+    const sourceLength = this.normalizedTextLength(script);
+    const transcriptLength = this.normalizedTextLength(transcriptText);
+    if (sourceLength <= 0) return true;
+    if (transcriptLength <= 0) return false;
+    return transcriptLength >= sourceLength * 0.9 || sourceLength - transcriptLength <= 24;
+  }
+
+  private normalizedTextLength(value: string): number {
+    return value.replace(/\s+/g, '').trim().length;
+  }
+
   private wrapCueText(text: string, lineChars: number): string[] {
     const normalized = text.replace(/\s+/g, ' ').trim();
     if (!normalized) return [];
@@ -641,6 +766,9 @@ export class SubtitleWorkflowService {
     if (mimeType === 'audio/wav') return '.wav';
     if (mimeType === 'audio/aac') return '.aac';
     if (mimeType === 'audio/mp4') return '.m4a';
+    if (mimeType === 'audio/ogg') return '.ogg';
+    if (mimeType === 'audio/flac') return '.flac';
+    if (mimeType === 'audio/webm') return '.webm';
     return '.mp3';
   }
 

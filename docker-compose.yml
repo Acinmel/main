@@ -73,16 +73,16 @@ services:
       # 抖音 Cookie 仅由根目录 env_file .env 注入（勿用 ${} 展开，避免值中含 $ 被 compose 误解析）
       DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-300000}
       # Linux 容器内落盘目录（与源码包内默认 Windows 路径无关）
-      VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/data/download-video}
+      VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/workspace/data/download-video}
       # 固定为镜像内 apt 安装的 ffmpeg；勿用 ${FFMPEG_BIN:-} — 宿主 .env 里 Windows 路径会误入容器导致「FFmpeg 不可用」
       FFMPEG_BIN: /usr/bin/ffmpeg
       # 数字人形象落盘（与默认 data/digital-humans 一致，避免容器重建丢文件）
-      DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
+      DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/data/digital-humans}
       # DASHSCOPE_API_KEY / ARK_API_KEY / OPENAI_API_KEY / ASR_* / SEEDREAM_* / DY_DOWNLOADER_COOKIE：
       # 写在根 .env 或 backend/.env（见上方 env_file）；勿在此用 ${VAR:-} 覆盖成空
     volumes:
-      - video_downloads:/data/download-video
-      - digital_human_storage:/workspace/backend/data/digital-humans
+      - video_downloads:/workspace/data/download-video
+      - digital_human_storage:/workspace/data/digital-humans
     depends_on:
       mysql:
         condition: service_healthy

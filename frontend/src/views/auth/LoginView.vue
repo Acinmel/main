@@ -1,5 +1,13 @@
 <script setup lang="ts">
-import { NButton, NCard, NForm, NFormItem, NInput, NTag, useMessage } from 'naive-ui'
+import {
+  NButton,
+  NCard,
+  NForm,
+  NFormItem,
+  NInput,
+  NTag,
+  useMessage,
+} from 'naive-ui'
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { loginAuth } from '@/api/auth'
@@ -70,13 +78,17 @@ async function handleSubmit() {
         <template #header>
           <div class="auth-page__card-head">
             <span>登录账号</span>
-            <p>使用已审核通过的邮箱账号进入工作台。</p>
+            <p>使用邮箱账号进入工作台；后台仅对固定管理员账号开放。</p>
           </div>
         </template>
 
         <n-form label-placement="top">
           <n-form-item label="邮箱">
-            <n-input v-model:value="form.email" clearable placeholder="name@example.com" />
+            <n-input
+              v-model:value="form.email"
+              clearable
+              placeholder="name@example.com"
+            />
           </n-form-item>
           <n-form-item label="密码">
             <n-input
@@ -98,7 +110,10 @@ async function handleSubmit() {
             登录
           </n-button>
 
-          <router-link :to="{ name: 'register', query: route.query }" class="auth-page__link">
+          <router-link
+            :to="{ name: 'register', query: route.query }"
+            class="auth-page__link"
+          >
             还没有账号？去注册
           </router-link>
         </n-form>
@@ -128,9 +143,22 @@ async function handleSubmit() {
   padding: 34px;
   border-radius: 34px;
   background:
-    radial-gradient(circle at 16% 12%, rgba(75, 107, 255, 0.2), transparent 22%),
-    radial-gradient(circle at 84% 18%, rgba(75, 199, 187, 0.18), transparent 22%),
-    linear-gradient(135deg, rgba(29, 43, 71, 0.92), rgba(93, 114, 151, 0.56) 54%, rgba(244, 247, 251, 0.8));
+    radial-gradient(
+      circle at 16% 12%,
+      rgba(75, 107, 255, 0.2),
+      transparent 22%
+    ),
+    radial-gradient(
+      circle at 84% 18%,
+      rgba(75, 199, 187, 0.18),
+      transparent 22%
+    ),
+    linear-gradient(
+      135deg,
+      rgba(29, 43, 71, 0.92),
+      rgba(93, 114, 151, 0.56) 54%,
+      rgba(244, 247, 251, 0.8)
+    );
   box-shadow: var(--shadow-panel);
 }
 

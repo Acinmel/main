@@ -6,6 +6,8 @@ import type { AvatarResource } from '@/types/resources'
 const props = defineProps<{
   item: AvatarResource
   selected: boolean
+  previewVideoUrl?: string
+  previewLoading?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -25,12 +27,33 @@ function saveName() {
   const next = draftName.value.trim()
   if (next && next !== props.item.name) emit('rename', next)
 }
+
+function playVideoPreview(event: Event) {
+  const video = event.currentTarget as HTMLVideoElement
+  void video.play().catch(() => undefined)
+}
+
+function pauseVideoPreview(event: Event) {
+  const video = event.currentTarget as HTMLVideoElement
+  video.pause()
+}
 </script>
 
 <template>
   <n-card class="resource-card" content-style="padding: 0">
-    <div class="resource-card__media">
-      <img :src="item.coverUrl" :alt="item.name" loading="lazy" />
+    <div class="resource-card__media" :class="{ 'resource-card__media--video': previewVideoUrl }">
+      <video
+        v-if="previewVideoUrl"
+        :src="previewVideoUrl"
+        muted
+        playsinline
+        preload="metadata"
+        @pointerenter="playVideoPreview"
+        @pointerleave="pauseVideoPreview"
+      />
+      <img v-else :src="item.coverUrl" :alt="item.name" loading="lazy" />
+      <span v-if="previewVideoUrl" class="resource-card__media-label">视频预览</span>
+      <span v-else-if="previewLoading" class="resource-card__media-label">加载预览中</span>
       <n-checkbox
         v-if="item.owner === 'mine'"
         class="resource-card__check"
@@ -100,16 +123,43 @@ function saveName() {
   background: linear-gradient(180deg, #eef3fb, #dfe8f7);
 }
 
-.resource-card__media img {
+.resource-card__media img,
+.resource-card__media video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   transition: transform var(--transition-smooth), filter var(--transition-fast);
 }
 
-.resource-card:hover .resource-card__media img {
+.resource-card__media video {
+  display: block;
+  background: #0f172a;
+}
+
+.resource-card:hover .resource-card__media img,
+.resource-card:hover .resource-card__media video {
   filter: saturate(1.08);
   transform: scale(1.045);
+}
+
+.resource-card__media--video {
+  background: #0f172a;
+}
+
+.resource-card__media-label {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 1;
+  padding: 6px 10px;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.7);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.2);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
 }
 
 .resource-card__check {

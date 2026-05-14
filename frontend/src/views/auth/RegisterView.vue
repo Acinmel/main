@@ -1,5 +1,14 @@
 <script setup lang="ts">
-import { NButton, NCard, NForm, NFormItem, NInput, NTag, NText, useMessage } from 'naive-ui'
+import {
+  NButton,
+  NCard,
+  NForm,
+  NFormItem,
+  NInput,
+  NTag,
+  NText,
+  useMessage,
+} from 'naive-ui'
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { registerAuth } from '@/api/auth'
@@ -58,7 +67,9 @@ async function handleSubmit() {
           AI VIDEO GENERATION WORKBENCH
         </n-tag>
         <h1>创建你的 AI 数字人工作台账号</h1>
-        <p>注册后即可进入审核流程，开通后即可使用专属数字人、口播文案提取与 AI 改写能力。</p>
+        <p>
+          注册后即可进入创作工作台，素材、声音和成片流程都归属当前账号。
+        </p>
         <div class="auth-page__proofs">
           <span v-for="item in proofs" :key="item">{{ item }}</span>
         </div>
@@ -68,13 +79,17 @@ async function handleSubmit() {
         <template #header>
           <div class="auth-page__card-head">
             <span>注册账号</span>
-            <p>使用邮箱创建账号，提交后默认等待管理员审核。</p>
+            <p>使用邮箱创建账号，提交后自动登录并开通基础权限。</p>
           </div>
         </template>
 
         <n-form label-placement="top">
           <n-form-item label="邮箱">
-            <n-input v-model:value="form.email" clearable placeholder="name@example.com" />
+            <n-input
+              v-model:value="form.email"
+              clearable
+              placeholder="name@example.com"
+            />
           </n-form-item>
           <n-form-item label="密码">
             <n-input
@@ -97,9 +112,12 @@ async function handleSubmit() {
           </n-button>
 
           <n-text depth="3" class="auth-page__notice">
-            新账号默认等待管理员审核，开通后方可使用专属数字人、口播与任务等能力。
+            普通用户默认只进入前台工作台，后台仅固定管理员账号可见。
           </n-text>
-          <router-link :to="{ name: 'login', query: route.query }" class="auth-page__link">
+          <router-link
+            :to="{ name: 'login', query: route.query }"
+            class="auth-page__link"
+          >
             已有账号？去登录
           </router-link>
         </n-form>
@@ -129,9 +147,22 @@ async function handleSubmit() {
   padding: 34px;
   border-radius: 34px;
   background:
-    radial-gradient(circle at 12% 10%, rgba(75, 107, 255, 0.18), transparent 20%),
-    radial-gradient(circle at 82% 20%, rgba(75, 199, 187, 0.16), transparent 22%),
-    linear-gradient(135deg, rgba(35, 48, 76, 0.88), rgba(92, 112, 150, 0.54) 52%, rgba(244, 247, 251, 0.8));
+    radial-gradient(
+      circle at 12% 10%,
+      rgba(75, 107, 255, 0.18),
+      transparent 20%
+    ),
+    radial-gradient(
+      circle at 82% 20%,
+      rgba(75, 199, 187, 0.16),
+      transparent 22%
+    ),
+    linear-gradient(
+      135deg,
+      rgba(35, 48, 76, 0.88),
+      rgba(92, 112, 150, 0.54) 52%,
+      rgba(244, 247, 251, 0.8)
+    );
   box-shadow: var(--shadow-panel);
 }
 
@@ -149,9 +180,22 @@ async function handleSubmit() {
 
 .auth-page__copy--register {
   background:
-    radial-gradient(circle at 16% 10%, rgba(75, 107, 255, 0.16), transparent 18%),
-    radial-gradient(circle at 86% 20%, rgba(239, 177, 75, 0.18), transparent 22%),
-    linear-gradient(135deg, rgba(33, 45, 72, 0.9), rgba(104, 116, 148, 0.56) 52%, rgba(244, 247, 251, 0.8));
+    radial-gradient(
+      circle at 16% 10%,
+      rgba(75, 107, 255, 0.16),
+      transparent 18%
+    ),
+    radial-gradient(
+      circle at 86% 20%,
+      rgba(239, 177, 75, 0.18),
+      transparent 22%
+    ),
+    linear-gradient(
+      135deg,
+      rgba(33, 45, 72, 0.9),
+      rgba(104, 116, 148, 0.56) 52%,
+      rgba(244, 247, 251, 0.8)
+    );
 }
 
 .auth-page__eyebrow {

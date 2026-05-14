@@ -16,6 +16,7 @@ export interface AvatarResourceDto {
   coverUrl: string;
   originalVideoUrl: string | null;
   styleId: string | null;
+  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -32,6 +33,7 @@ export interface VoiceResourceDto {
   providerModel: string | null;
   sampleDurationMs: number | null;
   cloneError: string | null;
+  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -64,6 +66,7 @@ export interface ResourceRow {
   provider_model?: string | null;
   sample_duration_ms?: number | null;
   clone_error?: string | null;
+  expires_at?: string | null;
   style_json?: string | null;
   created_at: string;
   updated_at: string;

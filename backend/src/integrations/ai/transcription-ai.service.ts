@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES } from '../../common/media.constants';
+import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import type {
   TranscribeResultDto,
   TranscriptSegmentDto,
@@ -263,7 +264,7 @@ export class TranscriptionAiService {
     const raw = this.config.get<string>('AI_MOCK_FALLBACK')?.trim().toLowerCase();
     if (raw === 'true' || raw === '1' || raw === 'on') return true;
     if (raw === 'false' || raw === '0' || raw === 'off') return false;
-    return this.config.get<string>('NODE_ENV') !== 'production';
+    return false;
   }
 
   private getOpenAiTranscribeConfig(): {
@@ -865,24 +866,24 @@ export class TranscriptionAiService {
   } {
     const fromEnv = this.config.get<string>('ASR_PYTHON_BIN')?.trim();
     if (fromEnv) {
-      return { command: fromEnv, prefixArgs: [] };
+      return { command: fromEnv, prefixArgs: this.readCommandArgs('ASR_PYTHON_ARGS') };
+    }
+
+    const genericPython = this.config.get<string>('PYTHON_BIN')?.trim();
+    if (genericPython) {
+      return { command: genericPython, prefixArgs: this.readCommandArgs('ASR_PYTHON_ARGS') };
     }
 
     if (process.platform === 'win32') {
-      const candidates = [
-        'C:\\Users\\PC\\AppData\\Local\\Programs\\Python\\Python314\\python.exe',
-        'C:\\Users\\PC\\AppData\\Local\\Programs\\Python\\Python313\\python.exe',
-        'C:\\Python311\\python.exe',
-      ];
-      for (const candidate of candidates) {
-        if (existsSync(candidate)) {
-          return { command: candidate, prefixArgs: [] };
-        }
-      }
-      return { command: 'py', prefixArgs: ['-3.14'] };
+      return { command: 'py', prefixArgs: ['-3'] };
     }
 
     return { command: 'python3', prefixArgs: [] };
+  }
+
+  private readCommandArgs(key: string): string[] {
+    const raw = this.config.get<string>(key)?.trim();
+    return raw ? raw.split(/\s+/).filter(Boolean) : [];
   }
 
   private normalizeDashScopeRealtimeResult(raw: string | Buffer): {
@@ -939,11 +940,8 @@ export class TranscriptionAiService {
     if (!trimmed || /^https?:\/\//i.test(trimmed) || /^data:/i.test(trimmed)) {
       return null;
     }
-    const candidates = [path.resolve(trimmed)];
-    const saveDir = this.config.get<string>('VIDEO_SAVE_DIR')?.trim();
-    if (saveDir) {
-      candidates.push(path.resolve(path.join(saveDir, path.basename(trimmed))));
-    }
+    const saveDir = resolveConfiguredDir(this.config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
+    const candidates = [path.resolve(trimmed), path.resolve(path.join(saveDir, path.basename(trimmed)))];
     for (const candidate of candidates) {
       if (existsSync(candidate)) {
         return candidate;

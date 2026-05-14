@@ -26,7 +26,7 @@ export function mockSuggest(
   };
   const tail =
     '\n\n（以上为本地 mock：配置 OPENAI_API_KEY 或 ARK_API_KEY 后会切到真实模型输出。）';
-  return `${head[style]}\n${source.slice(0, 400)}\n\n来源占位：${videoUrl.slice(0, 120)}${tail}`;
+  return `${head[style]}\n${source.trim()}\n\n来源占位：${videoUrl.slice(0, 120)}${tail}`;
 }
 
 export function mockHookedOralScript(
@@ -48,7 +48,7 @@ export function mockHookedOralScript(
     .split(/[。！？!?]/)
     .map((item) => item.trim())
     .filter(Boolean);
-  const core = sentences.slice(0, 4);
+  const core = sentences;
   const activeStrategy = strategy ?? {
     id: 'default',
     label: '基础整理',

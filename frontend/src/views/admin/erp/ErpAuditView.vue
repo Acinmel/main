@@ -208,8 +208,8 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
+  gap: 20px;
+  margin-bottom: 24px;
   flex-wrap: wrap;
 }
 </style>

@@ -2,6 +2,9 @@
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { NButton, NTag } from 'naive-ui'
+import bilibiliLogo from '@/assets/platform-logos/bilibili-logo.png'
+import douyinLogo from '@/assets/platform-logos/douyin-logo.png'
+import xiaohongshuLogo from '@/assets/platform-logos/xiaohongshu-logo.png'
 import { useUserStore } from '@/stores/user'
 
 const user = useUserStore()
@@ -12,13 +15,29 @@ const primaryTo = computed(() =>
 
 const primaryText = computed(() => (user.isLoggedIn ? '立即开启创作' : '免费注册 / 登录'))
 
-const creationSteps = [
+const copyPlatformLogos = [
+  { name: 'Bilibili', src: bilibiliLogo },
+  { name: 'Douyin', src: douyinLogo },
+  { name: 'Xiaohongshu', src: xiaohongshuLogo },
+]
+
+type CreationStep = {
+  no: string
+  title: string
+  desc: string
+  tag: string
+  tone: string
+  visual?: 'platforms'
+}
+
+const creationSteps: CreationStep[] = [
   {
     no: '01',
     title: '搞定文案',
     desc: '轻松创作优质文案',
     tag: 'EN / CN',
     tone: 'blue',
+    visual: 'platforms',
   },
   {
     no: '02',
@@ -95,14 +114,28 @@ const creationSteps = [
           <p>{{ step.desc }}</p>
 
           <div class="landing-card__visual">
-            <div class="landing-card__visual-chip">{{ step.tag }}</div>
-            <div class="landing-card__phone">
-              <div class="landing-card__screen">
-                <span />
-                <span />
-                <span />
+            <template v-if="step.visual === 'platforms'">
+              <div class="landing-card__platform-halo" />
+              <div class="landing-card__platform-stack" aria-label="Content platform logos">
+                <span
+                  v-for="logo in copyPlatformLogos"
+                  :key="logo.name"
+                  class="landing-card__platform-logo"
+                >
+                  <img :src="logo.src" :alt="logo.name" loading="lazy" />
+                </span>
               </div>
-            </div>
+            </template>
+            <template v-else>
+              <div class="landing-card__visual-chip">{{ step.tag }}</div>
+              <div class="landing-card__phone">
+                <div class="landing-card__screen">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </div>
+            </template>
           </div>
 
           <RouterLink :to="primaryTo" class="landing-card__go" aria-label="进入创作">
@@ -405,6 +438,107 @@ const creationSteps = [
   bottom: 0;
   width: 42%;
   height: 60%;
+}
+
+.landing-card--blue .landing-card__visual {
+  right: -4px;
+  bottom: -2px;
+  width: 50%;
+  height: 68%;
+}
+
+.landing-card__platform-halo {
+  position: absolute;
+  right: 8px;
+  bottom: 2px;
+  width: 148px;
+  height: 148px;
+  border-radius: 42px;
+  background:
+    radial-gradient(circle at 35% 30%, rgba(255, 255, 255, 0.92), transparent 34%),
+    linear-gradient(135deg, rgba(75, 107, 255, 0.16), rgba(75, 199, 187, 0.18));
+  filter: blur(1px);
+  opacity: 0.82;
+  transform: rotate(8deg);
+  transition:
+    opacity var(--transition-fast),
+    transform var(--transition-smooth);
+}
+
+.landing-card__platform-stack {
+  position: absolute;
+  inset: 0;
+}
+
+.landing-card__platform-logo {
+  position: absolute;
+  display: grid;
+  width: 86px;
+  height: 86px;
+  place-items: center;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.78);
+  border-radius: 28px;
+  background: rgba(255, 255, 255, 0.7);
+  box-shadow:
+    0 18px 34px rgba(32, 58, 100, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.82);
+  transition:
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    transform 0.42s cubic-bezier(0.18, 0.9, 0.18, 1.08);
+  will-change: transform;
+}
+
+.landing-card__platform-logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.landing-card__platform-logo:nth-child(1) {
+  right: 64px;
+  bottom: 14px;
+  z-index: 3;
+  transform: rotate(-10deg);
+}
+
+.landing-card__platform-logo:nth-child(2) {
+  right: 20px;
+  bottom: 42px;
+  z-index: 2;
+  transform: scale(0.94) rotate(8deg);
+}
+
+.landing-card__platform-logo:nth-child(3) {
+  right: 72px;
+  bottom: 76px;
+  z-index: 1;
+  transform: scale(0.86) rotate(-3deg);
+}
+
+.landing-card:hover .landing-card__platform-halo {
+  opacity: 1;
+  transform: translate(-12px, -12px) rotate(2deg) scale(1.04);
+}
+
+.landing-card:hover .landing-card__platform-logo {
+  border-color: rgba(255, 255, 255, 0.96);
+  box-shadow:
+    0 26px 42px rgba(32, 58, 100, 0.2),
+    0 0 0 8px rgba(255, 255, 255, 0.28);
+}
+
+.landing-card:hover .landing-card__platform-logo:nth-child(1) {
+  transform: translate(-30px, -24px) rotate(-13deg) scale(1.03);
+}
+
+.landing-card:hover .landing-card__platform-logo:nth-child(2) {
+  transform: translate(-38px, -34px) rotate(7deg) scale(1);
+}
+
+.landing-card:hover .landing-card__platform-logo:nth-child(3) {
+  transform: translate(-24px, -42px) rotate(-6deg) scale(0.92);
 }
 
 .landing-card__visual-chip {

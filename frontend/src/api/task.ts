@@ -139,6 +139,8 @@ export interface LipSyncPreviewResponse {
   videoUrl: string | null
   hint: string
   providerResponse?: unknown
+  fallback?: boolean
+  lipSyncApplied?: boolean
 }
 
 export interface VoicePreviewResponse {
@@ -183,6 +185,8 @@ export interface SubtitleWorkflowPreviewResponse {
   hint: string
   ttsMode: 'provider' | 'mock'
   timelineSource: 'asr-fallback' | 'local-estimate'
+  lipSyncApplied?: boolean
+  providerResponse?: unknown
 }
 
 export interface SubtitleWorkflowFinalizeResponse {
@@ -257,10 +261,18 @@ export async function createLipSyncPreview(body: {
   return data
 }
 
+export type VoiceTuningRequest = {
+  voiceLanguage?: string
+  voiceEmotion?: string
+  voiceEmotionIntensity?: number
+  voiceRate?: number
+  voiceVolume?: number
+}
+
 export async function createVoicePreview(body: {
   script: string
   voiceResourceId: string
-}) {
+} & VoiceTuningRequest) {
   const { data } = await http.post<VoicePreviewResponse>('v1/tools/voice-preview', body, {
     timeout: 180_000,
   })
@@ -283,7 +295,7 @@ export async function createSubtitleWorkflowPreview(
     voiceResourceId: string
     subtitleTemplateId: string
     previewSeconds?: number
-  },
+  } & VoiceTuningRequest,
   opts?: { signal?: AbortSignal },
 ) {
   const { data } = await http.post<SubtitleWorkflowPreviewResponse>(
@@ -460,7 +472,7 @@ export interface SourceVideoFileResponse {
 }
 
 /**
- * 下载源视频并由服务端保存到本机目录（默认 Windows：C:\\downloadVideo，见后端 VIDEO_SAVE_DIR）。
+ * 下载源视频并由服务端保存到项目内资源目录（默认 backend/data/download-video，见后端 VIDEO_SAVE_DIR）。
  * `transcribe: false` 时仅落盘，不调用 ASR（首页抖音流程会先下载再单独调 transcribe-saved-video 以展示进度）。
  * 默认 `transcribe: true` 时与旧行为一致：保存后同一次请求内完成转写。
  */

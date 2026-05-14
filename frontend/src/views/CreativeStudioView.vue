@@ -2,19 +2,14 @@
 import {
   NAlert,
   NButton,
-  NDescriptions,
-  NDescriptionsItem,
   NInput,
-  NInputNumber,
   NProgress,
   NSelect,
   NSpace,
   NTag,
   NText,
-  NUpload,
   useMessage,
 } from 'naive-ui'
-import type { UploadFileInfo } from 'naive-ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import VideoLinkInput from '@/components/home/VideoLinkInput.vue'
@@ -28,7 +23,6 @@ import {
   uploadAvatarResource,
 } from '@/api/resources'
 import {
-  createLipSyncPreview,
   createSubtitleWorkflowPreview,
   createVoicePreview,
   downloadSourceVideoFile,
@@ -40,7 +34,6 @@ import {
   getTranscribePipelineHealth,
   learnDouyinHomepage,
   transcribeSavedVideo,
-  transcribeUploadFile,
   transcribeFromUrl,
 } from '@/api/task'
 import type { DouyinHomepageLearnedPost, DouyinHomepageLearnedProfile } from '@/api/task'
@@ -56,13 +49,13 @@ import type {
   SubtitleTemplateResource,
   VoiceResource,
 } from '@/types/resources'
+import type { VideoMetaPreview } from '@/types/domain'
 import { isDouyinNormalizedUrl, validateSourceVideoInput } from '@/utils/douyinShareUrl'
 import { formatStatCount } from '@/utils/formatDisplay'
 import {
   describeHttpOrNetworkError,
   describeHttpOrNetworkErrorMaybeBlob,
 } from '@/utils/httpErrorMessage'
-import axios from 'axios'
 
 type CreationStep = {
   no: number
@@ -75,6 +68,26 @@ type StudioSourceMode = 'homepage' | 'hotlink'
 type VoiceSourceMode = 'tts' | 'local'
 type RenderModelChoice = 'new' | 'classic'
 type RenderResolutionChoice = '1080p' | '2k'
+
+type RecentExtractionRecord = {
+  id: string
+  sourceUrl: string
+  platform: string
+  title: string
+  summary: string
+  coverUrl: string
+  videoUrl: string
+  extractedAt: string
+}
+
+const RECENT_EXTRACTION_STORAGE_KEY = 'creative-studio:recent-extractions:v1'
+
+const hiddenRecommendedVoiceIds = new Set([
+  'rec-voice-female',
+  'rec-voice-male',
+  'rec-voice-narration',
+  'rec-voice-bright-young-female',
+])
 
 const voiceLanguageOptions = [
   { label: '汉语-简体', value: 'zh-CN' },
@@ -89,16 +102,6 @@ const voiceEmotionOptions = [
   { label: '激励', value: '激励' },
 ]
 
-type SegmentGenState = {
-  progress: number
-  processing: boolean
-  statusLabel: string
-  videoUrl: string | null
-  hint: string
-  optimizedScript: string
-  error?: string
-}
-
 type OralScriptPolishState = {
   hook3s: string
   hook10s: string
@@ -111,7 +114,7 @@ type OralScriptPolishState = {
 const steps: CreationStep[] = [
   { no: 1, title: '搞定文案', desc: '抓链接、转文案、手动润稿' },
   { no: 2, title: '配音 & 数字人', desc: '挑选音色与出镜视频' },
-  { no: 3, title: '一键成片', desc: '分段生成对口型视频' },
+  { no: 3, title: '一键成片', desc: '整段生成对口型视频' },
   { no: 4, title: '自动发布', desc: '预留发布账号与计划' },
 ]
 
@@ -122,8 +125,6 @@ const publishPlatforms = [
   { name: '快手', icon: '快', account: '0 个账号' },
 ]
 
-const VIDEO_SEGMENT_MAX = 6
-const VIDEO_SEGMENT_MAX_CHARS = 60
 const apiBasePath = (() => {
   const raw =
     typeof import.meta.env.VITE_API_BASE_URL === 'string' &&
@@ -132,30 +133,6 @@ const apiBasePath = (() => {
       : '/api'
   return raw.endsWith('/') ? raw.slice(0, -1) : raw
 })()
-
-function isRequestCanceled(e: unknown): boolean {
-  if (axios.isCancel(e)) return true
-  if (e && typeof e === 'object') {
-    if ('code' in e && (e as { code: string }).code === 'ERR_CANCELED') return true
-    if ('name' in e) {
-      const name = (e as { name: string }).name
-      if (name === 'CanceledError' || name === 'AbortError') return true
-    }
-  }
-  return false
-}
-
-function emptySegmentGenState(): SegmentGenState {
-  return {
-    progress: 0,
-    processing: false,
-    statusLabel: '',
-    videoUrl: null,
-    hint: '',
-    optimizedScript: '',
-    error: undefined,
-  }
-}
 
 const message = useMessage()
 const route = useRoute()
@@ -181,11 +158,11 @@ const benchmarkSamples = ref<DouyinHomepageLearnedPost[]>([])
 const benchmarkIdeaSuggestions = ref<string[]>([])
 
 const loadingMeta = ref(false)
+const recentExtractionRecords = ref<RecentExtractionRecord[]>([])
 const douyinPipeline = ref(false)
 const pipelinePhase = ref<'idle' | 'download' | 'transcribe'>('idle')
 const pipelineProgress = ref(0)
 const pipelineBarProcessing = ref(false)
-const transcribeUploadLoading = ref(false)
 const transcribeUrlLoading = ref(false)
 const retranscribingLocal = ref(false)
 const optimizingOralScript = ref(false)
@@ -222,6 +199,10 @@ const voicePreviewUrl = ref<string | null>(null)
 const voicePreviewHint = ref('')
 const voicePreviewMode = ref<'provider' | 'mock' | ''>('')
 const voicePreviewDurationSeconds = ref(0)
+const voicePreviewProgress = ref(0)
+const voicePreviewProgressLabel = ref('准备生成音频')
+let voicePreviewProgressTimer: number | null = null
+const voiceShellRef = ref<HTMLElement | null>(null)
 const requestedAvatarUnavailable = ref(false)
 const consumedRouteAvatarId = ref('')
 const generatedPreviewObjectUrls = ref<string[]>([])
@@ -259,21 +240,6 @@ const subtitleWorkflowJson = ref<{
 const avatarCoverVideoUrls = ref<Record<string, string>>({})
 const pendingAvatarCoverIds = new Set<string>()
 
-const videoSegmentCount = ref<number | null>(3)
-const videoScriptSegments = ref<string[]>(
-  Array.from({ length: VIDEO_SEGMENT_MAX }, () => ''),
-)
-const generateVideoLoading = ref(false)
-const generateVideoEstimatedTotalSec = ref(0)
-const generateBatchAbort = ref<AbortController | null>(null)
-const generateQueueStopRequested = ref(false)
-const segmentGenStates = ref<SegmentGenState[]>(
-  Array.from({ length: VIDEO_SEGMENT_MAX }, emptySegmentGenState),
-)
-const segmentProgressTimers = ref<Array<ReturnType<typeof setInterval> | null>>(
-  Array(VIDEO_SEGMENT_MAX).fill(null),
-)
-
 const urlInvalid = computed(() => {
   if (!draft.videoUrl?.trim()) return false
   return !validateSourceVideoInput(draft.videoUrl).ok
@@ -283,19 +249,6 @@ const linkReady = computed(() => validateSourceVideoInput(draft.videoUrl).ok)
 const canTranscribeNonDouyinUrl = computed(
   () => linkReady.value && !isDouyinNormalizedUrl(draft.videoUrl),
 )
-const safeSegmentCount = computed(() => {
-  const value = videoSegmentCount.value
-  if (value == null || Number.isNaN(Number(value))) return 3
-  return Math.min(VIDEO_SEGMENT_MAX, Math.max(1, Math.round(Number(value))))
-})
-const canGenerateVideoPreview = computed(() => {
-  const segments = videoScriptSegments.value.slice(0, safeSegmentCount.value)
-  return (
-    segments.some((segment) => segment.trim().length >= 2) &&
-    Boolean(selectedAvatarId.value) &&
-    Boolean(selectedVoiceId.value)
-  )
-})
 const hasAvatarOptions = computed(() => avatarOptions.value.length > 0)
 const hasVoiceOptions = computed(() => voiceOptions.value.length > 0)
 const hasLearnedBenchmark = computed(() => Boolean(benchmarkProfile.value))
@@ -328,18 +281,6 @@ const scriptBlockHint = computed(() =>
     ? '抖音链接会先落到服务端目录，再用 FFmpeg + ASR 回填这份文案。'
     : '支持直接从上传音视频或当前链接中转写口播文案。',
 )
-const showSegmentResultBlocks = computed(
-  () =>
-    generateVideoLoading.value ||
-    segmentGenStates.value.some(
-      (state) =>
-        state.statusLabel ||
-        state.videoUrl ||
-        state.error ||
-        state.progress > 0 ||
-        state.processing,
-    ),
-)
 const selectedAvatarLabel = computed(
   () => avatarOptions.value.find((item) => item.value === selectedAvatarId.value)?.label ?? '未选择',
 )
@@ -352,23 +293,18 @@ const selectedSubtitleTemplateLabel = computed(
     '未选择',
 )
 const extractedScriptLines = computed(() => {
+  const raw = sanitizeWorkflowScriptText(draft.manualScriptDraft.trim())
+  if (raw) return splitScriptIntoSemanticSegments(raw)
+
   const fromSegments = draft.transcriptSegments
     .map((segment) => segment.text.trim())
     .filter(Boolean)
-  if (fromSegments.length) return fromSegments
-
-  const raw = draft.manualScriptDraft.trim()
-  if (!raw) return []
-  const lines = raw
-    .split(/\r\n|\n|\r/)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-  if (lines.length > 1) return lines
-
-  const chunks = raw.match(/.{1,26}/g)
-  return chunks?.map((segment) => segment.trim()).filter(Boolean) ?? [raw]
+  return splitScriptIntoSemanticSegments(fromSegments.join('\n'))
 })
 const oralScriptSourceText = computed(() => {
+  const raw = sanitizeWorkflowScriptText(draft.manualScriptDraft.trim())
+  if (raw) return raw
+
   const fromSegments = draft.transcriptSegments
     .map((segment) => segment.text.trim())
     .filter(Boolean)
@@ -398,16 +334,282 @@ function sanitizeWorkflowScriptText(value: string) {
     .trim()
 }
 
+function splitLongTextByLength(text: string, maxChars: number) {
+  const result: string[] = []
+  for (let i = 0; i < text.length; i += maxChars) {
+    const chunk = text.slice(i, i + maxChars).trim()
+    if (chunk) result.push(chunk)
+  }
+  return result
+}
+
+function splitSemanticSentence(sentence: string, maxChars: number) {
+  const trimmed = sentence.trim()
+  if (!trimmed) return []
+  if (trimmed.length <= maxChars) return [trimmed]
+
+  const commaPieces =
+    trimmed.match(/[^，,、：:]+[，,、：:]*/g)?.map((item) => item.trim()).filter(Boolean) ?? [
+      trimmed,
+    ]
+  const result: string[] = []
+  let buffer = ''
+
+  for (const piece of commaPieces) {
+    if (piece.length > maxChars) {
+      if (buffer) {
+        result.push(buffer)
+        buffer = ''
+      }
+      result.push(...splitLongTextByLength(piece, maxChars))
+      continue
+    }
+
+    const next = buffer ? `${buffer}${piece}` : piece
+    if (next.length > maxChars && buffer) {
+      result.push(buffer)
+      buffer = piece
+    } else {
+      buffer = next
+    }
+  }
+
+  if (buffer) result.push(buffer)
+  return result
+}
+
+function splitScriptIntoSemanticSegments(text: string, maxChars = 52) {
+  const source = sanitizeWorkflowScriptText(text)
+  if (!source) return []
+
+  return source
+    .split(/\r\n|\n|\r/)
+    .flatMap((line) =>
+      (line
+        .replace(/\s+/g, ' ')
+        .match(/[^。！？!?；;]+[。！？!?；;]*/g) ?? [line]
+      ).flatMap((sentence) => splitSemanticSentence(sentence, maxChars)),
+    )
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+}
+
+function safeJsonParse<T>(value: string | null, fallback: T): T {
+  if (!value) return fallback
+  try {
+    return JSON.parse(value) as T
+  } catch {
+    return fallback
+  }
+}
+
+function trimRecordText(value: string, maxLength: number) {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (normalized.length <= maxLength) return normalized
+  return `${normalized.slice(0, maxLength)}...`
+}
+
+function loadRecentExtractionRecords() {
+  const rows = safeJsonParse<RecentExtractionRecord[]>(
+    window.localStorage.getItem(RECENT_EXTRACTION_STORAGE_KEY),
+    [],
+  )
+  recentExtractionRecords.value = rows
+    .filter((item) => item?.sourceUrl && item?.title)
+    .slice(0, 6)
+}
+
+function persistRecentExtractionRecords() {
+  window.localStorage.setItem(
+    RECENT_EXTRACTION_STORAGE_KEY,
+    JSON.stringify(recentExtractionRecords.value.slice(0, 6)),
+  )
+}
+
+function rememberRecentExtraction(meta: VideoMetaPreview, sourceUrl: string) {
+  const summary = meta.content || meta.description || meta.title || '这条视频暂时没有解析到正文内容'
+  const record: RecentExtractionRecord = {
+    id: `${sourceUrl}-${Date.now()}`,
+    sourceUrl,
+    platform: meta.platform === 'douyin' ? '抖音' : '视频',
+    title: trimRecordText(meta.title || summary, 72),
+    summary: trimRecordText(summary, 120),
+    coverUrl: meta.coverImageUrl || '',
+    videoUrl: meta.videoUrl || '',
+    extractedAt: new Date().toISOString(),
+  }
+
+  recentExtractionRecords.value = [
+    record,
+    ...recentExtractionRecords.value.filter((item) => item.sourceUrl !== sourceUrl),
+  ].slice(0, 6)
+  persistRecentExtractionRecords()
+}
+
+function formatRecentExtractionTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '刚刚'
+  const now = new Date()
+  const sameDay = date.toDateString() === now.toDateString()
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  const clock = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  if (sameDay) return `今天 ${clock}`
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${clock}`
+  return `${date.getMonth() + 1}/${date.getDate()} ${clock}`
+}
+
+async function copyRecentExtractionLink(record: RecentExtractionRecord) {
+  try {
+    await navigator.clipboard.writeText(record.sourceUrl)
+    message.success('已复制该短视频链接。')
+  } catch {
+    const textarea = document.createElement('textarea')
+    textarea.value = record.sourceUrl
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    textarea.remove()
+    message.success('已复制该短视频链接。')
+  }
+}
+
+function applySafeTranscriptToEditableScript(payload: {
+  fullText: string
+  segments: Parameters<typeof applyTranscriptToEditableScript>[0]['segments']
+  transcriptId?: string
+  rewriteSuggestion?: string
+}) {
+  const fullText = sanitizeWorkflowScriptText(payload.fullText)
+  if (!fullText) {
+    message.warning('转写没有返回有效口播文案，请检查 ASR 配置或重新转写。')
+    return false
+  }
+  applyTranscriptToEditableScript({
+    ...payload,
+    fullText,
+    segments: payload.segments.filter((segment) => !isInternalPipelineScriptLine(segment.text)),
+  })
+  return true
+}
+
+function clearInternalPipelineScriptDraft() {
+  const raw = draft.manualScriptDraft.trim()
+  if (!raw) return
+  const clean = sanitizeWorkflowScriptText(raw)
+  if (clean === raw) return
+  draft.manualScriptDraft = clean
+  if (!clean) {
+    draft.setTranscriptFromApi('', [], {})
+  }
+}
+
 const rawWorkflowScript = computed(() => draft.manualScriptDraft.trim())
 const currentWorkflowScript = computed(() => sanitizeWorkflowScriptText(rawWorkflowScript.value))
+
+function ensureStreamingScriptComplete() {
+  if (isStreamingToScript.value) {
+    interruptStreamWithFullText()
+  }
+}
+
+const workflowProgressState = computed(() => {
+  const prerequisitesReady = Boolean(
+    currentWorkflowScript.value &&
+      selectedAvatarId.value &&
+      selectedVoiceId.value &&
+      selectedSubtitleTemplateId.value,
+  )
+
+  if (subtitleWorkflowFinalUrl.value) {
+    return {
+      percent: 100,
+      doneCount: 5,
+      activeIndex: 4,
+      status: '完整视频已生成',
+      hint: '成片已经输出，可以直接预览结果。',
+    }
+  }
+  if (subtitleWorkflowFinalizeLoading.value) {
+    return {
+      percent: 90,
+      doneCount: 4,
+      activeIndex: 4,
+      status: '正在输出最终视频',
+      hint: '正在把数字人口型、声音、字幕合成完整成片。',
+    }
+  }
+  if (subtitleWorkflowPreviewUrl.value || subtitleWorkflowDraftId.value) {
+    return {
+      percent: 76,
+      doneCount: 4,
+      activeIndex: 3,
+      status: '5 秒预览已生成',
+      hint: '请检查声音、口型和字幕位置，确认后输出完整视频。',
+    }
+  }
+  if (subtitleWorkflowPreviewLoading.value) {
+    return {
+      percent: 52,
+      doneCount: 1,
+      activeIndex: 2,
+      status: '正在合成预览',
+      hint: '系统正在生成音轨、整理字幕，并制作可检查的 5 秒预览。',
+    }
+  }
+  if (prerequisitesReady) {
+    return {
+      percent: 12,
+      doneCount: 0,
+      activeIndex: 0,
+      status: '素材已就绪',
+      hint: '点击生成 5 秒预览，先看效果再输出完整视频。',
+    }
+  }
+  return {
+    percent: 0,
+    doneCount: 0,
+    activeIndex: 0,
+    status: '等待补齐素材',
+    hint: '先确认文案、数字人、音色和字幕模板。',
+  }
+})
+const workflowProgressSteps = computed(() => {
+  const steps = [
+    { label: '生成音轨' },
+    { label: '整理字幕' },
+    { label: '合成预览' },
+    { label: '对齐口型' },
+    { label: '输出成片' },
+  ]
+  return steps.map((step, index) => ({
+    ...step,
+    status:
+      index < workflowProgressState.value.doneCount
+        ? 'done'
+        : workflowProgressState.value.percent > 0 && index === workflowProgressState.value.activeIndex
+          ? 'active'
+          : 'idle',
+  }))
+})
+const workflowSimpleSteps = computed(() => {
+  const labels = ['生成音轨', '整理字幕', '合成预览', '对齐口型', '输出成片']
+  return labels.map((label, index) => ({
+    label,
+    status: workflowProgressSteps.value[index]?.status ?? 'idle',
+  }))
+})
+
 const firstReadyVideoUrl = computed(() => {
   if (subtitleWorkflowFinalUrl.value) return subtitleWorkflowFinalUrl.value
   if (subtitleWorkflowPreviewUrl.value) return subtitleWorkflowPreviewUrl.value
-  return segmentGenStates.value.find((state) => state.videoUrl)?.videoUrl ?? null
+  return null
 })
 const generatedVideoCount = computed(() => {
   if (subtitleWorkflowFinalUrl.value || subtitleWorkflowPreviewUrl.value) return 1
-  return segmentGenStates.value.filter((state) => state.videoUrl).length
+  return 0
 })
 const publishReadyItems = computed(() => {
   if (subtitleWorkflowFinalUrl.value || subtitleWorkflowPreviewUrl.value) {
@@ -419,13 +621,7 @@ const publishReadyItems = computed(() => {
       },
     ]
   }
-  return segmentGenStates.value
-    .map((state, index) => ({
-      index: index + 1,
-      videoUrl: state.videoUrl,
-      text: state.optimizedScript || videoScriptSegments.value[index] || '',
-    }))
-    .filter((item) => item.videoUrl)
+  return []
 })
 const footerNextLabel = computed(() => {
   if (activeStep.value === 1) return '下一步：配音 & 数字人'
@@ -433,22 +629,6 @@ const footerNextLabel = computed(() => {
   if (activeStep.value === 3) return '下一步：自动发布'
   return '四步已完成'
 })
-
-function segmentInputPlaceholder(index1Based: number) {
-  return `第 ${index1Based} 段口播（最多 ${VIDEO_SEGMENT_MAX_CHARS} 字）`
-}
-
-function clearSegmentProgressTimer(index: number) {
-  const timer = segmentProgressTimers.value[index]
-  if (timer) {
-    clearInterval(timer)
-    segmentProgressTimers.value[index] = null
-  }
-}
-
-function clearAllSegmentProgressTimers() {
-  for (let i = 0; i < VIDEO_SEGMENT_MAX; i += 1) clearSegmentProgressTimer(i)
-}
 
 function revokeGeneratedPreviewObjectUrls() {
   for (const url of generatedPreviewObjectUrls.value) {
@@ -556,97 +736,6 @@ async function resolveGeneratedPreviewVideoUrl(url: string | null) {
   return objectUrl
 }
 
-function startFakeProgressForSegment(index: number, estimatedSec: number) {
-  clearSegmentProgressTimer(index)
-  const startedAt = Date.now()
-  const targetMs = Math.max(8000, estimatedSec * 920)
-  segmentGenStates.value[index].processing = true
-  segmentGenStates.value[index].progress = 0
-  segmentProgressTimers.value[index] = setInterval(() => {
-    const elapsed = Date.now() - startedAt
-    const progress = Math.min(92, Math.floor((elapsed / targetMs) * 92))
-    segmentGenStates.value[index].progress = progress
-    if (progress < 24) {
-      segmentGenStates.value[index].statusLabel = '正在准备文案和素材'
-    } else if (progress < 52) {
-      segmentGenStates.value[index].statusLabel = '正在生成配音音轨'
-    } else if (progress < 82) {
-      segmentGenStates.value[index].statusLabel = '正在驱动视频对口型'
-    } else {
-      segmentGenStates.value[index].statusLabel = '正在等待成片返回'
-    }
-  }, 280)
-}
-
-function markGenerateSlotsCancelledFrom(
-  toRun: { s: string; idx: number }[],
-  fromIndex: number,
-  firstWasAbortedRequest: boolean,
-) {
-  for (let i = fromIndex; i < toRun.length; i += 1) {
-    const slot = toRun[i].idx
-    clearSegmentProgressTimer(slot)
-    segmentGenStates.value[slot] = {
-      ...emptySegmentGenState(),
-      statusLabel:
-        i === fromIndex && firstWasAbortedRequest
-          ? '已取消（当前请求已中断）'
-          : '已取消（后续未继续发起）',
-    }
-  }
-}
-
-function importSegmentsFromManualDraft() {
-  const raw = draft.manualScriptDraft.trim()
-  if (!raw) {
-    message.warning('请先在上一步准备好文案。')
-    return
-  }
-  const parts = raw
-    .split(/\r\n|\n|\r/)
-    .map((segment) => segment.trim())
-    .filter(Boolean)
-  const count = safeSegmentCount.value
-
-  for (let i = 0; i < VIDEO_SEGMENT_MAX; i += 1) {
-    videoScriptSegments.value[i] = ''
-  }
-
-  if (parts.length <= 1) {
-    let cursor = 0
-    for (let i = 0; i < count; i += 1) {
-      videoScriptSegments.value[i] = raw.slice(
-        cursor,
-        cursor + VIDEO_SEGMENT_MAX_CHARS,
-      )
-      cursor += VIDEO_SEGMENT_MAX_CHARS
-    }
-    if (cursor < raw.length) {
-      message.warning('文案超过本批可容纳字数，末尾内容已暂时省略。')
-    } else {
-      message.success('已按顺序自动拆分到各个片段。')
-    }
-    return
-  }
-
-  for (let i = 0; i < count; i += 1) {
-    videoScriptSegments.value[i] = (parts[i] ?? '').slice(0, VIDEO_SEGMENT_MAX_CHARS)
-  }
-  if (parts.length > count) {
-    message.info(`检测到 ${parts.length} 行，仅载入前 ${count} 行。`)
-  } else {
-    message.success('已按行载入口播片段。')
-  }
-}
-
-function onVideoSegmentInput(index: number, value: string | null) {
-  videoScriptSegments.value[index] = (value ?? '').slice(0, VIDEO_SEGMENT_MAX_CHARS)
-}
-
-function estimateGenerateSeconds(scriptLength: number) {
-  return Math.min(180, Math.max(18, Math.round(18 + scriptLength * 0.35)))
-}
-
 function syncPublishCopyFromScript(force = false) {
   if (publishCopyTouched.value && !force) return
   const next = draft.manualScriptDraft.trim().slice(0, 140)
@@ -697,7 +786,7 @@ async function loadRenderResources() {
       listSubtitleTemplateResources({ scope: 'all', limit: 40 }),
     ])
     avatarResourceItems.value = avatars.items.filter((item) => Boolean(item.originalVideoUrl))
-    voiceResourceItems.value = voices.items
+    voiceResourceItems.value = voices.items.filter((item) => !hiddenRecommendedVoiceIds.has(item.id))
     avatarOptions.value = avatarResourceItems.value
       .map((item) => ({ label: item.name, value: item.id }))
     voiceOptions.value = voiceResourceItems.value.map((item) => ({
@@ -786,6 +875,11 @@ async function cloneVoiceFromStudio(body: CreateVoiceResourceDraft) {
     await loadRenderResources()
     selectedVoiceId.value = item.id
     cloneVoiceOpen.value = false
+    if (item.provider === 'local-upload') {
+      voiceSourceMode.value = 'local'
+      message.warning('音频已加入当前创作；模型克隆未通过，已切换为本地语音模式。')
+      return
+    }
     message.success('克隆音频已加入当前创作，并自动选中。')
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
@@ -795,10 +889,60 @@ async function cloneVoiceFromStudio(body: CreateVoiceResourceDraft) {
 }
 
 function resetVoicePreviewState() {
+  clearVoicePreviewProgress()
   voicePreviewUrl.value = null
   voicePreviewHint.value = ''
   voicePreviewMode.value = ''
   voicePreviewDurationSeconds.value = 0
+  voicePreviewProgress.value = 0
+  voicePreviewProgressLabel.value = '准备生成音频'
+}
+
+function clearVoicePreviewProgress() {
+  if (voicePreviewProgressTimer !== null) {
+    window.clearInterval(voicePreviewProgressTimer)
+    voicePreviewProgressTimer = null
+  }
+}
+
+function scrollVoiceShellToOutput() {
+  void nextTick(() => {
+    const shell = voiceShellRef.value
+    if (!shell) return
+    shell.scrollTo({
+      top: shell.scrollHeight,
+      behavior: 'smooth',
+    })
+  })
+}
+
+function startVoicePreviewProgress() {
+  clearVoicePreviewProgress()
+  voicePreviewProgress.value = 8
+  voicePreviewProgressLabel.value = '正在整理文案和音色参数'
+  scrollVoiceShellToOutput()
+  voicePreviewProgressTimer = window.setInterval(() => {
+    const current = voicePreviewProgress.value
+    if (current < 36) {
+      voicePreviewProgress.value = Math.min(36, current + 7)
+      voicePreviewProgressLabel.value = '正在整理文案和音色参数'
+      return
+    }
+    if (current < 72) {
+      voicePreviewProgress.value = Math.min(72, current + 5)
+      voicePreviewProgressLabel.value = '正在请求语音生成接口'
+      return
+    }
+    voicePreviewProgress.value = Math.min(92, current + 2)
+    voicePreviewProgressLabel.value = '正在保存试听音频'
+  }, 420)
+}
+
+function finishVoicePreviewProgress(ok: boolean) {
+  clearVoicePreviewProgress()
+  voicePreviewProgress.value = ok ? 100 : 0
+  voicePreviewProgressLabel.value = ok ? '音频已生成，可以先试听效果' : '生成失败，请调整后重试'
+  scrollVoiceShellToOutput()
 }
 
 function formatSecondsClock(value: number) {
@@ -813,7 +957,18 @@ function nudgeVoicePower(delta: number) {
   selectedVoicePower.value = Math.min(1.5, Math.max(0.6, next))
 }
 
+function buildVoiceTuningPayload() {
+  return {
+    voiceLanguage: selectedVoiceLanguage.value,
+    voiceEmotion: selectedVoiceEmotion.value,
+    voiceEmotionIntensity: selectedVoicePower.value,
+    voiceRate: selectedVoiceRate.value,
+    voiceVolume: selectedVoiceVolume.value,
+  }
+}
+
 async function onGenerateVoicePreview() {
+  ensureStreamingScriptComplete()
   const script = currentWorkflowScript.value
   if (!script) {
     message.warning('请先回到第一步锁定口播文案。')
@@ -830,21 +985,25 @@ async function onGenerateVoicePreview() {
 
   voicePreviewLoading.value = true
   resetVoicePreviewState()
+  startVoicePreviewProgress()
   try {
     const data = await createVoicePreview({
       script,
       voiceResourceId: selectedVoiceId.value,
+      ...buildVoiceTuningPayload(),
     })
     voicePreviewUrl.value = data.audioUrl
     voicePreviewHint.value = data.hint
     voicePreviewMode.value = data.ttsMode
     voicePreviewDurationSeconds.value = data.durationSeconds
+    finishVoicePreviewProgress(true)
     message.success(
       data.ttsMode === 'provider'
         ? `已生成「${data.voiceLabel}」的可试听配音。`
         : '真实 TTS 暂未走通，已生成占位试听音频供流程验收。',
     )
   } catch (e: unknown) {
+    finishVoicePreviewProgress(false)
     message.error(describeHttpOrNetworkError(e))
   } finally {
     voicePreviewLoading.value = false
@@ -1004,6 +1163,7 @@ async function onLearnDouyinHomepage() {
 }
 
 function commitScriptForNextStep() {
+  ensureStreamingScriptComplete()
   const text = draft.manualScriptDraft.trim()
   if (!text) {
     message.warning('请先整理一份可用文案。')
@@ -1049,6 +1209,9 @@ function goPrev() {
 }
 
 function goNext() {
+  if (activeStep.value === 1) {
+    ensureStreamingScriptComplete()
+  }
   if (activeStep.value === 2) {
     if (!selectedAvatarId.value) {
       message.warning('请先选择一个数字人视频。')
@@ -1060,7 +1223,7 @@ function goNext() {
     }
   }
   if (activeStep.value === 3 && generatedVideoCount.value <= 0) {
-    message.warning('请先至少生成一条对口型视频，再进入自动发布。')
+    message.warning('请先生成整段对口型视频，再进入自动发布。')
     return
   }
   activeStep.value = Math.min(4, activeStep.value + 1)
@@ -1090,6 +1253,7 @@ async function onFetchVideoMeta() {
   try {
     const meta = await fetchVideoMeta({ sourceVideoUrl: link.normalizedUrl })
     draft.setVideoMeta(meta)
+    rememberRecentExtraction(meta, link.normalizedUrl)
     if (!isDouyinNormalizedUrl(link.normalizedUrl)) {
       resetOralScriptPolish()
       draft.prefillManualScriptFromMeta(meta)
@@ -1131,12 +1295,12 @@ async function onFetchVideoMeta() {
 
     if (result.transcript) {
       resetOralScriptPolish()
-      applyTranscriptToEditableScript({
+      const applied = applySafeTranscriptToEditableScript({
         fullText: result.transcript.fullText,
         segments: result.transcript.segments,
         transcriptId: result.transcript.transcriptId,
       })
-      message.success('抖音视频已下载并完成文案转写。')
+      if (applied) message.success('抖音视频已下载并完成文案转写。')
     }
     if (result.transcriptionError) {
       message.warning(result.transcriptionError)
@@ -1162,6 +1326,7 @@ function onUseScript() {
 }
 
 function onUseScriptAndNext() {
+  ensureStreamingScriptComplete()
   if (draft.manualScriptDraft.trim()) {
     draft.commitManualScriptToPipeline()
     syncPublishCopyFromScript()
@@ -1180,12 +1345,12 @@ async function onRetranscribeFromLocal() {
     const result = await transcribeSavedVideo({ fileName: name })
     if (result.transcript) {
       resetOralScriptPolish()
-      applyTranscriptToEditableScript({
+      const applied = applySafeTranscriptToEditableScript({
         fullText: result.transcript.fullText,
         segments: result.transcript.segments,
         transcriptId: result.transcript.transcriptId,
       })
-      message.success('已从本地保存视频重新生成文案。')
+      if (applied) message.success('已从本地保存视频重新生成文案。')
     }
     if (result.transcriptionError) {
       message.warning(result.transcriptionError)
@@ -1194,27 +1359,6 @@ async function onRetranscribeFromLocal() {
     message.error(describeHttpOrNetworkError(e))
   } finally {
     retranscribingLocal.value = false
-  }
-}
-
-async function onTranscribeUpload(options: { fileList: UploadFileInfo[] }) {
-  const raw = options.fileList[0]?.file
-  const file = raw instanceof File ? raw : null
-  if (!file?.size) return
-  transcribeUploadLoading.value = true
-  try {
-    const data = await transcribeUploadFile(file)
-    resetOralScriptPolish()
-    applyTranscriptToEditableScript({
-      fullText: data.fullText,
-      segments: data.segments,
-      transcriptId: data.transcriptId,
-    })
-    message.success('上传文件已完成转写。')
-  } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
-  } finally {
-    transcribeUploadLoading.value = false
   }
 }
 
@@ -1228,156 +1372,16 @@ async function onTranscribeNonDouyinFromUrl() {
   try {
     const data = await transcribeFromUrl({ sourceVideoUrl: link.normalizedUrl })
     resetOralScriptPolish()
-    applyTranscriptToEditableScript({
+    const applied = applySafeTranscriptToEditableScript({
       fullText: data.fullText,
       segments: data.segments,
       transcriptId: data.transcriptId,
     })
-    message.success('当前链接内容已完成转写。')
+    if (applied) message.success('当前链接内容已完成转写。')
   } catch (e: unknown) {
     message.error(describeHttpOrNetworkError(e))
   } finally {
     transcribeUrlLoading.value = false
-  }
-}
-
-function cancelGenerateQueue() {
-  if (!generateVideoLoading.value) return
-  generateQueueStopRequested.value = true
-  generateBatchAbort.value?.abort()
-}
-
-async function onGenerateVideo() {
-  const count = safeSegmentCount.value
-  const segments = videoScriptSegments.value.slice(0, count).map((segment) => segment.trim())
-  const toRun = segments
-    .map((segment, index) => ({ s: segment, idx: index }))
-    .filter(({ s }) => s.length >= 2)
-
-  if (toRun.length === 0) {
-    message.warning('请至少填写一条口播内容，或从上一步文案载入。')
-    return
-  }
-  if (!selectedAvatarId.value) {
-    message.warning('请先选择一个数字人视频。')
-    return
-  }
-  if (!selectedVoiceId.value) {
-    message.warning('请先选择一个配音音色。')
-    return
-  }
-
-  clearAllSegmentProgressTimers()
-  revokeGeneratedPreviewObjectUrls()
-  generateQueueStopRequested.value = false
-  const controller = new AbortController()
-  generateBatchAbort.value = controller
-  generateVideoLoading.value = true
-  generateVideoEstimatedTotalSec.value = toRun.reduce(
-    (total, { s }) => total + Math.min(600, estimateGenerateSeconds(s.length) + 90),
-    0,
-  )
-  segmentGenStates.value = Array.from({ length: VIDEO_SEGMENT_MAX }, emptySegmentGenState)
-
-  for (let i = 0; i < count; i += 1) {
-    if (segments[i].length < 2) {
-      segmentGenStates.value[i] = {
-        ...emptySegmentGenState(),
-        statusLabel: '未填写，已跳过',
-      }
-    }
-  }
-
-  toRun.forEach(({ idx }, index) => {
-    segmentGenStates.value[idx] = {
-      ...emptySegmentGenState(),
-      statusLabel: `排队中（${index + 1}/${toRun.length}）`,
-    }
-  })
-
-  let stoppedByUser = false
-
-  try {
-    for (let i = 0; i < toRun.length; i += 1) {
-      if (generateQueueStopRequested.value) {
-        stoppedByUser = true
-        markGenerateSlotsCancelledFrom(toRun, i, false)
-        break
-      }
-
-      const { s: script, idx } = toRun[i]
-      const estimatedSec = Math.min(600, estimateGenerateSeconds(script.length) + 90)
-      startFakeProgressForSegment(idx, estimatedSec)
-
-      try {
-        const result = await createLipSyncPreview(
-          {
-            script,
-            avatarResourceId: selectedAvatarId.value,
-            voiceResourceId: selectedVoiceId.value,
-          },
-          { signal: controller.signal },
-        )
-        clearSegmentProgressTimer(idx)
-        let previewVideoUrl: string | null = null
-        let previewHint = result.hint
-        let previewLoadFailed = false
-        if (result.videoUrl) {
-          try {
-            previewVideoUrl = await resolveGeneratedPreviewVideoUrl(result.videoUrl)
-          } catch (previewError: unknown) {
-            previewLoadFailed = true
-            previewHint = `${result.hint} 预览视频加载失败：${describeHttpOrNetworkError(
-              previewError,
-            )}`
-          }
-        }
-        segmentGenStates.value[idx] = {
-          progress: 100,
-          processing: false,
-          statusLabel: previewLoadFailed ? '本段已完成（预览待重试）' : '本段已完成',
-          videoUrl: previewVideoUrl,
-          hint: previewHint,
-          optimizedScript: result.optimizedScript,
-        }
-      } catch (e: unknown) {
-        clearSegmentProgressTimer(idx)
-        if (isRequestCanceled(e) || generateQueueStopRequested.value) {
-          stoppedByUser = true
-          markGenerateSlotsCancelledFrom(toRun, i, true)
-          break
-        }
-        segmentGenStates.value[idx] = {
-          progress: 100,
-          processing: false,
-          statusLabel: '本段失败',
-          videoUrl: null,
-          hint: '',
-          optimizedScript: '',
-          error: describeHttpOrNetworkError(e),
-        }
-      }
-    }
-
-    const okCount = segmentGenStates.value.slice(0, count).filter((item) => item.videoUrl).length
-    if (okCount > 0) {
-      message.success(
-        stoppedByUser
-          ? `已生成 ${okCount} 条对口型视频，并停止了后续任务。`
-          : `已生成 ${okCount} 条对口型视频。`,
-      )
-    } else if (stoppedByUser) {
-      message.info('已取消，本次没有成功生成片段。')
-    } else {
-      message.warning('这一批片段都还没有成功出片，请检查错误后重试。')
-    }
-  } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
-  } finally {
-    clearAllSegmentProgressTimers()
-    generateBatchAbort.value = null
-    generateQueueStopRequested.value = false
-    generateVideoLoading.value = false
   }
 }
 
@@ -1411,6 +1415,7 @@ function formatBenchmarkSampleDate(value: string) {
 }
 
 async function onGenerateSubtitlePreview() {
+  ensureStreamingScriptComplete()
   const script = currentWorkflowScript.value
   if (!script) {
     message.warning(
@@ -1449,6 +1454,7 @@ async function onGenerateSubtitlePreview() {
       voiceResourceId: selectedVoiceId.value,
       subtitleTemplateId: selectedSubtitleTemplateId.value,
       previewSeconds: 5,
+      ...buildVoiceTuningPayload(),
     })
     subtitleWorkflowDraftId.value = data.draftId
     subtitleWorkflowJson.value = data.subtitleJson
@@ -1485,15 +1491,6 @@ async function onFinalizeSubtitleWorkflow() {
   }
 }
 
-watch(videoSegmentCount, (value) => {
-  if (value == null || Number.isNaN(Number(value))) {
-    videoSegmentCount.value = 3
-    return
-  }
-  const next = Math.min(VIDEO_SEGMENT_MAX, Math.max(1, Math.round(Number(value))))
-  if (next !== value) videoSegmentCount.value = next
-})
-
 watch(
   () => route.query.avatarId,
   (value) => {
@@ -1528,6 +1525,8 @@ watch(
 )
 
 onMounted(() => {
+  loadRecentExtractionRecords()
+  clearInternalPipelineScriptDraft()
   void loadRenderResources()
   void refreshDyCookieStatus()
   void refreshPipelineHealth()
@@ -1535,8 +1534,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  clearVoicePreviewProgress()
   cancelStream()
-  clearAllSegmentProgressTimers()
   revokeGeneratedPreviewObjectUrls()
   clearAvatarCoverVideoUrls()
 })
@@ -1726,7 +1725,7 @@ onUnmounted(() => {
                     class="gradient-btn"
                     @click="onFetchVideoMeta"
                   >
-                    获取视频信息
+                    提取文案
                   </n-button>
                   <n-tag
                     v-if="dyCookieConfigured === true"
@@ -1746,21 +1745,70 @@ onUnmounted(() => {
                   </n-tag>
                 </n-space>
 
+                <section class="recent-extract">
+                  <div class="recent-extract__head">
+                    <div>
+                      <span>最近提取记录</span>
+                      <strong>点击左侧视频预览复制链接</strong>
+                    </div>
+                    <n-tag size="small" :bordered="false" type="info">
+                      {{ recentExtractionRecords.length ? `${recentExtractionRecords.length} 条` : '暂无记录' }}
+                    </n-tag>
+                  </div>
+
+                  <div v-if="recentExtractionRecords.length" class="recent-extract__list">
+                    <article
+                      v-for="record in recentExtractionRecords"
+                      :key="record.id"
+                      class="recent-extract-card"
+                    >
+                      <button
+                        type="button"
+                        class="recent-extract-card__preview"
+                        title="点击复制短视频链接"
+                        @click="copyRecentExtractionLink(record)"
+                      >
+                        <video
+                          v-if="record.videoUrl"
+                          :src="record.videoUrl"
+                          :poster="record.coverUrl || undefined"
+                          muted
+                          playsinline
+                          preload="metadata"
+                        ></video>
+                        <img
+                          v-else-if="record.coverUrl"
+                          :src="record.coverUrl"
+                          :alt="record.title"
+                          loading="lazy"
+                        />
+                        <span v-else class="recent-extract-card__fallback">视频</span>
+                        <i>复制</i>
+                      </button>
+
+                      <div class="recent-extract-card__body">
+                        <div class="recent-extract-card__title">
+                          <n-tag size="small" round :bordered="false" type="default">
+                            {{ record.platform }}
+                          </n-tag>
+                          <strong>{{ record.title }}</strong>
+                        </div>
+                        <p>{{ record.summary }}</p>
+                        <small>{{ formatRecentExtractionTime(record.extractedAt) }}</small>
+                      </div>
+                    </article>
+                  </div>
+
+                  <div v-else class="recent-extract__empty">
+                    提取一次爆款链接后，这里会自动保存最近记录。
+                  </div>
+                </section>
+
                 <n-text v-if="pipelineHealthError" depth="3" class="helper-text">
                   {{ pipelineHealthError }}
                 </n-text>
 
                 <div class="input-actions input-actions--triple">
-                  <n-upload
-                    :show-file-list="false"
-                    :default-upload="false"
-                    accept="audio/*,video/*,.mp3,.wav,.m4a,.mp4,.webm,.mov,.mkv"
-                    @change="onTranscribeUpload"
-                  >
-                    <n-button :loading="transcribeUploadLoading" block secondary>
-                      上传音视频转写
-                    </n-button>
-                  </n-upload>
                   <n-button
                     v-if="canTranscribeNonDouyinUrl"
                     block
@@ -1804,28 +1852,47 @@ onUnmounted(() => {
                     </div>
                   </n-alert>
 
-                  <n-descriptions
-                    label-placement="left"
-                    bordered
-                    size="small"
-                    :column="1"
-                    class="meta-board"
-                  >
-                    <n-descriptions-item label="标题">
-                      {{ draft.videoMeta.title || '暂无' }}
-                    </n-descriptions-item>
-                    <n-descriptions-item label="点赞">
-                      {{ formatStatCount(draft.videoMeta.likeCount) }}
-                    </n-descriptions-item>
-                    <n-descriptions-item label="播放">
-                      {{ formatStatCount(draft.videoMeta.playCount) }}
-                    </n-descriptions-item>
-                    <n-descriptions-item label="内容">
-                      <div class="meta-readonly">
-                        {{ draft.videoMeta.content || draft.videoMeta.description || '暂无可解析内容' }}
+                  <div class="meta-board">
+                    <div class="meta-board__header">
+                      <div>
+                        <span class="meta-board__eyebrow">获取信息</span>
+                        <strong>视频基础内容</strong>
                       </div>
-                    </n-descriptions-item>
-                  </n-descriptions>
+                      <n-tag size="small" round :bordered="false" type="success">已解析</n-tag>
+                    </div>
+
+                    <div class="meta-board__summary">
+                      <div class="meta-chip meta-chip--title">
+                        <span>标题</span>
+                        <strong>{{ draft.videoMeta.title || '暂无标题' }}</strong>
+                      </div>
+                      <div class="meta-chip">
+                        <span>点赞</span>
+                        <strong>{{ formatStatCount(draft.videoMeta.likeCount) }}</strong>
+                      </div>
+                    </div>
+
+                    <div class="meta-section">
+                      <span>内容</span>
+                      <p>{{ draft.videoMeta.content || draft.videoMeta.description || '暂无可解析内容' }}</p>
+                    </div>
+
+                    <div class="meta-section meta-section--tags">
+                      <span>标签</span>
+                      <div v-if="draft.videoMeta.tags?.length" class="meta-tag-list">
+                        <n-tag
+                          v-for="(tag, index) in (draft.videoMeta.tags ?? []).slice(0, 8)"
+                          :key="`${tag}-${index}`"
+                          size="small"
+                          round
+                          :bordered="false"
+                        >
+                          #{{ tag.replace(/^#/, '') }}
+                        </n-tag>
+                      </div>
+                      <p v-else class="meta-empty">暂无标签</p>
+                    </div>
+                  </div>
                 </template>
               </div>
             </section>
@@ -1899,7 +1966,7 @@ onUnmounted(() => {
           <div class="script-side__head">
             <div>
               <n-text strong>文案生成结果</n-text>
-              <p>提取的文案</p>
+              <p>按句意自动分段</p>
             </div>
             <n-space size="small">
               <n-tag size="small" :bordered="false" type="info">
@@ -2043,7 +2110,7 @@ onUnmounted(() => {
             </div>
 
             <template v-if="voiceSourceMode === 'tts'">
-              <div class="step-two-voice-shell">
+              <div ref="voiceShellRef" class="step-two-voice-shell">
                 <div class="step-two-control-grid">
                 <article class="step-two-control-card">
                   <span>选择音色</span>
@@ -2147,22 +2214,40 @@ onUnmounted(() => {
                 :disabled="!voiceReadyForPreview || voicePreviewLoading"
                 @click="onGenerateVoicePreview"
               >
-                {{ voicePreviewLoading ? '正在生成试听音频...' : '生成音频' }}
+                {{ voicePreviewLoading ? '正在生成音频...' : '生成音频' }}
               </button>
 
+              <Transition name="voice-progress">
+                <article
+                  v-if="voicePreviewLoading || voicePreviewProgress > 0"
+                  class="voice-generate-progress"
+                  :class="{ 'voice-generate-progress--done': voicePreviewProgress >= 100 }"
+                >
+                  <div class="voice-generate-progress__head">
+                    <span>生成进度</span>
+                    <strong>{{ Math.round(voicePreviewProgress) }}%</strong>
+                  </div>
+                  <div class="voice-generate-progress__bar">
+                    <i :style="{ width: `${voicePreviewProgress}%` }"></i>
+                  </div>
+                  <p>{{ voicePreviewProgressLabel }}</p>
+                </article>
+              </Transition>
+
               <article
+                v-if="voicePreviewUrl"
                 class="voice-preview-card"
                 :class="{ 'voice-preview-card--ready': Boolean(voicePreviewUrl) }"
               >
                 <div class="voice-preview-card__head">
                   <div>
-                    <strong>成品配音已就绪</strong>
+                    <strong>试听音频已生成</strong>
                     <p>
                       {{
                         voicePreviewHint ||
                         (voicePreviewMode === 'mock'
                           ? '当前返回的是联调用预览音频。'
-                          : '生成后可直接试听，确认声音再进入对口型。')
+                          : '可以先试听这段配音，确认声音后再进入对口型。')
                       }}
                     </p>
                   </div>
@@ -2176,13 +2261,13 @@ onUnmounted(() => {
                   </n-tag>
                 </div>
 
-                <div v-if="voicePreviewUrl" class="voice-preview-card__player">
+                <div class="voice-preview-card__player">
                   <button
                     type="button"
                     class="voice-preview-card__play"
                     @click="toggleAudioPlayback('voice-preview', resolveProtectedMediaUrl(voicePreviewUrl))"
                   >
-                    {{ audioPlayingId === 'voice-preview' ? '暂停' : '播放' }}
+                    {{ audioPlayingId === 'voice-preview' ? '暂停' : '试听' }}
                   </button>
                   <div>
                     <strong>{{ selectedVoiceLabel }}</strong>
@@ -2191,10 +2276,6 @@ onUnmounted(() => {
                   <n-button quaternary size="small" type="primary" @click="onDownloadVoicePreview">
                     下载
                   </n-button>
-                </div>
-                <div v-else class="voice-preview-card__empty">
-                  <strong>点击上方按钮生成试听。</strong>
-                  <p>生成结果会落到受保护地址，便于你直接验证克隆声音是否合适。</p>
                 </div>
               </article>
               </div>
@@ -2401,26 +2482,59 @@ onUnmounted(() => {
               <span class="title-icon">设</span>
               <div>
                 <strong>生成参数</strong>
-                <p>确认本批分段数量和素材来源</p>
+                <p>确认完整文案和素材来源</p>
               </div>
             </div>
 
-            <div class="summary-stack">
+            <div class="summary-stack step-three-summary">
               <div class="summary-pill">
-                <span>数字人视频</span>
-                <strong>{{ selectedAvatarLabel }}</strong>
+                <span>数字人</span>
+                <strong class="compact-label" :title="selectedAvatarLabel">{{ selectedAvatarLabel }}</strong>
               </div>
               <div class="summary-pill">
-                <span>配音音色</span>
-                <strong>{{ selectedVoiceLabel }}</strong>
+                <span>音色</span>
+                <strong class="compact-label" :title="selectedVoiceLabel">{{ selectedVoiceLabel }}</strong>
               </div>
               <div class="summary-pill">
-                <span>本批生成条数</span>
+                <span>字幕模板</span>
                 <strong>{{ selectedSubtitleTemplateLabel }}</strong>
               </div>
             </div>
 
             <div class="workflow-action-card">
+              <div
+                class="workflow-progress-card"
+                :style="{ '--workflow-percent': `${workflowProgressState.percent}%` }"
+                :class="{
+                  'workflow-progress-card--running':
+                    subtitleWorkflowPreviewLoading || subtitleWorkflowFinalizeLoading,
+                  'workflow-progress-card--done': Boolean(subtitleWorkflowFinalUrl),
+                }"
+              >
+                <div class="workflow-progress-card__head">
+                  <div>
+                    <span>成片进度</span>
+                    <strong>{{ workflowProgressState.status }}</strong>
+                    <p>{{ workflowProgressState.hint }}</p>
+                  </div>
+                  <b>{{ workflowProgressState.percent }}%</b>
+                </div>
+                <div class="workflow-progress-track">
+                  <i :style="{ width: `${workflowProgressState.percent}%` }"></i>
+                </div>
+                <ol class="workflow-progress-steps">
+                  <li
+                    v-for="(step, index) in workflowSimpleSteps"
+                    :key="step.label"
+                    :class="`is-${step.status}`"
+                  >
+                    <b>{{ step.status === 'done' ? '✓' : index + 1 }}</b>
+                    <div>
+                      <strong>{{ step.label }}</strong>
+                    </div>
+                  </li>
+                </ol>
+              </div>
               <div class="segment-count-bar">
                 <n-text depth="3">当前链路：TTS → subtitle.json → 5 秒预览 → 对口型 → 最终合成</n-text>
                 <n-tag size="small" :bordered="false" type="info">
@@ -2456,70 +2570,27 @@ onUnmounted(() => {
                   确认并输出最终视频
                 </n-button>
               </div>
-              <n-text depth="3" class="helper-text">
+              <n-text depth="3" class="helper-text workflow-helper-note">
                 这条流程会先生成 TTS，再回填时间轴并生成 subtitle.json；确认 5 秒预览后再输出最终成片。
               </n-text>
             </div>
-
-            <div class="segment-count-bar">
-              <n-text depth="3">支持 1 到 {{ VIDEO_SEGMENT_MAX }} 条</n-text>
-              <n-input-number
-                v-model:value="videoSegmentCount"
-                :min="1"
-                :max="VIDEO_SEGMENT_MAX"
-                :disabled="generateVideoLoading"
-                size="small"
-              />
-            </div>
-
-            <div class="input-actions">
-              <n-button block secondary :disabled="generateVideoLoading" @click="importSegmentsFromManualDraft">
-                从第一步文案载入
-              </n-button>
-              <n-button
-                block
-                type="primary"
-                class="gradient-btn"
-                :disabled="!canGenerateVideoPreview || generateVideoLoading"
-                :loading="generateVideoLoading"
-                @click="onGenerateVideo"
-              >
-                立即生成对口型视频
-              </n-button>
-            </div>
-
-            <n-button
-              v-if="generateVideoLoading"
-              block
-              secondary
-              type="error"
-              style="margin-top: 10px"
-              @click="cancelGenerateQueue"
-            >
-              停止当前批次
-            </n-button>
-
-            <n-text
-              v-if="generateVideoLoading || generateVideoEstimatedTotalSec > 0"
-              depth="3"
-              class="helper-text"
-            >
-              本批预计总耗时约 {{ generateVideoEstimatedTotalSec }} 秒，仅作参考。
-            </n-text>
           </section>
 
-          <section class="edit-options">
-            <div class="switch-row switch-row--card">
-              <span>文案已就绪</span>
-              <b>{{ draft.manualScriptDraft.trim() ? '是' : '否' }}</b>
+          <section class="edit-options step-three-checks">
+            <div
+              class="switch-row switch-row--card status-check"
+              :class="currentWorkflowScript ? 'status-check--ok' : 'status-check--fail'"
+            >
+              <span>文案</span>
+              <b aria-label="文案就绪状态">{{ currentWorkflowScript ? '✓' : '×' }}</b>
             </div>
-            <div class="switch-row switch-row--card">
+            <div class="switch-row switch-row--card status-check">
               <span>数字人视频</span>
-              <b>{{ selectedAvatarLabel }}</b>
+              <b class="compact-label" :title="selectedAvatarLabel">{{ selectedAvatarLabel }}</b>
             </div>
-            <div class="switch-row switch-row--card">
+            <div class="switch-row switch-row--card status-check">
               <span>音色驱动</span>
-              <b>{{ selectedVoiceLabel }}</b>
+              <b class="compact-label" :title="selectedVoiceLabel">{{ selectedVoiceLabel }}</b>
             </div>
           </section>
         </div>
@@ -2527,13 +2598,20 @@ onUnmounted(() => {
         <section class="panel subtitle-panel">
           <div class="section-title section-title--between">
             <div class="section-title__main">
-              <span class="title-icon">段</span>
+              <span class="title-icon">文</span>
               <div>
-                <strong>口播片段</strong>
-                <p>每段最多 {{ VIDEO_SEGMENT_MAX_CHARS }} 字</p>
+                <strong>整段文案</strong>
+                <p>直接使用第一步确认的完整口播稿</p>
               </div>
             </div>
-            <n-tag size="small" :bordered="false">{{ safeSegmentCount }} 条</n-tag>
+            <n-tag size="small" :bordered="false">{{ currentWorkflowScript.length }} 字</n-tag>
+          </div>
+
+          <div class="full-script-preview" :class="{ 'full-script-preview--empty': !currentWorkflowScript }">
+            <span>{{ currentWorkflowScript ? '当前整段口播' : '等待文案' }}</span>
+            <p>
+              {{ currentWorkflowScript || '请先在第一步抓取、转写或手动整理一份口播文案，这里会直接使用整段文案进入 TTS、字幕和对口型流程。' }}
+            </p>
           </div>
 
           <div v-if="subtitleWorkflowJson" class="workflow-preview-stack">
@@ -2547,9 +2625,13 @@ onUnmounted(() => {
               </n-tag>
             </div>
 
-            <ol class="subtitle-list">
-              <li v-for="cue in subtitleWorkflowJson.cues.slice(0, 6)" :key="cue.id">
-                <span>{{ formatCueTime(cue.startMs) }}</span>
+            <div class="subtitle-table-head">
+              <span>时间轴</span>
+              <span>口播文案</span>
+            </div>
+            <ol class="subtitle-list subtitle-table">
+              <li v-for="cue in subtitleWorkflowJson.cues" :key="cue.id">
+                <span>{{ formatCueTime(cue.startMs) }} - {{ formatCueTime(cue.endMs) }}</span>
                 <p>{{ cue.text }}</p>
               </li>
             </ol>
@@ -2580,95 +2662,23 @@ onUnmounted(() => {
           </div>
           <div v-else class="empty-block">
             <strong>先生成 5 秒字幕预览</strong>
-            <p>这里会先展示 subtitle.json 的断句和预览视频，确认后再输出最终成片。</p>
-          </div>
-
-          <div class="segment-editor">
-            <div v-for="index in safeSegmentCount" :key="index" class="video-segment-row">
-              <n-text class="video-segment-label" depth="3">第 {{ index }} 段</n-text>
-              <n-input
-                :value="videoScriptSegments[index - 1] ?? ''"
-                :placeholder="segmentInputPlaceholder(index)"
-                clearable
-                :maxlength="VIDEO_SEGMENT_MAX_CHARS"
-                show-count
-                :disabled="generateVideoLoading"
-                class="video-segment-input"
-                @update:value="(value) => onVideoSegmentInput(index - 1, value)"
-              />
-            </div>
-          </div>
-
-          <div v-if="showSegmentResultBlocks" class="result-stack">
-            <div
-              v-for="slot in safeSegmentCount"
-              :key="`segment-result-${slot}`"
-              class="video-segment-result"
-            >
-              <div class="segment-result__head">
-                <n-text strong>第 {{ slot }} 段</n-text>
-                <n-tag
-                  v-if="segmentGenStates[slot - 1]?.videoUrl"
-                  size="small"
-                  :bordered="false"
-                  type="success"
-                >
-                  已出片
-                </n-tag>
-              </div>
-              <n-progress
-                type="line"
-                :percentage="segmentGenStates[slot - 1]?.progress ?? 0"
-                :processing="segmentGenStates[slot - 1]?.processing ?? false"
-                indicator-placement="inside"
-              />
-              <n-text
-                v-if="segmentGenStates[slot - 1]?.statusLabel"
-                depth="3"
-                class="helper-text"
-              >
-                {{ segmentGenStates[slot - 1]?.statusLabel }}
-              </n-text>
-              <n-alert
-                v-if="segmentGenStates[slot - 1]?.error"
-                type="error"
-                :show-icon="false"
-                style="margin-top: 8px"
-              >
-                {{ segmentGenStates[slot - 1]?.error }}
-              </n-alert>
-              <n-alert
-                v-else-if="segmentGenStates[slot - 1]?.hint"
-                type="info"
-                :show-icon="false"
-                style="margin-top: 8px"
-              >
-                {{ segmentGenStates[slot - 1]?.hint }}
-              </n-alert>
-              <div v-if="segmentGenStates[slot - 1]?.videoUrl" class="video-preview-wrap">
-                <video
-                  class="video-preview"
-                  controls
-                  playsinline
-                  preload="metadata"
-                  :src="segmentGenStates[slot - 1]?.videoUrl ?? undefined"
-                />
-              </div>
-            </div>
+            <p>这里会展示整段文案生成的 subtitle.json 断句和预览视频，确认后再输出最终成片。</p>
           </div>
         </section>
 
         <aside class="preview-side">
           <div class="preview-head">
             <n-text strong>生成预览</n-text>
-            <n-tag size="small" :bordered="false" type="info">{{ generatedVideoCount }} 条成片</n-tag>
+            <n-tag size="small" :bordered="false" type="info">
+              {{ generatedVideoCount ? '已生成' : '待生成' }}
+            </n-tag>
           </div>
           <div class="phone-preview">
             <div v-if="firstReadyVideoUrl" class="phone-face phone-face--video">
               <video :src="firstReadyVideoUrl" controls playsinline preload="metadata" />
             </div>
             <div v-else class="phone-face">
-              <span>生成后会在这里显示首条预览视频</span>
+              <span>生成后会在这里显示整段预览视频</span>
             </div>
           </div>
         </aside>
@@ -2680,7 +2690,7 @@ onUnmounted(() => {
             <h1>第四步：自动发布</h1>
             <p>先把四步流程排完整，发布账号与计划沿用对标页结构，便于后续继续接入。</p>
             <div class="publish-stats">
-              <div><strong>{{ generatedVideoCount }}</strong><span>已生成片段</span></div>
+              <div><strong>{{ generatedVideoCount }}</strong><span>已生成成片</span></div>
               <div><strong>{{ publishPlatforms.length }}</strong><span>预设平台</span></div>
               <div><strong>0</strong><span>已连接账号</span></div>
             </div>
@@ -2716,11 +2726,11 @@ onUnmounted(() => {
             </div>
             <div class="publish-result-list">
               <div v-for="item in publishReadyItems" :key="item.index" class="publish-result-item">
-                <strong>第 {{ item.index }} 条</strong>
+                <strong>整段成片</strong>
                 <p>{{ item.text || '已生成可发布视频' }}</p>
               </div>
               <div v-if="!publishReadyItems.length" class="plan-empty">
-                先回到第三步至少生成一条对口型视频。
+                先回到第三步生成整段对口型视频。
               </div>
             </div>
           </section>
@@ -2821,11 +2831,15 @@ onUnmounted(() => {
   --vc-pad-y: clamp(8px, 1.2vw, 14px);
   --vc-pad-x: clamp(12px, 1.6vw, 20px);
   --vc-gap: clamp(10px, 1.2vw, 15px);
-  --vc-gap-lg: clamp(12px, 1.4vw, 18px);
+  --vc-gap-lg: clamp(12px, 1.05vw, 18px);
   --vc-panel-pad: clamp(10px, 1.05vw, 14px);
   --vc-radius: clamp(12px, 0.95vw, 16px);
   --vc-h1: clamp(17px, 0.75vw + 14px, 20px);
   --vc-aside-w: min(100%, clamp(200px, 24vw, 252px));
+  --vc-scrollbar-size: 8px;
+  --vc-scrollbar-thumb: rgba(75, 107, 255, 0.28);
+  --vc-scrollbar-thumb-hover: rgba(75, 107, 255, 0.48);
+  --vc-scrollbar-track: rgba(226, 233, 248, 0.45);
 
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -2840,6 +2854,99 @@ onUnmounted(() => {
     radial-gradient(circle at 84% 20%, rgba(75, 107, 255, 0.12), transparent 26%),
     radial-gradient(circle at 34% 62%, rgba(75, 199, 187, 0.08), transparent 28%),
     linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.18));
+}
+
+.script-side,
+.preview-side,
+.step-two-script-scroll,
+.avatar-strip--filled,
+.workspace > .panel,
+.step-two-workbench > .panel,
+.edit-main > .panel,
+.edit-layout > .panel,
+.publish-left > .panel,
+.publish-center > .panel {
+  scrollbar-width: thin;
+  scrollbar-color: var(--vc-scrollbar-thumb) transparent;
+}
+
+.script-side::-webkit-scrollbar,
+.preview-side::-webkit-scrollbar,
+.step-two-script-scroll::-webkit-scrollbar,
+.avatar-strip--filled::-webkit-scrollbar,
+.workspace > .panel::-webkit-scrollbar,
+.step-two-workbench > .panel::-webkit-scrollbar,
+.edit-main > .panel::-webkit-scrollbar,
+.edit-layout > .panel::-webkit-scrollbar,
+.publish-left > .panel::-webkit-scrollbar,
+.publish-center > .panel::-webkit-scrollbar {
+  width: var(--vc-scrollbar-size);
+  height: var(--vc-scrollbar-size);
+}
+
+.script-side::-webkit-scrollbar-track,
+.preview-side::-webkit-scrollbar-track,
+.step-two-script-scroll::-webkit-scrollbar-track,
+.avatar-strip--filled::-webkit-scrollbar-track,
+.workspace > .panel::-webkit-scrollbar-track,
+.step-two-workbench > .panel::-webkit-scrollbar-track,
+.edit-main > .panel::-webkit-scrollbar-track,
+.edit-layout > .panel::-webkit-scrollbar-track,
+.publish-left > .panel::-webkit-scrollbar-track,
+.publish-center > .panel::-webkit-scrollbar-track {
+  margin: 10px 2px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.avatar-strip--filled::-webkit-scrollbar-track {
+  margin: 2px 10px;
+}
+
+.script-side::-webkit-scrollbar-thumb,
+.preview-side::-webkit-scrollbar-thumb,
+.step-two-script-scroll::-webkit-scrollbar-thumb,
+.avatar-strip--filled::-webkit-scrollbar-thumb,
+.workspace > .panel::-webkit-scrollbar-thumb,
+.step-two-workbench > .panel::-webkit-scrollbar-thumb,
+.edit-main > .panel::-webkit-scrollbar-thumb,
+.edit-layout > .panel::-webkit-scrollbar-thumb,
+.publish-left > .panel::-webkit-scrollbar-thumb,
+.publish-center > .panel::-webkit-scrollbar-thumb {
+  min-height: 42px;
+  border: 2px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, var(--vc-scrollbar-thumb), rgba(75, 199, 187, 0.36))
+    padding-box;
+}
+
+.script-side:hover,
+.preview-side:hover,
+.step-two-script-scroll:hover,
+.avatar-strip--filled:hover,
+.workspace > .panel:hover,
+.step-two-workbench > .panel:hover,
+.edit-main > .panel:hover,
+.edit-layout > .panel:hover,
+.publish-left > .panel:hover,
+.publish-center > .panel:hover {
+  scrollbar-color: var(--vc-scrollbar-thumb-hover) transparent;
+}
+
+.script-side:hover::-webkit-scrollbar-thumb,
+.preview-side:hover::-webkit-scrollbar-thumb,
+.step-two-script-scroll:hover::-webkit-scrollbar-thumb,
+.avatar-strip--filled:hover::-webkit-scrollbar-thumb,
+.workspace > .panel:hover::-webkit-scrollbar-thumb,
+.step-two-workbench > .panel:hover::-webkit-scrollbar-thumb,
+.edit-main > .panel:hover::-webkit-scrollbar-thumb,
+.edit-layout > .panel:hover::-webkit-scrollbar-thumb,
+.publish-left > .panel:hover::-webkit-scrollbar-thumb,
+.publish-center > .panel:hover::-webkit-scrollbar-thumb {
+  background:
+    linear-gradient(180deg, var(--vc-scrollbar-thumb-hover), rgba(75, 199, 187, 0.52))
+    padding-box;
 }
 
 .create-topbar {
@@ -2926,10 +3033,10 @@ onUnmounted(() => {
 
 .create-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, var(--vc-aside-w));
-  gap: var(--vc-gap-lg);
+  grid-template-columns: minmax(0, 1fr) minmax(216px, var(--vc-aside-w));
+  gap: clamp(12px, 1.05vw, 18px);
   min-height: 0;
-  padding: var(--vc-pad-y) var(--vc-pad-x) 0;
+  padding: clamp(8px, 1vw, 14px) clamp(10px, 1.45vw, 18px) 0;
   align-items: stretch;
 }
 
@@ -2948,8 +3055,8 @@ onUnmounted(() => {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr);
-  gap: var(--vc-gap-lg);
+  grid-template-columns: minmax(300px, 0.9fr) minmax(420px, 1.1fr);
+  gap: clamp(12px, 1.1vw, 18px);
   min-height: 0;
   align-items: stretch;
 }
@@ -3004,7 +3111,8 @@ onUnmounted(() => {
 
 .panel--source {
   display: grid;
-  gap: var(--vc-gap-lg);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: clamp(12px, 1vw, 16px);
 }
 
 .panel--outline {
@@ -3015,23 +3123,30 @@ onUnmounted(() => {
 .source-switch {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid rgba(121, 144, 184, 0.16);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(246, 249, 255, 0.92), rgba(236, 242, 254, 0.72));
+  box-shadow: inset 0 1px 2px rgba(65, 83, 122, 0.06);
 }
 
 .source-switch__item {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  min-height: clamp(48px, 5vw, 56px);
-  padding: 0 clamp(12px, 1.2vw, 16px);
+  gap: 8px;
+  min-height: clamp(40px, 4vw, 46px);
+  padding: 0 clamp(10px, 1vw, 14px);
   color: var(--text-sub);
   cursor: pointer;
-  border: 1px solid rgba(121, 144, 184, 0.18);
-  border-radius: 18px;
-  background: rgba(247, 249, 255, 0.92);
-  box-shadow: 0 10px 24px rgba(65, 83, 122, 0.06);
+  border: 1px solid transparent;
+  border-radius: 17px;
+  background: transparent;
+  box-shadow: none;
   transition:
+    background var(--transition-fast),
     border-color var(--transition-fast),
     color var(--transition-fast),
     box-shadow var(--transition-fast),
@@ -3041,38 +3156,43 @@ onUnmounted(() => {
 .source-switch__item:hover,
 .source-switch__item--active {
   color: var(--text-main);
-  border-color: rgba(75, 107, 255, 0.24);
-  box-shadow: 0 14px 30px rgba(75, 107, 255, 0.12);
-  transform: translateY(-2px);
+  border-color: rgba(75, 107, 255, 0.18);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 10px 20px rgba(75, 107, 255, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96);
+  transform: translateY(-1px);
 }
 
 .source-switch__icon {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   color: var(--primary);
   border-radius: 999px;
   background: rgba(75, 107, 255, 0.08);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
 }
 
 .benchmark-pane,
 .hotlink-pane {
   display: grid;
-  gap: 14px;
+  align-content: start;
+  gap: clamp(10px, 0.9vw, 14px);
+  min-height: 0;
 }
 
 .benchmark-input-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) minmax(118px, 0.24fr);
+  gap: 10px;
   align-items: center;
 }
 
 .benchmark-submit {
-  min-width: 148px;
+  min-width: 0;
 }
 
 .benchmark-note-row {
@@ -3087,9 +3207,186 @@ onUnmounted(() => {
   margin-top: 0;
 }
 
+.recent-extract {
+  display: grid;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.recent-extract__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.recent-extract__head span {
+  display: block;
+  color: var(--text-main);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.recent-extract__head strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-sub);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.recent-extract__list {
+  display: grid;
+  gap: 10px;
+  max-height: clamp(208px, 27vh, 330px);
+  overflow-y: auto;
+  padding-right: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--vc-scrollbar-thumb) transparent;
+}
+
+.recent-extract__list::-webkit-scrollbar {
+  width: var(--vc-scrollbar-size);
+}
+
+.recent-extract__list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.recent-extract__list::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, var(--vc-scrollbar-thumb), rgba(75, 199, 187, 0.34))
+    padding-box;
+}
+
+.recent-extract-card {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid rgba(121, 144, 184, 0.16);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(75, 107, 255, 0.07), transparent 34%),
+    rgba(255, 255, 255, 0.88);
+  box-shadow: 0 14px 30px rgba(64, 86, 122, 0.08);
+  transition:
+    transform var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.recent-extract-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(75, 107, 255, 0.24);
+  box-shadow: 0 18px 38px rgba(75, 107, 255, 0.12);
+}
+
+.recent-extract-card__preview {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 78px;
+  padding: 0;
+  overflow: hidden;
+  color: #ffffff;
+  cursor: pointer;
+  border: 0;
+  border-radius: 13px;
+  background: linear-gradient(135deg, rgba(75, 107, 255, 0.86), rgba(69, 200, 194, 0.74));
+  box-shadow: 0 12px 22px rgba(75, 107, 255, 0.16);
+}
+
+.recent-extract-card__preview img,
+.recent-extract-card__preview video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.recent-extract-card__preview::before {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background: linear-gradient(180deg, transparent 40%, rgba(8, 16, 35, 0.56));
+  opacity: 0.85;
+}
+
+.recent-extract-card__preview i {
+  position: absolute;
+  left: 50%;
+  bottom: 7px;
+  z-index: 1;
+  padding: 3px 7px;
+  color: #ffffff;
+  border-radius: 999px;
+  background: rgba(12, 18, 34, 0.58);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  transform: translateX(-50%);
+}
+
+.recent-extract-card__fallback {
+  position: relative;
+  z-index: 1;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.recent-extract-card__body {
+  min-width: 0;
+}
+
+.recent-extract-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.recent-extract-card__title strong {
+  overflow: hidden;
+  color: var(--text-main);
+  font-size: 14px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-extract-card__body p {
+  display: -webkit-box;
+  margin: 5px 0 7px;
+  overflow: hidden;
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.recent-extract-card__body small {
+  color: var(--text-light);
+  font-size: 11px;
+}
+
+.recent-extract__empty {
+  padding: 14px;
+  color: var(--text-sub);
+  text-align: center;
+  border: 1px dashed rgba(121, 144, 184, 0.22);
+  border-radius: 16px;
+  background: rgba(250, 252, 255, 0.74);
+  font-size: 12px;
+}
+
 .benchmark-result {
   display: grid;
-  gap: 16px;
+  gap: clamp(10px, 0.9vw, 14px);
 }
 
 .benchmark-result__label {
@@ -3111,14 +3408,14 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
+  gap: 13px;
   width: 100%;
-  padding: 18px 20px;
+  padding: clamp(13px, 1.1vw, 16px);
   color: inherit;
   text-align: left;
   cursor: pointer;
   border: 1.5px solid rgba(75, 107, 255, 0.4);
-  border-radius: 24px;
+  border-radius: 20px;
   background: rgba(255, 255, 255, 0.9);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.96),
@@ -3138,8 +3435,8 @@ onUnmounted(() => {
 }
 
 .benchmark-card__avatar {
-  width: 58px;
-  height: 58px;
+  width: clamp(46px, 4vw, 54px);
+  height: clamp(46px, 4vw, 54px);
   object-fit: cover;
   border-radius: 999px;
   background: rgba(75, 107, 255, 0.08);
@@ -3166,28 +3463,32 @@ onUnmounted(() => {
 }
 
 .benchmark-card__title strong {
-  font-size: 20px;
+  font-size: clamp(16px, 1.2vw, 18px);
 }
 
 .benchmark-card__stats {
-  margin-top: 8px;
+  margin-top: 6px;
   color: var(--text-main);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
 }
 
 .benchmark-card__body p {
-  margin: 8px 0 0;
+  display: -webkit-box;
+  margin: 6px 0 0;
+  overflow: hidden;
   color: var(--text-sub);
   font-size: 13px;
   line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .benchmark-card__check {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   color: #ffffff;
   border-radius: 999px;
   background: linear-gradient(135deg, var(--primary), var(--accent-teal));
@@ -3199,16 +3500,16 @@ onUnmounted(() => {
 .benchmark-post-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .benchmark-post {
   display: grid;
-  gap: 10px;
-  min-height: 112px;
-  padding: 14px;
+  gap: 8px;
+  min-height: clamp(84px, 9vw, 104px);
+  padding: 12px;
   border: 1px solid rgba(121, 144, 184, 0.16);
-  border-radius: 18px;
+  border-radius: 16px;
   background: rgba(248, 250, 255, 0.86);
 }
 
@@ -3231,18 +3532,18 @@ onUnmounted(() => {
 .benchmark-action-row {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
 
 .idea-action {
-  min-height: 54px;
-  padding: 0 18px;
+  min-height: clamp(46px, 4.2vw, 50px);
+  padding: 0 16px;
   color: var(--text-main);
   font-size: 16px;
   font-weight: 700;
   cursor: pointer;
   border: 1px solid rgba(121, 144, 184, 0.18);
-  border-radius: 18px;
+  border-radius: 16px;
   background: rgba(255, 255, 255, 0.92);
   box-shadow: 0 12px 26px rgba(65, 83, 122, 0.08);
   transition:
@@ -3267,11 +3568,11 @@ onUnmounted(() => {
 .benchmark-empty {
   display: grid;
   place-items: center;
-  min-height: 260px;
-  padding: 20px;
+  min-height: clamp(178px, 23vh, 228px);
+  padding: 18px;
   text-align: center;
   border: 1px dashed rgba(121, 144, 184, 0.22);
-  border-radius: 24px;
+  border-radius: 20px;
   background: rgba(250, 252, 255, 0.72);
 }
 
@@ -3302,7 +3603,7 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
-  margin-top: 16px;
+  margin-top: 12px;
 }
 
 .input-actions--triple {
@@ -3310,7 +3611,108 @@ onUnmounted(() => {
 }
 
 .meta-board {
-  margin-top: 18px;
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding: clamp(12px, 1vw, 14px);
+  border: 1px solid rgba(75, 107, 255, 0.14);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 12% 0%, rgba(75, 107, 255, 0.1), transparent 32%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 251, 255, 0.88));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.98),
+    0 16px 34px rgba(86, 104, 140, 0.1);
+}
+
+.meta-board__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.meta-board__header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.meta-board__header strong {
+  color: var(--text-main);
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.meta-board__eyebrow,
+.meta-chip span,
+.meta-section > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.meta-board__summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(92px, 0.24fr);
+  gap: 10px;
+}
+
+.meta-chip,
+.meta-section {
+  border: 1px solid rgba(121, 144, 184, 0.16);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.meta-chip {
+  display: grid;
+  gap: 6px;
+  min-height: 66px;
+  padding: 11px 12px;
+}
+
+.meta-chip strong {
+  color: var(--text-main);
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.meta-chip--title strong {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 15px;
+}
+
+.meta-section {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.meta-section p {
+  margin: 0;
+  color: var(--text-sub);
+  font-size: 13px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+}
+
+.meta-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.meta-tag-list :deep(.n-tag) {
+  color: var(--primary);
+  background: rgba(75, 107, 255, 0.09);
+}
+
+.meta-empty {
+  color: var(--text-muted);
 }
 
 .outline-editor :deep(.n-input),
@@ -3323,9 +3725,32 @@ onUnmounted(() => {
   min-height: 0;
 }
 
+.panel--outline .outline-editor {
+  min-height: clamp(300px, 46vh, 520px);
+}
+
 .outline-editor :deep(textarea) {
   max-height: 100%;
   overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--vc-scrollbar-thumb) transparent;
+}
+
+.outline-editor :deep(textarea::-webkit-scrollbar) {
+  width: var(--vc-scrollbar-size);
+}
+
+.outline-editor :deep(textarea::-webkit-scrollbar-track) {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.outline-editor :deep(textarea::-webkit-scrollbar-thumb) {
+  border: 2px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, var(--vc-scrollbar-thumb), rgba(75, 199, 187, 0.36))
+    padding-box;
 }
 
 .hook-preview {
@@ -3468,6 +3893,56 @@ onUnmounted(() => {
   word-break: break-word;
 }
 
+.subtitle-table-head,
+.subtitle-table li {
+  display: grid;
+  grid-template-columns: minmax(116px, 0.34fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.subtitle-table-head {
+  padding: 10px 14px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  border: 1px solid rgba(121, 144, 184, 0.14);
+  border-radius: 14px;
+  background: rgba(245, 248, 255, 0.82);
+}
+
+.subtitle-table li {
+  padding: 12px 14px;
+  border: 1px solid rgba(121, 144, 184, 0.14);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 10px 24px rgba(64, 86, 122, 0.06);
+}
+
+.subtitle-table span {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  padding: 6px 9px;
+  color: var(--primary);
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+  border-radius: 999px;
+  background: rgba(75, 107, 255, 0.09);
+}
+
+.subtitle-table p {
+  color: var(--text-main);
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
 .empty-side,
 .empty-block {
   display: grid;
@@ -3496,6 +3971,20 @@ onUnmounted(() => {
   padding: var(--vc-pad-y) var(--vc-pad-x) 0;
 }
 
+.step-two-layout {
+  --step-two-gap: clamp(10px, 0.9vw, 15px);
+  --step-two-panel-pad: clamp(12px, 1vw, 16px);
+
+  gap: var(--step-two-gap);
+  padding: clamp(8px, 1vw, 14px) clamp(10px, 1.45vw, 18px) 0;
+}
+
+.step-two-head {
+  display: grid;
+  gap: 4px;
+  padding: 0 4px;
+}
+
 .step-two-head p {
   margin: 0;
   color: var(--text-sub);
@@ -3504,17 +3993,19 @@ onUnmounted(() => {
 
 .step-two-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1.04fr) minmax(0, 1fr) minmax(0, 0.98fr);
-  gap: var(--vc-gap-lg);
+  grid-template-columns: minmax(280px, 0.86fr) minmax(340px, 1fr) minmax(320px, 0.9fr);
+  gap: var(--step-two-gap);
   min-height: 0;
   align-items: stretch;
 }
 
 .step-two-workbench > .panel {
   display: grid;
-  gap: var(--vc-gap);
+  align-content: start;
+  gap: clamp(10px, 0.85vw, 13px);
   min-height: 0;
   overflow: hidden;
+  padding: var(--step-two-panel-pad);
 }
 
 .step-two-script-panel {
@@ -3523,7 +4014,7 @@ onUnmounted(() => {
 
 .step-two-voice-panel,
 .step-two-avatar-panel {
-  grid-template-rows: auto auto minmax(0, auto);
+  grid-template-rows: auto auto minmax(0, 1fr);
 }
 
 .step-two-block-head,
@@ -3550,12 +4041,12 @@ onUnmounted(() => {
 
 .step-two-block-head {
   flex-wrap: wrap;
-  row-gap: 10px;
-  column-gap: 12px;
+  row-gap: 8px;
+  column-gap: 10px;
 }
 
 .step-two-block-head__main {
-  min-width: min(100%, 220px);
+  min-width: min(100%, 176px);
   flex: 1 1 auto;
 }
 
@@ -3579,13 +4070,13 @@ onUnmounted(() => {
 .step-two-block-icon {
   display: grid;
   place-items: center;
-  width: clamp(38px, 3.2vw + 30px, 44px);
-  height: clamp(38px, 3.2vw + 30px, 44px);
+  width: clamp(34px, 2.4vw + 26px, 40px);
+  height: clamp(34px, 2.4vw + 26px, 40px);
   color: #fff;
-  border-radius: clamp(14px, 1.1vw, 17px);
+  border-radius: clamp(12px, 1vw, 15px);
   background: linear-gradient(135deg, #7c4dff, #5a6dff);
   box-shadow: 0 20px 46px rgba(94, 86, 255, 0.22);
-  font-size: clamp(18px, 1.2vw + 14px, 21px);
+  font-size: clamp(16px, 1vw + 13px, 19px);
   font-weight: 800;
 }
 
@@ -3695,9 +4186,18 @@ onUnmounted(() => {
 
 .step-two-control-card__main {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   align-items: center;
+}
+
+.step-two-control-card__main:has(.voice-sample-play) {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
+.step-two-control-card__main :deep(.n-select) {
+  min-width: 0;
+  width: 100%;
 }
 
 .voice-sample-play,
@@ -3797,6 +4297,107 @@ onUnmounted(() => {
 
 .step-two-primary-btn--video {
   margin-top: 6px;
+}
+
+.voice-generate-progress {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  overflow: hidden;
+  border: 1px solid rgba(75, 107, 255, 0.16);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(75, 107, 255, 0.12), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 249, 255, 0.88));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.94);
+}
+
+.voice-generate-progress__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.voice-generate-progress__head span {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.voice-generate-progress__head strong {
+  color: var(--text-main);
+  font-family: var(--font-display);
+  font-size: 17px;
+}
+
+.voice-generate-progress__bar {
+  position: relative;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(121, 144, 184, 0.18);
+}
+
+.voice-generate-progress__bar i {
+  position: relative;
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4b6bff, #45c8c2);
+  box-shadow: 0 0 18px rgba(75, 107, 255, 0.2);
+  transition: width 0.38s ease;
+}
+
+.voice-generate-progress__bar i::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  animation: voice-progress-flow 1.15s linear infinite;
+}
+
+.voice-generate-progress--done {
+  border-color: rgba(31, 184, 133, 0.22);
+  background:
+    radial-gradient(circle at 0% 0%, rgba(31, 184, 133, 0.13), transparent 36%),
+    linear-gradient(180deg, rgba(250, 255, 253, 0.96), rgba(240, 253, 249, 0.9));
+}
+
+.voice-generate-progress--done .voice-generate-progress__bar i::after {
+  animation: none;
+}
+
+.voice-generate-progress p {
+  margin: 0;
+  color: var(--text-sub);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.voice-progress-enter-active,
+.voice-progress-leave-active {
+  transition:
+    opacity 0.22s ease,
+    transform 0.22s ease;
+}
+
+.voice-progress-enter-from,
+.voice-progress-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+@keyframes voice-progress-flow {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(100%);
+  }
 }
 
 .step-two-ghost-btn {
@@ -4084,6 +4685,266 @@ onUnmounted(() => {
   gap: 14px;
 }
 
+.workflow-action-card > .segment-count-bar {
+  display: none;
+}
+
+.workflow-action-card .input-actions--triple {
+  grid-template-columns: minmax(170px, 0.9fr) minmax(220px, 1.18fr) minmax(190px, 0.9fr);
+  gap: clamp(14px, 2vw, 30px);
+  align-items: center;
+  margin-top: 20px;
+}
+
+.workflow-action-card .input-actions--triple :deep(.n-button) {
+  min-height: 54px;
+  border-radius: 18px;
+  font-size: 15px;
+  font-weight: 800;
+  transition:
+    transform var(--transition-fast),
+    box-shadow var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.workflow-action-card .input-actions--triple :deep(.n-button:not(.n-button--disabled):hover) {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 34px rgba(75, 107, 255, 0.14);
+}
+
+.workflow-action-card .input-actions--triple .gradient-btn {
+  min-height: 58px;
+  font-size: 17px;
+  box-shadow: 0 20px 42px rgba(75, 107, 255, 0.22);
+}
+
+.workflow-progress-card {
+  display: grid;
+  position: relative;
+  grid-template-rows: auto minmax(74px, auto);
+  gap: 22px;
+  padding: 24px 26px 26px;
+  overflow: hidden;
+  border: 1px solid rgba(75, 107, 255, 0.16);
+  border-radius: 26px;
+  background:
+    radial-gradient(circle at 92% 6%, rgba(75, 107, 255, 0.12), transparent 28%),
+    radial-gradient(circle at 0% 100%, rgba(69, 200, 194, 0.1), transparent 30%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.97), rgba(246, 250, 255, 0.9));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    0 24px 58px rgba(61, 83, 128, 0.1);
+}
+
+.workflow-progress-card--done {
+  border-color: rgba(31, 184, 133, 0.24);
+  background:
+    radial-gradient(circle at 12% 0%, rgba(31, 184, 133, 0.14), transparent 34%),
+    linear-gradient(180deg, rgba(250, 255, 253, 0.98), rgba(241, 253, 249, 0.92));
+}
+
+.workflow-progress-card__head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.workflow-progress-card__head span {
+  display: block;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.workflow-progress-card__head strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-main);
+  font-size: clamp(20px, 1vw + 18px, 26px);
+  line-height: 1.35;
+}
+
+.workflow-progress-card__head p {
+  margin: 5px 0 0;
+  color: var(--text-sub);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.workflow-progress-card__head > b {
+  position: relative;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+  padding: 0;
+  color: #3557ff;
+  text-align: center;
+  border: 6px solid rgba(230, 236, 248, 0.92);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow:
+    inset 0 0 0 1px rgba(75, 107, 255, 0.08),
+    0 14px 28px rgba(75, 107, 255, 0.12);
+  font-family: var(--font-display);
+  font-size: 19px;
+  font-weight: 800;
+}
+
+.workflow-progress-card__head > b::after {
+  position: absolute;
+  inset: -6px;
+  content: '';
+  border-radius: inherit;
+  background: conic-gradient(
+    from 0deg,
+    var(--primary) 0 var(--workflow-percent, 0%),
+    var(--accent-teal) var(--workflow-percent, 0%) calc(var(--workflow-percent, 0%) + 6%),
+    transparent calc(var(--workflow-percent, 0%) + 6%) 100%
+  );
+  mask: radial-gradient(farthest-side, transparent calc(100% - 6px), #000 calc(100% - 5px));
+  pointer-events: none;
+}
+
+.workflow-progress-track {
+  position: relative;
+  z-index: 0;
+  grid-row: 2;
+  grid-column: 1;
+  align-self: center;
+  height: 8px;
+  margin: 0 clamp(48px, 5vw, 84px);
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(121, 144, 184, 0.2);
+}
+
+.workflow-progress-track i {
+  position: relative;
+  display: block;
+  height: 100%;
+  overflow: hidden;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--accent-teal));
+  box-shadow: 0 0 22px rgba(75, 107, 255, 0.22);
+  transition: width 0.35s ease;
+}
+
+.workflow-progress-card--running .workflow-progress-track i::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.56), transparent);
+  animation: workflow-progress-flow 1.2s linear infinite;
+}
+
+.workflow-progress-steps {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-row: 2;
+  grid-column: 1;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: clamp(10px, 1vw, 18px);
+  align-items: center;
+  counter-reset: workflow-step;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.workflow-progress-steps li {
+  counter-increment: workflow-step;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 10px;
+  align-items: center;
+  justify-self: center;
+  min-width: 0;
+  min-height: 54px;
+  padding: 10px clamp(12px, 1vw, 18px);
+  border: 1px solid rgba(121, 144, 184, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.98),
+    0 14px 26px rgba(61, 83, 128, 0.08);
+  transition:
+    transform var(--transition-fast),
+    border-color var(--transition-fast),
+    background var(--transition-fast),
+    box-shadow var(--transition-fast);
+}
+
+.workflow-progress-steps li > b {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  color: #8190ad;
+  font-size: 0;
+  font-weight: 800;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #f5f8ff, #e9eef8);
+}
+
+.workflow-progress-steps li > b::before {
+  content: counter(workflow-step);
+  font-size: 15px;
+}
+
+.workflow-progress-steps strong {
+  display: block;
+  color: var(--text-main);
+  font-size: clamp(13px, 0.28vw + 12px, 15px);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.workflow-progress-steps span {
+  display: none;
+}
+
+.workflow-progress-steps li.is-active {
+  border-color: rgba(75, 107, 255, 0.32);
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  box-shadow: 0 16px 34px rgba(75, 107, 255, 0.2);
+  transform: translateY(-2px);
+}
+
+.workflow-progress-steps li.is-active strong {
+  color: #ffffff;
+}
+
+.workflow-progress-steps li.is-active > b {
+  color: var(--primary);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 0 18px rgba(255, 255, 255, 0.24);
+}
+
+.workflow-progress-steps li.is-done {
+  border-color: rgba(69, 200, 194, 0.24);
+  background: rgba(239, 253, 248, 0.94);
+}
+
+.workflow-progress-steps li.is-done > b {
+  color: #138f85;
+  background: rgba(69, 200, 194, 0.14);
+}
+
+@keyframes workflow-progress-flow {
+  from {
+    transform: translateX(-100%);
+  }
+
+  to {
+    transform: translateX(100%);
+  }
+}
+
 .template-chip-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -4194,6 +5055,218 @@ onUnmounted(() => {
 
 .summary-card p {
   margin: 2px 0 0;
+}
+
+.full-script-preview {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 16px;
+  border: 1px solid rgba(75, 107, 255, 0.16);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 100% 0%, rgba(75, 107, 255, 0.12), transparent 28%),
+    rgba(255, 255, 255, 0.74);
+}
+
+.full-script-preview span {
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.full-script-preview p {
+  display: -webkit-box;
+  max-height: 7.2em;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-main);
+  font-size: 13px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.full-script-preview--empty {
+  border-style: dashed;
+  background: rgba(248, 250, 255, 0.72);
+}
+
+.full-script-preview--empty p {
+  color: var(--text-sub);
+}
+
+.step-three-summary {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px;
+}
+
+.step-three-summary .summary-pill {
+  position: relative;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 14px;
+  align-items: center;
+  min-width: 0;
+  min-height: 72px;
+  padding: 14px 18px;
+  border-color: rgba(121, 144, 184, 0.2);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(75, 107, 255, 0.08), transparent 38%),
+    rgba(255, 255, 255, 0.84);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 14px 30px rgba(61, 83, 128, 0.08);
+}
+
+.step-three-summary .summary-pill::before {
+  display: grid;
+  place-items: center;
+  grid-row: 1 / span 2;
+  width: 42px;
+  height: 42px;
+  color: var(--primary);
+  border-radius: 999px;
+  background: rgba(75, 107, 255, 0.08);
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.step-three-summary .summary-pill:nth-child(1)::before {
+  content: '人';
+}
+
+.step-three-summary .summary-pill:nth-child(2)::before {
+  content: '声';
+  color: #139d9a;
+  background: rgba(69, 200, 194, 0.12);
+}
+
+.step-three-summary .summary-pill:nth-child(3)::before {
+  content: 'T';
+  color: #7c4dff;
+  background: rgba(124, 77, 255, 0.1);
+}
+
+.step-three-summary .summary-pill span,
+.step-three-summary .summary-pill strong {
+  grid-column: 2;
+}
+
+.workflow-helper-note {
+  position: relative;
+  display: block;
+  padding-left: 30px;
+  color: transparent;
+  font-size: 0;
+}
+
+.workflow-helper-note::before {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  color: #ffffff;
+  content: 'i';
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  box-shadow: 0 8px 18px rgba(75, 107, 255, 0.18);
+  font-size: 13px;
+  font-weight: 800;
+  transform: translateY(-50%);
+}
+
+.workflow-helper-note::after {
+  color: var(--text-sub);
+  content: '先生成音轨和字幕时间轴，再合成 5 秒预览；确认无误后输出完整成片。';
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.compact-label {
+  display: inline-block;
+  max-width: 6em;
+  min-width: 4em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.step-three-checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-check {
+  grid-template-columns: auto auto;
+  align-items: center;
+  width: max-content;
+  min-width: 0;
+  padding: 9px 11px;
+  border-radius: 999px;
+  transition:
+    transform var(--transition-fast),
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.status-check:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 30px rgba(77, 101, 152, 0.12);
+}
+
+.status-check b {
+  display: grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  color: var(--text-main);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.status-check b.compact-label {
+  display: block;
+  height: auto;
+  line-height: 1.2;
+  place-items: initial;
+}
+
+.status-check--ok {
+  border-color: rgba(31, 184, 133, 0.24);
+  background: rgba(236, 253, 245, 0.88);
+}
+
+.status-check--ok b {
+  color: #0f9f6e;
+}
+
+.status-check--ok b:not(.compact-label) {
+  border-radius: 999px;
+  background: rgba(31, 184, 133, 0.12);
+}
+
+.status-check--fail {
+  border-color: rgba(239, 68, 68, 0.22);
+  background: rgba(255, 241, 242, 0.88);
+}
+
+.status-check--fail b {
+  color: #ef4444;
+}
+
+.status-check--fail b:not(.compact-label) {
+  border-radius: 999px;
+  background: rgba(239, 68, 68, 0.1);
 }
 
 .avatar-empty {
@@ -4786,6 +5859,42 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
+  .workflow-progress-card__head {
+    flex-direction: column;
+  }
+
+  .workflow-progress-card__head > b {
+    align-self: flex-start;
+  }
+
+  .workflow-progress-card {
+    grid-template-rows: auto auto;
+    padding: 18px;
+  }
+
+  .workflow-progress-track {
+    display: none;
+  }
+
+  .workflow-progress-steps {
+    grid-template-columns: 1fr;
+    grid-row: auto;
+  }
+
+  .workflow-progress-steps li {
+    justify-self: stretch;
+    justify-content: start;
+  }
+
+  .subtitle-table-head {
+    display: none;
+  }
+
+  .subtitle-table li {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
   .hook-preview {
     grid-template-columns: 1fr;
   }
@@ -4907,6 +6016,8 @@ onUnmounted(() => {
   .step-two-hook-row,
   .step-two-slider-grid,
   .step-two-control-grid,
+  .meta-board__summary,
+  .step-three-summary,
   .avatar-strip,
   .lip-sync-setup-card__tabs {
     grid-template-columns: 1fr;
@@ -4953,7 +6064,7 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(121, 144, 184, 0.16);
-  border-radius: 28px;
+  border-radius: 22px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 250, 255, 0.88));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
@@ -4981,7 +6092,7 @@ onUnmounted(() => {
 }
 
 .step-two-script-line {
-  padding: 18px 20px;
+  padding: 14px 16px;
   border: 0;
   border-bottom: 1px solid rgba(121, 144, 184, 0.12);
   border-radius: 0;
@@ -4998,8 +6109,8 @@ onUnmounted(() => {
 }
 
 .step-two-script-line p {
-  font-size: clamp(14px, 0.5vw + 13px, 15px);
-  font-weight: 700;
+  font-size: clamp(13px, 0.45vw + 12px, 14px);
+  font-weight: 650;
 }
 
 .step-two-hook-row {
@@ -5015,17 +6126,55 @@ onUnmounted(() => {
 
 .step-two-voice-shell {
   display: grid;
-  gap: 14px;
-  padding: 14px;
+  gap: 10px;
+  align-content: start;
+  min-height: 0;
+  max-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+  padding-right: 12px;
+  padding-bottom: 16px;
   border: 1px solid rgba(121, 144, 184, 0.14);
-  border-radius: 28px;
+  border-radius: 22px;
   background: linear-gradient(180deg, rgba(248, 250, 255, 0.96), rgba(240, 245, 255, 0.9));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(75, 107, 255, 0.32) transparent;
+}
+
+.step-two-voice-shell::-webkit-scrollbar {
+  width: 8px;
+}
+
+.step-two-voice-shell::-webkit-scrollbar-track {
+  margin: 14px 0;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.step-two-voice-shell::-webkit-scrollbar-thumb {
+  min-height: 42px;
+  border: 2px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(75, 107, 255, 0.34), rgba(75, 199, 187, 0.42))
+    padding-box;
+}
+
+.step-two-voice-panel {
+  overflow: hidden !important;
+}
+
+.step-two-voice-panel .step-two-slider-grid {
+  display: none;
 }
 
 .step-two-control-grid,
 .step-two-slider-grid {
-  gap: 10px;
+  gap: 8px;
 }
 
 .step-two-control-card,
@@ -5037,7 +6186,7 @@ onUnmounted(() => {
 
 .step-two-control-card,
 .step-two-slider-card {
-  padding: 12px 14px;
+  padding: 10px 12px;
   background: rgba(255, 255, 255, 0.86);
 }
 
@@ -5049,8 +6198,8 @@ onUnmounted(() => {
 .step-two-control-card :deep(.n-base-selection-label),
 .step-two-control-card :deep(.n-base-selection-tags),
 .step-two-control-card :deep(.n-input-wrapper) {
-  min-height: 52px;
-  border-radius: 16px;
+  min-height: 44px;
+  border-radius: 14px;
   background: rgba(247, 249, 255, 0.94);
 }
 
@@ -5079,8 +6228,8 @@ onUnmounted(() => {
 }
 
 .voice-power-stepper button {
-  min-height: 52px;
-  font-size: 20px;
+  min-height: 44px;
+  font-size: 18px;
 }
 
 .step-two-inline-alert {
@@ -5089,13 +6238,19 @@ onUnmounted(() => {
 }
 
 .step-two-primary-btn {
-  min-height: 50px;
-  border-radius: 18px;
+  min-height: 48px;
+  flex-shrink: 0;
+  border-radius: 16px;
   font-size: 15px;
 }
 
+.voice-generate-progress {
+  flex-shrink: 0;
+  width: 100%;
+}
+
 .voice-preview-card {
-  padding: 14px 16px;
+  padding: 12px 14px;
   background: rgba(255, 255, 255, 0.86);
 }
 
@@ -5110,7 +6265,7 @@ onUnmounted(() => {
 }
 
 .voice-source-switch__item {
-  min-height: 52px;
+  min-height: 44px;
 }
 
 .step-two-avatar-panel {
@@ -5118,8 +6273,8 @@ onUnmounted(() => {
 }
 
 .step-two-block-head :deep(.n-button) {
-  height: 42px;
-  padding: 0 18px;
+  height: 36px;
+  padding: 0 14px;
   border-radius: 999px;
   background: rgba(245, 242, 255, 0.92);
 }
@@ -5127,44 +6282,40 @@ onUnmounted(() => {
 .avatar-strip--filled {
   grid-template-columns: none;
   grid-auto-flow: column;
-  grid-auto-columns: min(100%, clamp(124px, 12vw, 142px));
+  grid-auto-columns: min(100%, clamp(104px, 9.8vw, 122px));
   align-items: start;
   overflow-x: auto;
   padding-bottom: 8px;
-  scrollbar-width: none;
-}
-
-.avatar-strip--filled::-webkit-scrollbar {
-  display: none;
+  scrollbar-color: rgba(75, 107, 255, 0.2) transparent;
 }
 
 .avatar-empty-state {
   display: grid;
-  gap: 14px;
+  gap: 10px;
   align-content: start;
 }
 
 .avatar-empty-state__hint {
   margin: 0;
   color: var(--text-sub);
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1.7;
 }
 
 .avatar-add-card,
 .avatar-select-card {
-  min-height: clamp(188px, 24vw, 208px);
-  padding: 12px 12px 10px;
-  border-radius: clamp(22px, 2vw, 28px);
+  min-height: clamp(150px, 17vw, 172px);
+  padding: 10px 10px 8px;
+  border-radius: clamp(18px, 1.6vw, 22px);
 }
 
 .avatar-add-card--compact {
-  width: min(100%, clamp(124px, 12vw, 142px));
+  width: min(100%, clamp(104px, 9.8vw, 122px));
 }
 
 .avatar-add-card--empty {
-  width: min(158px, 100%);
-  min-height: clamp(200px, 26vw, 220px);
+  width: min(136px, 100%);
+  min-height: clamp(154px, 18vw, 176px);
   justify-self: start;
   align-content: center;
 }
@@ -5173,43 +6324,43 @@ onUnmounted(() => {
 .avatar-select-card__video,
 .avatar-select-card__placeholder {
   aspect-ratio: 9 / 13;
-  border-radius: clamp(18px, 1.6vw, 22px);
+  border-radius: clamp(15px, 1.35vw, 18px);
 }
 
 .avatar-select-card__name {
   text-align: center;
-  font-size: 12px;
+  font-size: 11px;
   color: var(--text-light);
 }
 
 .lip-sync-setup-card {
-  gap: 14px;
-  padding: 16px;
-  border-radius: 26px;
+  gap: 11px;
+  padding: 12px;
+  border-radius: 22px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 249, 255, 0.9));
 }
 
 .lip-sync-setup-card__tabs {
-  gap: 12px;
+  gap: 8px;
 }
 
 .lip-sync-setup-card__tab {
-  padding: 14px 16px;
-  border-radius: 16px;
+  padding: 11px 12px;
+  border-radius: 14px;
 }
 
 .lip-sync-setup-card__tab strong {
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .lip-sync-setup-card__summary {
-  gap: 10px;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .lip-sync-setup-card__summary .summary-pill {
-  padding: 10px 12px;
-  border-radius: 16px;
+  padding: 8px 10px;
+  border-radius: 14px;
   background: rgba(248, 250, 255, 0.92);
   min-width: 0;
 }
@@ -5220,13 +6371,17 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 
-@media (max-width: 1540px) {
+@media (min-width: 1281px) and (max-width: 1540px) {
   .step-two-workbench {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  }
+
+  .step-two-avatar-panel {
+    grid-column: 1 / -1;
   }
 
   .avatar-strip--filled {
-    grid-auto-columns: min(100%, clamp(118px, 14vw, 136px));
+    grid-auto-columns: min(100%, clamp(104px, 11vw, 124px));
   }
 }
 

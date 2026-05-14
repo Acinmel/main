@@ -7,7 +7,7 @@ import {
 import type { Request } from 'express';
 import { AuthService } from '../auth/auth.service';
 
-/** 需在 JwtAuthGuard 之后；仅 role=admin 可访问 */
+/** 需在 JwtAuthGuard 之后；后台只允许固定管理员邮箱访问。 */
 @Injectable()
 export class AdminRoleGuard implements CanActivate {
   constructor(private readonly auth: AuthService) {}

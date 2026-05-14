@@ -88,7 +88,12 @@ const loadingDh = ref(false)
 const workColumns: DataTableColumns<AdminUserWorkRow> = [
   { title: '用户邮箱', key: 'email', width: 200, ellipsis: { tooltip: true } },
   { title: '用户 ID', key: 'userId', width: 120, ellipsis: { tooltip: true } },
-  { title: '作品标题', key: 'title', minWidth: 140, ellipsis: { tooltip: true } },
+  {
+    title: '作品标题',
+    key: 'title',
+    minWidth: 140,
+    ellipsis: { tooltip: true },
+  },
   { title: '状态', key: 'status', width: 100 },
   {
     title: '源视频',
@@ -102,7 +107,12 @@ const workColumns: DataTableColumns<AdminUserWorkRow> = [
 const dhColumns: DataTableColumns<AdminDigitalHumanRow> = [
   { title: '用户邮箱', key: 'email', width: 200, ellipsis: { tooltip: true } },
   { title: '用户 ID', key: 'userId', width: 120, ellipsis: { tooltip: true } },
-  { title: '风格 styleId', key: 'styleId', width: 140, ellipsis: { tooltip: true } },
+  {
+    title: '风格 styleId',
+    key: 'styleId',
+    width: 140,
+    ellipsis: { tooltip: true },
+  },
   {
     title: '输出相对路径',
     key: 'outputRelativePath',
@@ -182,7 +192,14 @@ const donutStyle = computed(() => {
     }
   }
   const sum = list.reduce((s, x) => s + x.count, 0) || 1
-  const hues = ['#38bdf8', '#a78bfa', '#34d399', '#fbbf24', '#fb7185', '#94a3b8']
+  const hues = [
+    '#38bdf8',
+    '#a78bfa',
+    '#34d399',
+    '#fbbf24',
+    '#fb7185',
+    '#94a3b8',
+  ]
   let cursor = 0
   const parts: string[] = []
   list.forEach((x, i) => {
@@ -249,10 +266,17 @@ onMounted(() => {
     class="glass adm__policy"
   >
     用户在<strong>未开通（pending）</strong>时仅能登录并配置<strong>专属数字人</strong>，
-    <strong>无法调用生成类 API</strong>。在「用户审核」中开通 / 停用 / 设管理员后立即生效。
+    <strong>无法调用生成类 API</strong>。在「用户审核」中开通 / 停用 /
+    后台入口仅固定管理员邮箱可见，普通账号仅支持开通 / 停用。
   </n-alert>
 
-  <n-grid cols="1 s:2" responsive="screen" :x-gap="16" :y-gap="16" class="erp-quick">
+  <n-grid
+    cols="1 s:2 l:3"
+    responsive="screen"
+    :x-gap="16"
+    :y-gap="16"
+    class="erp-quick"
+  >
     <n-gi>
       <n-card
         size="small"
@@ -289,11 +313,35 @@ onMounted(() => {
         </div>
       </n-card>
     </n-gi>
+    <n-gi>
+      <n-card
+        size="small"
+        class="glass"
+        :bordered="false"
+        hoverable
+        style="cursor: pointer"
+        @click="router.push({ name: 'erp-data' })"
+      >
+        <div class="erp-quick__link">
+          <div>
+            <strong>数据管理</strong>
+            <div class="erp-quick__hint">素材、作品、数字人模板</div>
+          </div>
+          <n-icon :component="ArrowForwardOutline" :size="22" opacity="0.65" />
+        </div>
+      </n-card>
+    </n-gi>
   </n-grid>
 
   <n-spin :show="loadingStats && stats === null">
     <template v-if="stats">
-      <n-grid cols="1 s:2 l:4" responsive="screen" :x-gap="16" :y-gap="16" class="adm__kpi">
+      <n-grid
+        cols="1 s:2 l:4"
+        responsive="screen"
+        :x-gap="16"
+        :y-gap="16"
+        class="adm__kpi"
+      >
         <n-gi>
           <n-card size="small" class="glass kpi" :bordered="false">
             <div class="kpi__inner">
@@ -343,7 +391,9 @@ onMounted(() => {
               <div class="ring__caption">
                 <span class="kpi__lbl">操作类型占比</span>
                 <span class="adm__muted" style="font-size: 12px">
-                  {{ stats.byAction?.length ? '右栏为分项条形图' : '暂无统计数据' }}
+                  {{
+                    stats.byAction?.length ? '右栏为分项条形图' : '暂无统计数据'
+                  }}
                 </span>
               </div>
             </div>
@@ -351,7 +401,13 @@ onMounted(() => {
         </n-gi>
       </n-grid>
 
-      <n-grid cols="1 s:2" responsive="screen" :x-gap="16" :y-gap="16" class="adm__kpi adm__kpi--sub">
+      <n-grid
+        cols="1 s:2"
+        responsive="screen"
+        :x-gap="16"
+        :y-gap="16"
+        class="adm__kpi adm__kpi--sub"
+      >
         <n-gi>
           <n-card size="small" class="glass kpi" :bordered="false">
             <div class="kpi__inner">
@@ -360,7 +416,9 @@ onMounted(() => {
               </div>
               <div class="kpi__meta">
                 <span class="kpi__lbl">口播作品条目（user_works）</span>
-                <strong class="kpi__val">{{ stats.kouboWorksTotal ?? '—' }}</strong>
+                <strong class="kpi__val">{{
+                  stats.kouboWorksTotal ?? '—'
+                }}</strong>
               </div>
             </div>
           </n-card>
@@ -373,7 +431,9 @@ onMounted(() => {
               </div>
               <div class="kpi__meta">
                 <span class="kpi__lbl">已配专属数字人（模板表）</span>
-                <strong class="kpi__val">{{ stats.digitalHumanUsers ?? '—' }}</strong>
+                <strong class="kpi__val">{{
+                  stats.digitalHumanUsers ?? '—'
+                }}</strong>
               </div>
             </div>
           </n-card>
@@ -415,7 +475,9 @@ onMounted(() => {
             </n-button>
             <n-button
               :disabled="worksOffset + detailPageSize >= worksTotal"
-              @click="() => ((worksOffset += detailPageSize), void loadWorksList())"
+              @click="
+                () => ((worksOffset += detailPageSize), void loadWorksList())
+              "
             >
               下一页
             </n-button>
@@ -448,13 +510,20 @@ onMounted(() => {
               style="width: min(100%, 360px)"
               @keyup.enter="() => ((dhOffset = 0), void loadDhList())"
             />
-            <n-button type="primary" secondary @click="() => ((dhOffset = 0), void loadDhList())">
+            <n-button
+              type="primary"
+              secondary
+              @click="() => ((dhOffset = 0), void loadDhList())"
+            >
               搜索
             </n-button>
             <n-button
               :disabled="dhOffset <= 0"
               @click="
-                () => ((dhOffset = Math.max(0, dhOffset - detailPageSize)), void loadDhList())
+                () => (
+                  (dhOffset = Math.max(0, dhOffset - detailPageSize)),
+                  void loadDhList()
+                )
               "
             >
               上一页
@@ -479,9 +548,18 @@ onMounted(() => {
         </n-space>
       </n-card>
 
-      <n-card title="操作类型分布（审计打点）" size="small" class="glass chart-card" :bordered="false">
+      <n-card
+        title="操作类型分布（审计打点）"
+        size="small"
+        class="glass chart-card"
+        :bordered="false"
+      >
         <div v-if="distributionRows.length" class="bars">
-          <div v-for="row in distributionRows" :key="row.action" class="bar-row">
+          <div
+            v-for="row in distributionRows"
+            :key="row.action"
+            class="bar-row"
+          >
             <span class="bar-row__lbl">{{ row.zh }}</span>
             <div class="bar-row__track">
               <div
@@ -496,12 +574,22 @@ onMounted(() => {
             <n-tag size="small" round :bordered="false">{{ row.count }}</n-tag>
           </div>
         </div>
-        <n-alert v-else type="info" :bordered="false" style="background: transparent">
+        <n-alert
+          v-else
+          type="info"
+          :bordered="false"
+          style="background: transparent"
+        >
           暂无审计数据；用户发起「创建任务」或「生成成片」后会在此聚合展示。
         </n-alert>
       </n-card>
 
-      <n-card title="最近审计（预览）" size="small" class="glass" :bordered="false">
+      <n-card
+        title="最近审计（预览）"
+        size="small"
+        class="glass"
+        :bordered="false"
+      >
         <n-spin :show="loadingAuditsPreview">
           <n-space vertical :size="10" style="width: 100%">
             <template v-if="auditPreview.length">
@@ -517,23 +605,39 @@ onMounted(() => {
                   border-bottom: 1px solid rgba(148, 163, 184, 0.12);
                 "
               >
-                <span class="adm__muted" style="font-size: 12px; min-width: 148px">
+                <span
+                  class="adm__muted"
+                  style="font-size: 12px; min-width: 148px"
+                >
                   {{ row.createdAt }}
                 </span>
                 <strong>{{ row.email }}</strong>
-                <span class="adm__muted" style="font-size: 11px">注册 {{ row.userRegisteredAt }}</span>
-                <n-tag size="tiny" round :bordered="false" :type="actionTagType(row.action)">
+                <span class="adm__muted" style="font-size: 11px"
+                  >注册 {{ row.userRegisteredAt }}</span
+                >
+                <n-tag
+                  size="tiny"
+                  round
+                  :bordered="false"
+                  :type="actionTagType(row.action)"
+                >
                   {{ actionLabelZh[row.action] ?? row.action }}
                 </n-tag>
-                <span v-if="row.detail" class="adm__muted" style="flex: 1; min-width: 120px">
+                <span
+                  v-if="row.detail"
+                  class="adm__muted"
+                  style="flex: 1; min-width: 120px"
+                >
                   {{ row.detail }}
                 </span>
               </div>
             </template>
-            <div v-else class="adm__muted" style="padding: 8px 0">
-              暂无记录
-            </div>
-            <n-button tertiary size="small" @click="router.push({ name: 'erp-audit' })">
+            <div v-else class="adm__muted" style="padding: 8px 0">暂无记录</div>
+            <n-button
+              tertiary
+              size="small"
+              @click="router.push({ name: 'erp-audit' })"
+            >
               查看全部日志
             </n-button>
           </n-space>
@@ -542,7 +646,10 @@ onMounted(() => {
     </template>
   </n-spin>
 
-  <p class="adm__muted" style="text-align: center; font-size: 12px; margin: 28px 0 12px">
+  <p
+    class="adm__muted"
+    style="text-align: center; font-size: 12px; margin: 28px 0 12px"
+  >
     数据来源：服务端 audit_logs · 柱状与环形为可视化汇总
   </p>
 </template>
@@ -552,8 +659,8 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
+  gap: 20px;
+  margin-bottom: 24px;
   flex-wrap: wrap;
 }
 .kpi__meta {

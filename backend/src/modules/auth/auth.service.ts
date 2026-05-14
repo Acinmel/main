@@ -16,6 +16,8 @@ import { DatabaseService } from '../../database/database.service';
 export type UserRole = 'user' | 'admin';
 export type AccountStatus = 'pending' | 'active' | 'disabled';
 
+export const FIXED_ADMIN_EMAIL = '447519854@qq.com';
+
 export interface AuthUserRow {
   id: string;
   email: string;
@@ -36,54 +38,49 @@ export class AuthService implements OnModuleInit {
   ) {}
 
   onModuleInit(): void {
-    void this.bootstrapConfigWarnings();
+    this.bootstrapConfigWarnings();
     void this.applyAdminEmailsFromEnv();
   }
 
-  private async bootstrapConfigWarnings(): Promise<void> {
+  private bootstrapConfigWarnings(): void {
     const s = this.config.get<string>('JWT_SECRET')?.trim();
     if (!s) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('JWT_SECRET is required when NODE_ENV=production');
+      }
       this.logger.warn(
         'JWT_SECRET 未配置，使用内置开发密钥；生产环境请务必设置 JWT_SECRET',
       );
     }
   }
 
-  /** 将 ADMIN_EMAILS 中的邮箱设为管理员并开通（.env 逗号分隔，启动时执行） */
+  /** 固定后台管理员账号：只有该邮箱可访问 /v1/admin/*。 */
   private async applyAdminEmailsFromEnv(): Promise<void> {
-    const raw = this.config.get<string>('ADMIN_EMAILS')?.trim();
-    if (!raw) {
-      return;
-    }
-    const emails = raw
-      .split(',')
-      .map((s) => s.trim().toLowerCase())
-      .filter(Boolean);
-    for (const email of emails) {
-      try {
-        await this.db.execute(
-          `UPDATE users SET role = 'admin', account_status = 'active' WHERE email = ?`,
-          [email],
-        );
-      } catch (e) {
-        this.logger.warn(`ADMIN_EMAILS 同步失败 ${email}: ${e}`);
-      }
+    try {
+      await this.db.execute(
+        `UPDATE users SET role = 'admin', account_status = 'active' WHERE email = ?`,
+        [FIXED_ADMIN_EMAIL],
+      );
+    } catch (e) {
+      this.logger.warn(`固定管理员账号同步失败 ${FIXED_ADMIN_EMAIL}: ${e}`);
     }
   }
 
   private getJwtSecret(): string {
-    return (
-      this.config.get<string>('JWT_SECRET')?.trim() ||
-      'dev-only-jwt-secret-change-in-production'
-    );
+    const secret = this.config.get<string>('JWT_SECRET')?.trim();
+    if (secret) {
+      return secret;
+    }
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('JWT_SECRET is required when NODE_ENV=production');
+    }
+    return 'dev-only-jwt-secret-change-in-production';
   }
 
   private signAccessToken(user: { id: string; email: string }): string {
-    return jwt.sign(
-      { sub: user.id, email: user.email },
-      this.getJwtSecret(),
-      { expiresIn: '30d' },
-    );
+    return jwt.sign({ sub: user.id, email: user.email }, this.getJwtSecret(), {
+      expiresIn: '30d',
+    });
   }
 
   private normalizeEmail(email: string): string {
@@ -114,14 +111,17 @@ export class AuthService implements OnModuleInit {
       .get<string>('REGISTRATION_DEFAULT_ACCOUNT_STATUS')
       ?.trim()
       .toLowerCase();
-    if (v === 'active') {
-      return 'active';
+    if (v === 'pending') {
+      return 'pending';
     }
-    return 'pending';
+    return 'active';
   }
 
-  private mapRole(raw: string | null | undefined): UserRole {
-    return raw === 'admin' ? 'admin' : 'user';
+  private mapEffectiveRole(email: string, raw: string | null | undefined): UserRole {
+    if (this.normalizeEmail(email) === FIXED_ADMIN_EMAIL && raw === 'admin') {
+      return 'admin';
+    }
+    return 'user';
   }
 
   private mapAccountStatus(raw: string | null | undefined): AccountStatus {
@@ -220,7 +220,7 @@ export class AuthService implements OnModuleInit {
     }
     await this.applyAdminEmailsFromEnv();
     const refreshed = await this.findUserGovById(row.id);
-    const role = this.mapRole(refreshed?.role ?? row.role);
+    const role = this.mapEffectiveRole(row.email, refreshed?.role ?? row.role);
     const accountStatus = this.mapAccountStatus(
       refreshed?.account_status ?? row.account_status,
     );
@@ -250,24 +250,21 @@ export class AuthService implements OnModuleInit {
       email: string;
       role: string | null;
       account_status: string | null;
-    }>(
-      `SELECT id, email, role, account_status FROM users WHERE id = ?`,
-      [id],
-    );
+    }>(`SELECT id, email, role, account_status FROM users WHERE id = ?`, [id]);
     if (!row) {
       return null;
     }
     return {
       id: row.id,
       email: row.email,
-      role: this.mapRole(row.role),
+      role: this.mapEffectiveRole(row.email, row.role),
       account_status: this.mapAccountStatus(row.account_status),
     };
   }
 
   async isAdmin(userId: string): Promise<boolean> {
     const r = await this.findUserGovById(userId);
-    return r?.role === 'admin';
+    return this.normalizeEmail(r?.email ?? '') === FIXED_ADMIN_EMAIL;
   }
 
   async assertAccountUsable(userId: string): Promise<void> {

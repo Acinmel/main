@@ -10,6 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { Pool } from 'mysql2/promise';
 import mysql from 'mysql2/promise';
+import { resolveConfiguredDir } from '../common/resource-paths.util';
 
 /**
  * 持久化：优先 MySQL（线上/商业化推荐），未配置 MYSQL_DATABASE 时回退 SQLite（本地零依赖）。
@@ -53,7 +54,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
 
     const dbPath =
       this.config.get<string>('SQLITE_PATH')?.trim() ||
-      path.join(process.cwd(), 'data', 'app.db');
+      path.join(resolveConfiguredDir(null), 'app.db');
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.sqlite = new Database(dbPath);
     this.sqlite.pragma('journal_mode = WAL');
@@ -149,12 +150,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         cover_url TEXT,
         source_video_url TEXT,
         style_id TEXT,
+        expires_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_avatar_resources_user ON avatar_resources(user_id);
       CREATE INDEX IF NOT EXISTS idx_avatar_resources_updated ON avatar_resources(updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_avatar_resources_expires ON avatar_resources(expires_at);
 
       CREATE TABLE IF NOT EXISTS voice_resources (
         id TEXT PRIMARY KEY NOT NULL,
@@ -168,12 +171,14 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         provider_model TEXT,
         sample_duration_ms INTEGER,
         clone_error TEXT,
+        expires_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_voice_resources_user ON voice_resources(user_id);
       CREATE INDEX IF NOT EXISTS idx_voice_resources_updated ON voice_resources(updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_voice_resources_expires ON voice_resources(expires_at);
 
       CREATE TABLE IF NOT EXISTS subtitle_template_resources (
         id TEXT PRIMARY KEY NOT NULL,
@@ -235,6 +240,19 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     if (!voiceNames.has('clone_error')) {
       db.exec(`ALTER TABLE voice_resources ADD COLUMN clone_error TEXT`);
     }
+
+    const avatarCols = db
+      .prepare(`PRAGMA table_info(avatar_resources)`)
+      .all() as { name: string }[];
+    const avatarNames = new Set(avatarCols.map((c) => c.name));
+    if (!avatarNames.has('expires_at')) {
+      db.exec(`ALTER TABLE avatar_resources ADD COLUMN expires_at TEXT`);
+    }
+    if (!voiceNames.has('expires_at')) {
+      db.exec(`ALTER TABLE voice_resources ADD COLUMN expires_at TEXT`);
+    }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_avatar_resources_expires ON avatar_resources(expires_at)`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_voice_resources_expires ON voice_resources(expires_at)`);
   }
 
   private async migrateMysql(): Promise<void> {
@@ -287,10 +305,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         cover_url VARCHAR(2048) NULL,
         source_video_url VARCHAR(2048) NULL,
         style_id VARCHAR(128) NULL,
+        expires_at VARCHAR(64) NULL,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL,
         INDEX idx_avatar_resources_user (user_id),
         INDEX idx_avatar_resources_updated (updated_at, id),
+        INDEX idx_avatar_resources_expires (expires_at),
         CONSTRAINT fk_avatar_resources_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
@@ -307,10 +327,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         provider_model VARCHAR(128) NULL,
         sample_duration_ms INT NULL,
         clone_error TEXT NULL,
+        expires_at VARCHAR(64) NULL,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL,
         INDEX idx_voice_resources_user (user_id),
         INDEX idx_voice_resources_updated (updated_at, id),
+        INDEX idx_voice_resources_expires (expires_at),
         CONSTRAINT fk_voice_resources_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
@@ -339,6 +361,21 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `SELECT COUNT(1) AS c FROM INFORMATION_SCHEMA.COLUMNS
          WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
         [table, column],
+      );
+      const first = pkt[0];
+      const c =
+        typeof first?.c === 'number'
+          ? first.c
+          : typeof first?.C === 'number'
+            ? first.C
+            : 0;
+      return c > 0;
+    };
+    const hasIndex = async (table: string, indexName: string): Promise<boolean> => {
+      const [pkt] = await pool.query<any[]>(
+        `SELECT COUNT(1) AS c FROM INFORMATION_SCHEMA.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+        [table, indexName],
       );
       const first = pkt[0];
       const c =
@@ -378,6 +415,22 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     }
     if (!(await hasCol('voice_resources', 'clone_error'))) {
       await pool.query(`ALTER TABLE voice_resources ADD COLUMN clone_error TEXT NULL`);
+    }
+    if (!(await hasCol('avatar_resources', 'expires_at'))) {
+      await pool.query(`ALTER TABLE avatar_resources ADD COLUMN expires_at VARCHAR(64) NULL`);
+    }
+    if (!(await hasCol('voice_resources', 'expires_at'))) {
+      await pool.query(`ALTER TABLE voice_resources ADD COLUMN expires_at VARCHAR(64) NULL`);
+    }
+    if (!(await hasIndex('avatar_resources', 'idx_avatar_resources_expires'))) {
+      await pool.query(
+        `ALTER TABLE avatar_resources ADD INDEX idx_avatar_resources_expires (expires_at)`,
+      );
+    }
+    if (!(await hasIndex('voice_resources', 'idx_voice_resources_expires'))) {
+      await pool.query(
+        `ALTER TABLE voice_resources ADD INDEX idx_voice_resources_expires (expires_at)`,
+      );
     }
 
     await pool.query(`

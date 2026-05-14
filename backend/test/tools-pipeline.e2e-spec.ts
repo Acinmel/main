@@ -1,5 +1,6 @@
 process.env.REGISTRATION_DEFAULT_ACCOUNT_STATUS = 'active';
 process.env.AI_MOCK_FALLBACK = 'true';
+process.env.ALI_VIDEORETALK_USE_TEMP_UPLOAD = 'false';
 
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
@@ -148,7 +149,7 @@ describe('Tools transcribe pipeline (e2e)', () => {
     expect(res.body.optimizedScript.length).toBeGreaterThan(0);
   });
 
-  it('POST /api/v1/tools/lip-sync-preview falls back to preview video when TTS/LipSync APIs are unavailable', async () => {
+  it('POST /api/v1/tools/lip-sync-preview fails fast when VideoReTalk public media URL is unavailable', async () => {
     fs.mkdirSync(videoDir, { recursive: true });
     const localVideoName = 'avatar-source.mp4';
     fs.writeFileSync(path.join(videoDir, localVideoName), Buffer.from('fake mp4 payload'));
@@ -176,21 +177,13 @@ describe('Tools transcribe pipeline (e2e)', () => {
         avatarResourceId: avatar.body.id,
         voiceResourceId: voice.body.id,
       })
-      .expect(201);
+      .expect(400);
 
-    expect(preview.body.videoUrl).toMatch(/^\/api\/v1\/tools\/preview-videos\/.+\/stream$/);
-    expect(preview.body.hint).toContain('回退');
-    expect(preview.body.providerResponse).toMatchObject({
-      fallback: true,
-    });
-
-    await request(app.getHttpServer())
-      .get(preview.body.videoUrl)
-      .set('Authorization', `Bearer ${authToken}`)
-      .expect(200);
+    expect(preview.body.message).toContain('VideoReTalk');
+    expect(preview.body.message).toContain('PUBLIC_BASE_URL');
   });
 
-  it('POST /api/v1/tools/subtitle-workflow-preview and finalize run end-to-end', async () => {
+  it('POST /api/v1/tools/subtitle-workflow-preview requires VideoReTalk readiness', async () => {
     fs.mkdirSync(videoDir, { recursive: true });
     const sourcePath = path.join(videoDir, 'workflow-source.mp4');
     fs.writeFileSync(sourcePath, Buffer.from('fake mp4 payload'));
@@ -228,40 +221,9 @@ describe('Tools transcribe pipeline (e2e)', () => {
         subtitleTemplateId: templateId,
         previewSeconds: 5,
       })
-      .expect(201);
+      .expect(400);
 
-    expect(preview.body).toMatchObject({
-      draftId: expect.any(String),
-      previewUrl: expect.stringMatching(/^\/api\/v1\/tools\/preview-videos\/.+\/stream$/),
-      subtitleJson: expect.objectContaining({
-        version: 1,
-        cues: expect.any(Array),
-      }),
-    });
-    expect(preview.body.subtitleJson.cues.length).toBeGreaterThan(0);
-
-    await request(app.getHttpServer())
-      .get(preview.body.previewUrl)
-      .set('Authorization', `Bearer ${authToken}`)
-      .expect(200);
-
-    const finalRes = await request(app.getHttpServer())
-      .post('/api/v1/tools/subtitle-workflow-finalize')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ draftId: preview.body.draftId })
-      .expect(201);
-
-    expect(finalRes.body).toMatchObject({
-      draftId: preview.body.draftId,
-      videoUrl: expect.stringMatching(/^\/api\/v1\/tools\/preview-videos\/.+\/stream$/),
-      subtitleJson: expect.objectContaining({
-        version: 1,
-      }),
-    });
-
-    await request(app.getHttpServer())
-      .get(finalRes.body.videoUrl)
-      .set('Authorization', `Bearer ${authToken}`)
-      .expect(200);
+    expect(preview.body.message).toContain('VideoReTalk');
+    expect(preview.body.message).toContain('PUBLIC_BASE_URL');
   });
 });

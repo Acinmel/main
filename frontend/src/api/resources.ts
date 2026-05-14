@@ -45,7 +45,7 @@ export async function uploadAvatarResource(body: CreateAvatarResourceDraft) {
   if (body.styleId) form.append('styleId', body.styleId)
   const { data } = await http.post<AvatarResource>('v1/resources/avatars/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 300_000,
+    timeout: 600_000,
   })
   return data
 }

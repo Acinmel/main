@@ -1,6 +1,5 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import naive from 'naive-ui'
 import '@fontsource/inter/400.css'
 import '@fontsource/inter/500.css'
 import '@fontsource/inter/600.css'
@@ -29,7 +28,6 @@ app.config.errorHandler = (err, instance, info) => {
 const pinia = createPinia()
 app.use(pinia)
 app.use(router)
-app.use(naive)
 
 function showFatalMessage(text: string) {
   const el = document.getElementById('app')

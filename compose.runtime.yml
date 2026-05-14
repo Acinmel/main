@@ -57,12 +57,12 @@ services:
       YTDLP_BIN: /usr/local/bin/yt-dlp
       YTDLP_TIMEOUT_MS: '300000'
       DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-300000}
-      VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/data/download-video}
+      VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/workspace/data/download-video}
       FFMPEG_BIN: /usr/bin/ffmpeg
-      DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/backend/data/digital-humans}
+      DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/data/digital-humans}
     volumes:
-      - video_downloads:/data/download-video
-      - digital_human_storage:/workspace/backend/data/digital-humans
+      - video_downloads:/workspace/data/download-video
+      - digital_human_storage:/workspace/data/digital-humans
     depends_on:
       mysql:
         condition: service_healthy

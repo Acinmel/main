@@ -15,6 +15,7 @@ export interface ResourceBase {
   recommended: boolean
   createdAt: string
   updatedAt: string
+  expiresAt?: string | null
 }
 
 export interface AvatarResource extends ResourceBase {

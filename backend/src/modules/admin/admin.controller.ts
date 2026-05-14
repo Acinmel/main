@@ -11,10 +11,18 @@ import {
 import type { Request } from 'express';
 import { AdminRoleGuard } from '../governance/admin-role.guard';
 import { AdminService } from './admin.service';
+import type { AdminResourceKind } from './admin.service';
 
 class PatchUserDto {
   role?: 'user' | 'admin';
   accountStatus?: 'pending' | 'active' | 'disabled';
+}
+
+function adminResourceKindOf(value?: string): AdminResourceKind {
+  if (value === 'voices' || value === 'subtitle-templates') {
+    return value;
+  }
+  return 'avatars';
 }
 
 @Controller('v1/admin')
@@ -78,5 +86,22 @@ export class AdminController {
     const limit = limitStr ? parseInt(limitStr, 10) : 30;
     const offset = offsetStr ? parseInt(offsetStr, 10) : 0;
     return this.admin.listDigitalHumanTemplates({ q, limit, offset });
+  }
+
+  @Get('resources')
+  listResources(
+    @Query('kind') kind?: string,
+    @Query('q') q?: string,
+    @Query('limit') limitStr?: string,
+    @Query('offset') offsetStr?: string,
+  ) {
+    const limit = limitStr ? parseInt(limitStr, 10) : 30;
+    const offset = offsetStr ? parseInt(offsetStr, 10) : 0;
+    return this.admin.listResources({
+      kind: adminResourceKindOf(kind),
+      q,
+      limit,
+      offset,
+    });
   }
 }

@@ -9,10 +9,7 @@ import { App } from 'supertest/types';
 import { configureHttpApp } from '../src/app.config';
 import { AppModule } from '../src/app.module';
 
-/**
- * 后台 /v1/admin/* 仅 role=admin 可访问（AdminRoleGuard + DB isAdmin）。
- * 使用独立 SQLite 文件，避免污染本地 data/app.db。
- */
+/** 后台 /v1/admin/* 仅固定管理员邮箱可访问，使用独立 SQLite 文件避免污染本地 data/app.db。 */
 describe('Admin access (e2e)', () => {
   let app: INestApplication<App>;
   let sqlitePath: string;
@@ -50,7 +47,7 @@ describe('Admin access (e2e)', () => {
     await request(app.getHttpServer()).get('/api/v1/admin/stats').expect(401);
   });
 
-  it('新注册用户（非 admin）访问 admin 应 403', async () => {
+  it('普通注册用户访问 admin 应 403', async () => {
     const email = `u_${randomUUID().slice(0, 8)}@e2e.local`;
     const password = 'password123';
 
@@ -66,5 +63,22 @@ describe('Admin access (e2e)', () => {
       .get('/api/v1/admin/stats')
       .set('Authorization', `Bearer ${token}`)
       .expect(403);
+  });
+
+  it('固定管理员邮箱访问 admin 应 200', async () => {
+    const password = 'password123';
+
+    const reg = await request(app.getHttpServer())
+      .post('/api/v1/auth/register')
+      .send({ email: '447519854@qq.com', password })
+      .expect(201);
+
+    const token = reg.body.token as string;
+    expect(token).toBeTruthy();
+
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/stats')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(200);
   });
 });

@@ -37,6 +37,9 @@ const deleteOpen = ref(false)
 const deleting = ref(false)
 const pendingDeleteIds = ref<string[]>([])
 const previewUrl = ref<string | null>(null)
+const cardVideoUrls = ref<Record<string, string>>({})
+const cardVideoLoading = ref<Record<string, boolean>>({})
+const pendingCardVideoIds = new Set<string>()
 let previewObjectUrl: string | null = null
 
 const list = useCursorList<AvatarResource>((cursor) =>
@@ -57,10 +60,16 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  if (previewObjectUrl) {
-    URL.revokeObjectURL(previewObjectUrl)
-  }
+  revokePreviewObjectUrl()
+  clearCardVideoUrls()
 })
+
+watch(
+  () => list.items.value,
+  (items) => {
+    void syncCardVideoPreviews(items)
+  },
+)
 
 function toggleSelected(id: string, checked: boolean) {
   selectedIds.value = checked
@@ -73,6 +82,58 @@ function revokePreviewObjectUrl() {
     URL.revokeObjectURL(previewObjectUrl)
     previewObjectUrl = null
   }
+}
+
+function revokeCardVideoUrl(id: string) {
+  const url = cardVideoUrls.value[id]
+  if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
+  const nextUrls = { ...cardVideoUrls.value }
+  delete nextUrls[id]
+  cardVideoUrls.value = nextUrls
+}
+
+function clearCardVideoUrls() {
+  for (const id of Object.keys(cardVideoUrls.value)) {
+    revokeCardVideoUrl(id)
+  }
+}
+
+async function ensureCardVideoPreview(item: AvatarResource) {
+  const source = item.originalVideoUrl?.trim()
+  if (!source || cardVideoUrls.value[item.id] || pendingCardVideoIds.has(item.id)) return
+
+  pendingCardVideoIds.add(item.id)
+  cardVideoLoading.value = { ...cardVideoLoading.value, [item.id]: true }
+  try {
+    const nextUrl = /^(https?:|data:|blob:)/i.test(source)
+      ? source
+      : URL.createObjectURL(await fetchSavedVideoBlob(source))
+
+    if (!list.items.value.some((current) => current.id === item.id)) {
+      if (nextUrl.startsWith('blob:')) URL.revokeObjectURL(nextUrl)
+      return
+    }
+
+    cardVideoUrls.value = {
+      ...cardVideoUrls.value,
+      [item.id]: nextUrl,
+    }
+  } catch {
+    // 单张卡片预览失败不阻塞资源库使用，仍保留封面和“原始视频”弹窗按钮兜底。
+  } finally {
+    pendingCardVideoIds.delete(item.id)
+    const nextLoading = { ...cardVideoLoading.value }
+    delete nextLoading[item.id]
+    cardVideoLoading.value = nextLoading
+  }
+}
+
+async function syncCardVideoPreviews(items: AvatarResource[]) {
+  const visibleIds = new Set(items.map((item) => item.id))
+  for (const id of Object.keys(cardVideoUrls.value)) {
+    if (!visibleIds.has(id)) revokeCardVideoUrl(id)
+  }
+  await Promise.all(items.map((item) => ensureCardVideoPreview(item)))
 }
 
 async function rename(item: AvatarResource, name: string) {
@@ -175,6 +236,8 @@ async function preview(item: AvatarResource) {
           :key="item.id"
           :item="item"
           :selected="selectedIds.includes(item.id)"
+          :preview-video-url="cardVideoUrls[item.id]"
+          :preview-loading="Boolean(cardVideoLoading[item.id])"
           @update:selected="toggleSelected(item.id, $event)"
           @rename="rename(item, $event)"
           @delete="requestDelete([item.id])"

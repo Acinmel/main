@@ -10,6 +10,7 @@ import {
   SparklesOutline,
   VideocamOutline,
 } from '@vicons/ionicons5'
+import { isFixedAdminEmail } from '@/constants/admin'
 import { useDigitalHumanStore } from '@/stores/digitalHuman'
 import { useTaskDraftStore } from '@/stores/taskDraft'
 import { useUserStore } from '@/stores/user'
@@ -20,8 +21,9 @@ const user = useUserStore()
 const draft = useTaskDraftStore()
 const digitalHuman = useDigitalHumanStore()
 
+const canSeeAdmin = computed(() => isFixedAdminEmail(user.profile?.email))
 const isPendingNonAdmin = computed(
-  () => user.profile?.accountStatus === 'pending' && user.profile?.role !== 'admin',
+  () => user.profile?.accountStatus === 'pending' && !canSeeAdmin.value,
 )
 
 const navItems = computed(() => {
@@ -41,31 +43,44 @@ const navItems = computed(() => {
   ]
 
   if (!user.isLoggedIn) {
-    return [...base, { label: '登录 / 注册', name: 'login', icon: LogInOutline }]
+    return [
+      ...base,
+      { label: '登录 / 注册', name: 'login', icon: LogInOutline },
+    ]
   }
 
-  return [
+  const loggedInItems = [
     ...base,
     { label: '数字人库', name: 'home', icon: PersonCircleOutline },
     { label: '资源库', name: 'resource-library', icon: AlbumsOutline },
   ]
+  if (canSeeAdmin.value) {
+    loggedInItems.push({ label: '后台', name: 'erp-dashboard', icon: SparklesOutline })
+  }
+  return loggedInItems
 })
 
 const pageTitle = computed(() => String(route.meta.title || 'AI 内容工作台'))
 
 const primaryTo = computed(() => {
   if (isPendingNonAdmin.value) return { name: 'account-pending' as const }
-  return user.isLoggedIn ? { name: 'studio' as const } : { name: 'register' as const }
+  return user.isLoggedIn
+    ? { name: 'studio' as const }
+    : { name: 'register' as const }
 })
 
-const primaryText = computed(() => (user.isLoggedIn ? '立即创作' : '免费注册 / 登录'))
+const primaryText = computed(() =>
+  user.isLoggedIn ? '立即创作' : '免费注册 / 登录',
+)
 
 const secondaryTo = computed(() => {
   if (user.isLoggedIn) return { name: 'resource-library' as const }
   return { name: 'login' as const }
 })
 
-const secondaryText = computed(() => (user.isLoggedIn ? '进入资源库' : '账号入口'))
+const secondaryText = computed(() =>
+  user.isLoggedIn ? '进入资源库' : '账号入口',
+)
 
 const memberTitle = computed(() => {
   if (!user.profile?.email) return '未登录'
@@ -74,7 +89,7 @@ const memberTitle = computed(() => {
 
 const memberSubtitle = computed(() => {
   if (!user.isLoggedIn) return 'AI Ready'
-  if (user.profile?.role === 'admin') return '管理员已登录'
+  if (canSeeAdmin.value) return '管理员已登录'
   if (user.profile?.accountStatus === 'pending') return '等待审核中'
   return '工作台已就绪'
 })
@@ -159,12 +174,18 @@ onMounted(() => {
         <div class="shell__actions">
           <span class="shell__hint">为短视频团队打造的 AI 内容工作台</span>
           <RouterLink :to="secondaryTo">
-            <n-button secondary class="shell__secondary-action">{{ secondaryText }}</n-button>
+            <n-button secondary class="shell__secondary-action">{{
+              secondaryText
+            }}</n-button>
           </RouterLink>
           <RouterLink :to="primaryTo">
-            <n-button type="primary" class="shell__primary-action">{{ primaryText }}</n-button>
+            <n-button type="primary" class="shell__primary-action">{{
+              primaryText
+            }}</n-button>
           </RouterLink>
-          <n-button v-if="user.isLoggedIn" quaternary @click="logout">退出</n-button>
+          <n-button v-if="user.isLoggedIn" quaternary @click="logout"
+            >退出</n-button
+          >
         </div>
       </header>
 
@@ -270,7 +291,11 @@ onMounted(() => {
 .shell__nav-link.router-link-active {
   color: var(--primary);
   border-color: rgba(75, 107, 255, 0.18);
-  background: linear-gradient(135deg, rgba(75, 107, 255, 0.08), rgba(75, 107, 255, 0.02));
+  background: linear-gradient(
+    135deg,
+    rgba(75, 107, 255, 0.08),
+    rgba(75, 107, 255, 0.02)
+  );
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.72),
     0 16px 34px rgba(75, 107, 255, 0.12);
@@ -323,7 +348,11 @@ onMounted(() => {
   place-items: center;
   border-radius: 16px;
   color: var(--primary);
-  background: linear-gradient(180deg, rgba(75, 107, 255, 0.12), rgba(75, 107, 255, 0.04));
+  background: linear-gradient(
+    180deg,
+    rgba(75, 107, 255, 0.12),
+    rgba(75, 107, 255, 0.04)
+  );
   font-size: 18px;
 }
 

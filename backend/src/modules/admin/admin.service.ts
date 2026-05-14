@@ -3,7 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import type { AccountStatus, UserRole } from '../auth/auth.service';
+import { FIXED_ADMIN_EMAIL, type AccountStatus, type UserRole } from '../auth/auth.service';
 import { DatabaseService } from '../../database/database.service';
 
 export type AdminUserDto = {
@@ -19,6 +19,24 @@ export type AdminUserDto = {
     lastWorkAt: string | null;
     digitalHumanConfigured: boolean;
   };
+};
+
+export type AdminResourceKind = 'avatars' | 'voices' | 'subtitle-templates';
+
+export type AdminResourceDto = {
+  id: string;
+  kind: AdminResourceKind;
+  userId: string | null;
+  email: string | null;
+  owner: 'user' | 'recommended';
+  name: string;
+  recommended: boolean;
+  mediaUrl: string | null;
+  detail: string | null;
+  provider: string | null;
+  cloneStatus: string | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 @Injectable()
@@ -173,7 +191,11 @@ export class AdminService {
       return {
         id: r.id,
         email: r.email,
-        role: (r.role === 'admin' ? 'admin' : 'user') as UserRole,
+        role: (
+          r.email.trim().toLowerCase() === FIXED_ADMIN_EMAIL && r.role === 'admin'
+            ? 'admin'
+            : 'user'
+        ) as UserRole,
         accountStatus: ['pending', 'active', 'disabled'].includes(
           String(r.account_status),
         )
@@ -325,6 +347,170 @@ export class AdminService {
     };
   }
 
+  async listResources(opts: {
+    kind: AdminResourceKind;
+    limit: number;
+    offset: number;
+    q?: string;
+  }): Promise<{ total: number; items: AdminResourceDto[] }> {
+    const limit = Math.min(200, Math.max(1, opts.limit));
+    const offset = Math.max(0, opts.offset);
+    const qq = opts.q?.trim();
+    const args: unknown[] = [];
+    let where = '';
+    if (qq) {
+      where =
+        'WHERE u.email LIKE ? OR r.name LIKE ? OR r.id LIKE ? OR r.user_id LIKE ?';
+      const wild = `%${qq}%`;
+      args.push(wild, wild, wild, wild);
+    }
+
+    if (opts.kind === 'avatars') {
+      const countRow = await this.db.queryOne<{ c: number }>(
+        `SELECT COUNT(1) AS c FROM avatar_resources r LEFT JOIN users u ON u.id = r.user_id ${where}`,
+        args,
+      );
+      const rows = await this.db.queryAll<{
+        id: string;
+        user_id: string | null;
+        email: string | null;
+        name: string;
+        is_recommended: number;
+        cover_url: string | null;
+        source_video_url: string | null;
+        style_id: string | null;
+        created_at: string;
+        updated_at: string;
+      }>(
+        `
+        SELECT r.id, r.user_id, u.email, r.name, r.is_recommended, r.cover_url,
+               r.source_video_url, r.style_id, r.created_at, r.updated_at
+        FROM avatar_resources r
+        LEFT JOIN users u ON u.id = r.user_id
+        ${where}
+        ORDER BY r.updated_at DESC
+        LIMIT ? OFFSET ?
+        `,
+        [...args, limit, offset],
+      );
+      return {
+        total: countRow?.c ?? 0,
+        items: rows.map((r) => ({
+          id: r.id,
+          kind: opts.kind,
+          userId: r.user_id,
+          email: r.email,
+          owner: r.is_recommended ? 'recommended' : 'user',
+          name: r.name,
+          recommended: Boolean(r.is_recommended),
+          mediaUrl: r.source_video_url || r.cover_url || null,
+          detail: r.style_id,
+          provider: null,
+          cloneStatus: null,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        })),
+      };
+    }
+
+    if (opts.kind === 'voices') {
+      const countRow = await this.db.queryOne<{ c: number }>(
+        `SELECT COUNT(1) AS c FROM voice_resources r LEFT JOIN users u ON u.id = r.user_id ${where}`,
+        args,
+      );
+      const rows = await this.db.queryAll<{
+        id: string;
+        user_id: string | null;
+        email: string | null;
+        name: string;
+        is_recommended: number;
+        audio_url: string | null;
+        clone_status: string | null;
+        provider: string | null;
+        provider_voice: string | null;
+        provider_model: string | null;
+        created_at: string;
+        updated_at: string;
+      }>(
+        `
+        SELECT r.id, r.user_id, u.email, r.name, r.is_recommended, r.audio_url,
+               r.clone_status, r.provider, r.provider_voice, r.provider_model,
+               r.created_at, r.updated_at
+        FROM voice_resources r
+        LEFT JOIN users u ON u.id = r.user_id
+        ${where}
+        ORDER BY r.updated_at DESC
+        LIMIT ? OFFSET ?
+        `,
+        [...args, limit, offset],
+      );
+      return {
+        total: countRow?.c ?? 0,
+        items: rows.map((r) => ({
+          id: r.id,
+          kind: opts.kind,
+          userId: r.user_id,
+          email: r.email,
+          owner: r.is_recommended ? 'recommended' : 'user',
+          name: r.name,
+          recommended: Boolean(r.is_recommended),
+          mediaUrl: r.audio_url || null,
+          detail: r.provider_voice || r.provider_model || null,
+          provider: r.provider,
+          cloneStatus: r.clone_status,
+          createdAt: r.created_at,
+          updatedAt: r.updated_at,
+        })),
+      };
+    }
+
+    const countRow = await this.db.queryOne<{ c: number }>(
+      `SELECT COUNT(1) AS c FROM subtitle_template_resources r LEFT JOIN users u ON u.id = r.user_id ${where}`,
+      args,
+    );
+    const rows = await this.db.queryAll<{
+      id: string;
+      user_id: string | null;
+      email: string | null;
+      name: string;
+      is_recommended: number;
+      cover_url: string | null;
+      preview_url: string | null;
+      style_json: string | null;
+      created_at: string;
+      updated_at: string;
+    }>(
+      `
+      SELECT r.id, r.user_id, u.email, r.name, r.is_recommended, r.cover_url,
+             r.preview_url, r.style_json, r.created_at, r.updated_at
+      FROM subtitle_template_resources r
+      LEFT JOIN users u ON u.id = r.user_id
+      ${where}
+      ORDER BY r.updated_at DESC
+      LIMIT ? OFFSET ?
+      `,
+      [...args, limit, offset],
+    );
+    return {
+      total: countRow?.c ?? 0,
+      items: rows.map((r) => ({
+        id: r.id,
+        kind: opts.kind,
+        userId: r.user_id,
+        email: r.email,
+        owner: r.is_recommended ? 'recommended' : 'user',
+        name: r.name,
+        recommended: Boolean(r.is_recommended),
+        mediaUrl: r.preview_url || r.cover_url || null,
+        detail: r.style_json,
+        provider: null,
+        cloneStatus: null,
+        createdAt: r.created_at,
+        updatedAt: r.updated_at,
+      })),
+    };
+  }
+
   async globalStats(): Promise<{
     userCount: number;
     auditsTotal: number;
@@ -358,12 +544,15 @@ export class AdminService {
     };
   }
 
-  async updateUser(id: string, body: Partial<{ role: UserRole; accountStatus: AccountStatus }>) {
+  async updateUser(
+    id: string,
+    body: Partial<{ role: UserRole; accountStatus: AccountStatus }>,
+  ) {
     if (!id?.trim()) {
       throw new BadRequestException('id 不能为空');
     }
-    const exists = await this.db.queryOne<{ id: string }>(
-      `SELECT id FROM users WHERE id = ?`,
+    const exists = await this.db.queryOne<{ id: string; email: string }>(
+      `SELECT id, email FROM users WHERE id = ?`,
       [id],
     );
     if (!exists) {
@@ -375,12 +564,11 @@ export class AdminService {
     if (role === undefined && accountStatus === undefined) {
       throw new BadRequestException('至少提供 role 或 accountStatus 之一');
     }
-    if (
-      role !== undefined &&
-      role !== 'user' &&
-      role !== 'admin'
-    ) {
+    if (role !== undefined && role !== 'user' && role !== 'admin') {
       throw new BadRequestException('role 必须为 user 或 admin');
+    }
+    if (role === 'admin' && exists.email.trim().toLowerCase() !== FIXED_ADMIN_EMAIL) {
+      throw new BadRequestException(`后台管理员仅允许固定账号 ${FIXED_ADMIN_EMAIL}`);
     }
     if (
       accountStatus !== undefined &&
@@ -399,13 +587,16 @@ export class AdminService {
       return { ok: true as const };
     }
     if (role !== undefined) {
-      await this.db.execute(`UPDATE users SET role = ? WHERE id = ?`, [role, id]);
-    }
-    if (accountStatus !== undefined) {
-      await this.db.execute(`UPDATE users SET account_status = ? WHERE id = ?`, [
-        accountStatus,
+      await this.db.execute(`UPDATE users SET role = ? WHERE id = ?`, [
+        role,
         id,
       ]);
+    }
+    if (accountStatus !== undefined) {
+      await this.db.execute(
+        `UPDATE users SET account_status = ? WHERE id = ?`,
+        [accountStatus, id],
+      );
     }
     return { ok: true as const };
   }

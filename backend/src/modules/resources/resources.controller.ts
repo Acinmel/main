@@ -19,6 +19,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import * as path from 'node:path';
 import type { Express, Request, Response } from 'express';
 import { ResourcesService } from './resources.service';
+import { Public } from '../auth/public.decorator';
 import type { ResourceScope } from './resources.types';
 
 class RenameResourceDto {
@@ -160,6 +161,23 @@ export class ResourcesController {
     }
     res.setHeader('Content-Type', guessAudioMimeFromFilename(full));
     res.setHeader('Cache-Control', 'private, max-age=300');
+    return new StreamableFile(createReadStream(full));
+  }
+
+  @Public()
+  @Get('voice-files/:fileName/provider-stream')
+  streamProviderVoiceFile(
+    @Param('fileName') fileName: string,
+    @Query('token') token: string | undefined,
+    @Query('expires') expires: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ): StreamableFile {
+    const full = this.resources.resolveProviderVoiceSamplePathOrThrow(fileName, token, expires);
+    if (!existsSync(full)) {
+      throw new NotFoundException('音频样本不存在');
+    }
+    res.setHeader('Content-Type', guessAudioMimeFromFilename(full));
+    res.setHeader('Cache-Control', 'private, max-age=60');
     return new StreamableFile(createReadStream(full));
   }
 

@@ -18,7 +18,6 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { constants as fsConstants } from 'fs';
 import * as fs from 'fs/promises';
-import * as os from 'os';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -26,6 +25,7 @@ import type { Express, Request, Response } from 'express';
 import { createReadStream, existsSync } from 'fs';
 import { getTranscribeMediaMaxBytes } from '../../common/media.constants';
 import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
+import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import { RewriteAiService } from '../../integrations/ai/rewrite-ai.service';
 import { DigitalHumanImageService } from '../../integrations/ai/digital-human-image.service';
 import { VideoGenerateLlmService } from '../../integrations/ai/video-generate-llm.service';
@@ -38,7 +38,10 @@ import {
   type ArkI2vTaskSubmitBody,
 } from '../../integrations/ai/ark-i2v-video.service';
 import { AliLipSyncService } from '../../integrations/ai/ali-lip-sync.service';
-import { SpeechAiService } from '../../integrations/ai/speech-ai.service';
+import {
+  SpeechAiService,
+  type VoiceTuningOptions,
+} from '../../integrations/ai/speech-ai.service';
 import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.service';
 import {
   FfmpegAudioService,
@@ -90,7 +93,15 @@ class LipSyncPreviewDto {
   voiceResourceId!: string;
 }
 
-class VoicePreviewDto {
+class VoiceTuningDto {
+  voiceLanguage?: string;
+  voiceEmotion?: string;
+  voiceEmotionIntensity?: number;
+  voiceRate?: number;
+  voiceVolume?: number;
+}
+
+class VoicePreviewDto extends VoiceTuningDto {
   script!: string;
   voiceResourceId!: string;
 }
@@ -98,6 +109,11 @@ class VoicePreviewDto {
 class SubtitleWorkflowPreviewDto extends LipSyncPreviewDto {
   subtitleTemplateId!: string;
   previewSeconds?: number;
+  voiceLanguage?: string;
+  voiceEmotion?: string;
+  voiceEmotionIntensity?: number;
+  voiceRate?: number;
+  voiceVolume?: number;
 }
 
 class SubtitleWorkflowFinalizeDto {
@@ -112,31 +128,56 @@ function getLipSyncVideoMaxBytes(): number {
   return 300 * 1024 * 1024;
 }
 
-/** 默认 Windows：C:\\downloadVideo；其它系统：用户目录下 downloadVideo。可用 VIDEO_SAVE_DIR 覆盖。 */
+/** 默认保存到项目内 backend/data/download-video；可用 VIDEO_SAVE_DIR 覆盖。 */
 function getVideoSaveDir(config: ConfigService): string {
-  const fromEnv = config.get<string>('VIDEO_SAVE_DIR')?.trim();
-  if (fromEnv) return path.resolve(fromEnv);
-  return process.platform === 'win32'
-    ? 'C:\\downloadVideo'
-    : path.join(os.homedir(), 'downloadVideo');
+  return resolveConfiguredDir(config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
 }
 
 function getPreviewVideoSaveDir(config: ConfigService): string {
-  const fromEnv = config.get<string>('PREVIEW_VIDEO_SAVE_DIR')?.trim();
-  if (fromEnv) return path.resolve(fromEnv);
-  return path.join(getVideoSaveDir(config), 'preview-videos');
+  return resolveConfiguredDir(config.get<string>('PREVIEW_VIDEO_SAVE_DIR'), 'preview-videos');
 }
 
 function getPreviewAudioSaveDir(config: ConfigService): string {
-  const fromEnv = config.get<string>('PREVIEW_AUDIO_SAVE_DIR')?.trim();
-  if (fromEnv) return path.resolve(fromEnv);
-  return path.join(getVideoSaveDir(config), 'preview-audios');
+  return resolveConfiguredDir(config.get<string>('PREVIEW_AUDIO_SAVE_DIR'), 'preview-audios');
+}
+
+function readFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function clampNumber(value: unknown, min: number, max: number): number | null {
+  const parsed = readFiniteNumber(value);
+  if (parsed === null) return null;
+  return Math.min(max, Math.max(min, Number(parsed.toFixed(2))));
+}
+
+function cleanShortText(value: unknown, maxLength = 32): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed.slice(0, maxLength) : null;
+}
+
+function buildVoiceTuning(body: VoiceTuningDto): VoiceTuningOptions {
+  return {
+    language: cleanShortText(body.voiceLanguage),
+    emotion: cleanShortText(body.voiceEmotion),
+    emotionIntensity: clampNumber(body.voiceEmotionIntensity, 0.6, 1.5),
+    speechRate: clampNumber(body.voiceRate, 0.5, 1.5),
+    volume: clampNumber(body.voiceVolume, 0.5, 1.5),
+  };
 }
 
 function getLipSyncPublicMediaDir(config: ConfigService, kind: 'videos' | 'audios'): string {
-  const root = config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR')?.trim();
-  if (root) return path.join(path.resolve(root), kind);
-  return path.join(getVideoSaveDir(config), 'lip-sync-public', kind);
+  const root = resolveConfiguredDir(
+    config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR'),
+    'lip-sync-public',
+  );
+  return path.join(root, kind);
 }
 
 function sanitizeFilenameForDisk(name: string): string {
@@ -415,6 +456,7 @@ export class ToolsController {
     }
 
     const videoMedia = await this.readVideoFromSourceRef(avatar.originalVideoUrl);
+    this.aliLipSync.ensureConfigured();
     const estimatedTotalSeconds = Math.min(
       180,
       Math.max(15, Math.round(script.length * 0.22)),
@@ -464,10 +506,7 @@ export class ToolsController {
       hintParts.push(
         `当前环境未走通真实 TTS（${toSingleErrorMessage(e)}），已回退为原始出镜视频，便于先联调整体流程。`,
       );
-      return fallbackToPreview(videoMedia, 'speech-unavailable', {
-        ttsConfigured: this.speechAi.isConfigured(),
-        lipSyncConfigured: this.aliLipSync.isConfigured(),
-      });
+      throw new BadRequestException(`TTS 音频生成失败，无法进入 VideoReTalk：${toSingleErrorMessage(e)}`);
     }
 
     let workingVideo:
@@ -497,20 +536,7 @@ export class ToolsController {
       hintParts.push(
         `音轨替换失败（${toSingleErrorMessage(e)}），已回退为原始出镜视频。`,
       );
-      return fallbackToPreview(videoMedia, 'mux-failed', {
-        ttsConfigured: this.speechAi.isConfigured(),
-        lipSyncConfigured: this.aliLipSync.isConfigured(),
-        voice: speech.voice,
-      });
-    }
-
-    if (!this.aliLipSync.isConfigured()) {
-      hintParts.push('当前环境未配置对口型 API，已返回换音轨预览，可先联调前后端流程。');
-      return fallbackToPreview(workingVideo, 'lip-sync-unconfigured', {
-        ttsConfigured: this.speechAi.isConfigured(),
-        lipSyncConfigured: false,
-        voice: speech.voice,
-      });
+      hintParts.push('本地换音轨预览失败不阻断 VideoReTalk，将继续使用原视频和 TTS 音频发起对口型。');
     }
 
     try {
@@ -536,17 +562,20 @@ export class ToolsController {
           result.hint ||
           `${hintParts.join(' ')} 已使用「${voice.name}」驱动「${avatar.name}」生成对口型预览。`,
         providerResponse: result.providerResponse,
+        fallback: false,
+        lipSyncApplied: true,
       };
     } catch (e) {
       hintParts.push(
         `对口型接口调用失败（${toSingleErrorMessage(e)}），已回退为换音轨预览。`,
       );
-      return fallbackToPreview(workingVideo, 'lip-sync-failed', {
-        ttsConfigured: this.speechAi.isConfigured(),
-        lipSyncConfigured: true,
-        voice: speech.voice,
-      });
+      throw new BadRequestException(`VideoReTalk 对口型失败：${toSingleErrorMessage(e)}`);
     }
+  }
+
+  @Get('lip-sync-readiness')
+  getLipSyncReadiness() {
+    return this.aliLipSync.getReadiness();
   }
 
   @Post('voice-preview')
@@ -561,6 +590,26 @@ export class ToolsController {
 
     const voice = await this.resources.getVoice(req.userId!, body.voiceResourceId.trim());
     const estimatedDurationSeconds = Math.max(2.8, Math.min(24, script.length * 0.22));
+    const voiceTuning = buildVoiceTuning(body);
+
+    if (voice.provider === 'local-upload') {
+      const localAudio = await this.resources.readManagedVoiceSample(voice.audioUrl);
+      if (!localAudio) {
+        throw new BadRequestException('未找到本地上传音频文件，请重新上传音色素材');
+      }
+      return {
+        audioUrl: await this.persistPreviewAudio({
+          buffer: localAudio.buffer,
+          originalname: localAudio.originalname,
+        }),
+        hint: `已使用「${voice.name}」本地上传音频作为试听音轨。本地音频不会重新应用情绪/强度，需使用 TTS 音色才能动态生成。`,
+        ttsMode: 'provider' as const,
+        voiceLabel: voice.name,
+        durationSeconds: voice.sampleDurationMs
+          ? Math.round(voice.sampleDurationMs / 1000)
+          : estimatedDurationSeconds,
+      };
+    }
 
     try {
       const speech = await this.speechAi.synthesizeAudio({
@@ -570,13 +619,16 @@ export class ToolsController {
         provider: voice.provider,
         providerVoice: voice.providerVoice,
         providerModel: voice.providerModel,
+        voiceTuning,
       });
       return {
         audioUrl: await this.persistPreviewAudio({
           buffer: speech.buffer,
           originalname: `tts-preview${this.audioExtensionForMime(speech.mimeType)}`,
         }),
-        hint: `已用「${voice.name}」生成可试听的配音音轨。`,
+        hint: [`已用「${voice.name}」生成可试听的配音音轨。`, speech.styleHint]
+          .filter(Boolean)
+          .join(' '),
         ttsMode: 'provider' as const,
         voiceLabel: voice.name,
         durationSeconds: estimatedDurationSeconds,
@@ -613,6 +665,7 @@ export class ToolsController {
       voiceResourceId: body.voiceResourceId,
       subtitleTemplateId: body.subtitleTemplateId,
       previewSeconds: body.previewSeconds,
+      voiceTuning: buildVoiceTuning(body),
     });
   }
 
@@ -873,7 +926,11 @@ export class ToolsController {
 
   private audioExtensionForMime(mimeType: string): string {
     if (mimeType === 'audio/wav') return '.wav';
+    if (mimeType === 'audio/aac') return '.aac';
     if (mimeType === 'audio/mp4') return '.m4a';
+    if (mimeType === 'audio/ogg') return '.ogg';
+    if (mimeType === 'audio/flac') return '.flac';
+    if (mimeType === 'audio/webm') return '.webm';
     return '.mp3';
   }
 
@@ -1196,7 +1253,7 @@ export class ToolsController {
   }
 
   /**
-   * 下载源视频并保存到本机目录（默认 Windows：C:\\downloadVideo；见 VIDEO_SAVE_DIR），
+   * 下载源视频并保存到项目内资源目录（默认 backend/data/download-video；见 VIDEO_SAVE_DIR），
    * 并以同一份媒体调用 ASR，供首页「口播文案」使用。
    * 抖音侧仅 dy-downloader + DY_DOWNLOADER_COOKIE。
    */
@@ -1273,7 +1330,7 @@ export class ToolsController {
   }
 
   /**
-   * 列出保存目录中的视频文件（VIDEO_SAVE_DIR / 默认 C:\\downloadVideo），供「从本地文件转写口播」选择。
+   * 列出保存目录中的视频文件（VIDEO_SAVE_DIR / 默认 backend/data/download-video），供「从本地文件转写口播」选择。
    */
   @Get('saved-videos')
   async listSavedVideos() {

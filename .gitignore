@@ -73,7 +73,9 @@ whisper_models/
 
 # 日志与本地数据
 *.log
-backend/data/
+backend/data/**
+!backend/data/**/
+!backend/data/**/.gitkeep
 .tmp-chrome-cdp/
 tmp_*.json
 tmp_*.wav

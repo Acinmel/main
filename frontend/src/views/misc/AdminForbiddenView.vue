@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { NButton, NCard, NSpace, NText } from 'naive-ui'
 import { useRouter } from 'vue-router'
+import { FIXED_ADMIN_EMAIL } from '@/constants/admin'
 import { useUserStore } from '@/stores/user'
 
 const router = useRouter()
@@ -17,17 +18,19 @@ function goReLogin() {
     <n-card title="需要管理员权限" class="card" :bordered="false">
       <n-space vertical :size="16">
         <n-text>
-          当前登录账号不是<strong>管理员</strong>，无法打开运营管理后台。
+          当前登录账号不是指定管理员，无法打开运营管理后台。
         </n-text>
         <n-text depth="3">
-          若你是部署者：请在后端环境变量中配置
-          <code>ADMIN_EMAILS</code>（为你的注册邮箱，逗号分隔多个），保存后<strong>重启 API 服务</strong>，再在此处刷新或重新进入后台。
+          当前项目后台只允许 <code>{{ FIXED_ADMIN_EMAIL }}</code> 登录后访问。
+          如果你刚注册或切换了该账号，请重新登录刷新权限。
         </n-text>
         <n-text depth="3">
-          若已由其他管理员开通：请对方在「用户审核」中将你的角色设为管理员，或<strong>退出后重新登录</strong>以刷新权限。
+          其他账号即使曾被设置为 admin，也不会显示后台入口或调用后台接口。
         </n-text>
         <n-space>
-          <n-button type="primary" @click="router.push({ name: 'home' })">返回专属数字人</n-button>
+          <n-button type="primary" @click="router.push({ name: 'home' })"
+            >返回专属数字人</n-button
+          >
           <n-button @click="goReLogin">重新登录（刷新管理员权限）</n-button>
         </n-space>
       </n-space>

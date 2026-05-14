@@ -41,9 +41,14 @@ const modeOptions = [
 
 const fallbackVoiceOptions = [
   { label: '中性女声', value: 'neutral_female' },
-  { label: '磁性男声', value: 'magnetic_male' },
-  { label: '轻快解说', value: 'bright_narration' },
 ]
+
+const hiddenRecommendedVoiceIds = new Set([
+  'rec-voice-female',
+  'rec-voice-male',
+  'rec-voice-narration',
+  'rec-voice-bright-young-female',
+])
 
 const fallbackSubtitleOptions = [
   { label: '极简白字', value: 'minimal_white' },
@@ -61,7 +66,10 @@ async function loadResourceOptions() {
       listSubtitleTemplateResources({ scope: 'all', limit: 40 }),
     ])
     if (voices.items.length) {
-      voiceOptions.value = voices.items.map((item) => ({ label: item.name, value: item.id }))
+      const visibleVoiceOptions = voices.items
+        .filter((item) => !hiddenRecommendedVoiceIds.has(item.id))
+        .map((item) => ({ label: item.name, value: item.id }))
+      voiceOptions.value = visibleVoiceOptions.length ? visibleVoiceOptions : [...fallbackVoiceOptions]
       if (!voiceOptions.value.some((item) => item.value === voiceStyleId.value)) {
         voiceStyleId.value = voiceOptions.value[0].value
       }

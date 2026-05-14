@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import { DatabaseService } from '../../database/database.service';
 
 export interface DigitalHumanTemplateRow {
@@ -21,9 +22,10 @@ export class DigitalHumanPersistenceService {
     private readonly config: ConfigService,
     private readonly databaseService: DatabaseService,
   ) {
-    this.storageRoot =
-      this.config.get<string>('DIGITAL_HUMAN_STORAGE_DIR')?.trim() ||
-      path.join(process.cwd(), 'data', 'digital-humans');
+    this.storageRoot = resolveConfiguredDir(
+      this.config.get<string>('DIGITAL_HUMAN_STORAGE_DIR'),
+      'digital-humans',
+    );
   }
 
   getStorageRoot(): string {

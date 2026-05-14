@@ -13,6 +13,7 @@ import {
 import { PeopleOutline } from '@vicons/ionicons5'
 import { computed, h, onMounted, ref } from 'vue'
 import { fetchAdminStats, fetchAdminUsers, patchAdminUser, type AdminUserRow } from '@/api/admin'
+import { isFixedAdminEmail } from '@/constants/admin'
 
 const message = useMessage()
 
@@ -187,10 +188,10 @@ const userColumns: DataTableColumns<AdminUserRow> = [
               {
                 size: 'tiny',
                 quaternary: true,
-                disabled: row.role === 'admin',
+                disabled: row.role === 'admin' || !isFixedAdminEmail(row.email),
                 onClick: () => void makeAdmin(row),
               },
-              { default: () => '设管理员' },
+              { default: () => (isFixedAdminEmail(row.email) ? '设管理员' : '固定账号专属') },
             ),
           ],
         },
@@ -283,8 +284,8 @@ onMounted(() => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 18px;
+  gap: 20px;
+  margin-bottom: 24px;
   flex-wrap: wrap;
 }
 </style>

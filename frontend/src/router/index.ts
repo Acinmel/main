@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import { isFixedAdminEmail } from '@/constants/admin'
 import { useDigitalHumanStore } from '@/stores/digitalHuman'
 import { useUserStore } from '@/stores/user'
 
@@ -20,7 +21,8 @@ const routes: RouteRecordRaw[] = [
         path: 'digital-human',
         name: 'home',
         meta: { title: '专属数字人' },
-        component: () => import('@/views/digital-human/DigitalHumanSetupView.vue'),
+        component: () =>
+          import('@/views/digital-human/DigitalHumanSetupView.vue'),
       },
       {
         path: 'resources',
@@ -172,6 +174,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/admin/erp/ErpUsersView.vue'),
       },
       {
+        path: 'data',
+        name: 'erp-data',
+        meta: { title: '数据管理', requiresAdmin: true },
+        component: () => import('@/views/admin/erp/ErpDataView.vue'),
+      },
+      {
         path: 'audit',
         name: 'erp-audit',
         meta: { title: '操作日志', requiresAdmin: true },
@@ -226,13 +234,12 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   if (to.meta.requiresAdmin) {
-    /** 进入后台前拉最新资料，避免已写入 ADMIN_EMAILS 但 Pinia 仍为旧 role */
     await user.hydrateProfile()
     if (!user.token) {
       next({ name: 'login', query: { redirect: to.fullPath } })
       return
     }
-    if (user.profile?.role !== 'admin') {
+    if (!isFixedAdminEmail(user.profile?.email)) {
       next({ name: 'forbidden-admin' })
       return
     }
@@ -241,7 +248,7 @@ router.beforeEach(async (to, _from, next) => {
   }
 
   const pending =
-    user.profile?.accountStatus === 'pending' && user.profile?.role !== 'admin'
+    user.profile?.accountStatus === 'pending' && !isFixedAdminEmail(user.profile?.email)
 
   if (pending) {
     const allowedWhilePending = new Set([
@@ -274,7 +281,10 @@ router.beforeEach(async (to, _from, next) => {
     await Promise.race([
       store.refresh(),
       new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('digitalHuman.refresh:timeout')), DIGITAL_HUMAN_REFRESH_MS)
+        setTimeout(
+          () => reject(new Error('digitalHuman.refresh:timeout')),
+          DIGITAL_HUMAN_REFRESH_MS,
+        )
       }),
     ])
   } catch (e) {

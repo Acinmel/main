@@ -7,8 +7,10 @@ const props = defineProps<{
   modelValue: ResourceScope
   title: string
   subtitle: string
-  actionText: string
+  actionText?: string
   batchDeleteDisabled?: boolean
+  showAction?: boolean
+  showBatchDelete?: boolean
   searchValue?: string
   searchPlaceholder?: string
   showSearch?: boolean
@@ -51,10 +53,22 @@ const search = computed({
         <n-radio-button value="mine">我的</n-radio-button>
         <n-radio-button value="recommended">推荐</n-radio-button>
       </n-radio-group>
-      <n-button size="small" :disabled="batchDeleteDisabled" @click="emit('batchDelete')">
+      <n-button
+        v-if="showBatchDelete !== false"
+        size="small"
+        :disabled="batchDeleteDisabled"
+        @click="emit('batchDelete')"
+      >
         批量删除
       </n-button>
-      <n-button size="small" type="primary" @click="emit('action')">{{ actionText }}</n-button>
+      <n-button
+        v-if="showAction !== false && actionText"
+        size="small"
+        type="primary"
+        @click="emit('action')"
+      >
+        {{ actionText }}
+      </n-button>
     </n-space>
   </section>
 </template>

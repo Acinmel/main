@@ -17,6 +17,7 @@ describe('Auth flow (e2e)', () => {
     const dbPath = path.join(tmpDir, 'e2e.db');
     process.env.SQLITE_PATH = dbPath;
     process.env.JWT_SECRET = 'e2e-jwt-secret-fixed';
+    process.env.REGISTRATION_DEFAULT_ACCOUNT_STATUS = 'pending';
     process.env.DIGITAL_HUMAN_STORAGE_DIR = path.join(tmpDir, 'digital-humans');
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -54,6 +55,11 @@ describe('Auth flow (e2e)', () => {
       .expect((res) => {
         expect(res.body.user.email).toBe(email.toLowerCase());
       });
+
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/stats')
+      .set('Authorization', `Bearer ${token}`)
+      .expect(403);
 
     const login = await request(app.getHttpServer())
       .post('/api/v1/auth/login')
