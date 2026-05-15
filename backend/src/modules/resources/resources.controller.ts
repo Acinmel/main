@@ -15,12 +15,28 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { createReadStream, existsSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { createReadStream, existsSync, mkdirSync } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Express, Request, Response } from 'express';
+import { diskStorage } from 'multer';
 import { ResourcesService } from './resources.service';
 import { Public } from '../auth/public.decorator';
 import type { ResourceScope } from './resources.types';
+
+const AVATAR_VIDEO_MAX_BYTES = 500 * 1024 * 1024;
+const AVATAR_UPLOAD_TMP_DIR = path.join(os.tmpdir(), 'shuziren-avatar-uploads');
+const avatarUploadStorage = diskStorage({
+  destination: (_req, _file, cb) => {
+    mkdirSync(AVATAR_UPLOAD_TMP_DIR, { recursive: true });
+    cb(null, AVATAR_UPLOAD_TMP_DIR);
+  },
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || '').toLowerCase() || '.upload';
+    cb(null, `${Date.now()}_${randomUUID()}${ext}`);
+  },
+});
 
 class RenameResourceDto {
   name?: string;
@@ -77,7 +93,12 @@ export class ResourcesController {
   }
 
   @Post('avatars/upload')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 300 * 1024 * 1024 } }))
+  @UseInterceptors(
+    FileInterceptor('file', {
+      storage: avatarUploadStorage,
+      limits: { fileSize: AVATAR_VIDEO_MAX_BYTES },
+    }),
+  )
   createAvatarFromUpload(
     @Req() req: Request,
     @UploadedFile() file: Express.Multer.File | undefined,

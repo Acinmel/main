@@ -39,6 +39,7 @@ const visible = computed({
 
 const message = useMessage()
 const AVATAR_VIDEO_MAX_SECONDS = 10 * 60
+const AVATAR_VIDEO_MAX_BYTES = 500 * 1024 * 1024
 
 const sourceMode = ref<'saved' | 'upload' | 'manual'>('saved')
 const loadingSavedVideos = ref(false)
@@ -273,6 +274,13 @@ async function onUploadChange(fileList: UploadFileInfo[]) {
   const raw = uploadFileList.value[0]?.file
   uploadedVideoFile.value = raw instanceof File ? raw : null
   if (!uploadedVideoFile.value) return
+  if (uploadedVideoFile.value.size > AVATAR_VIDEO_MAX_BYTES) {
+    uploadedVideoError.value = '请上传小于 500MB 的视频文件'
+    uploadedVideoFile.value = null
+    uploadFileList.value = []
+    message.warning(uploadedVideoError.value)
+    return
+  }
 
   try {
     const duration = await readVideoDuration(uploadedVideoFile.value)
@@ -293,6 +301,13 @@ async function onUploadChange(fileList: UploadFileInfo[]) {
     uploadedVideoError.value = '无法识别视频时长，请重新选择可正常播放的视频'
     message.warning(uploadedVideoError.value)
   }
+}
+
+function clearUploadedVideoFile() {
+  uploadedVideoFile.value = null
+  uploadFileList.value = []
+  uploadedVideoDurationSeconds.value = null
+  uploadedVideoError.value = ''
 }
 
 onBeforeUnmount(() => {
@@ -354,13 +369,6 @@ onBeforeUnmount(() => {
           <n-button quaternary type="primary" @click="sourceMode = 'manual'">手动填写地址</n-button>
         </div>
 
-        <div v-else class="saved-video-action-row">
-          <n-button secondary @click="sourceMode = 'upload'">上传新视频</n-button>
-          <n-button type="primary" :loading="props.loading" :disabled="submitDisabled" @click="submit">
-            添加视频
-          </n-button>
-        </div>
-
         <n-alert
           v-if="!loadingSavedVideos && !hasSavedVideos"
           type="warning"
@@ -394,10 +402,21 @@ onBeforeUnmount(() => {
                   : '支持 MP4、MOV、WEBM 等格式，最长 10 分钟'
               }}
             </p>
+            <div v-if="uploadedVideoFile" class="media-upload-actions" @click.stop>
+              <button
+                type="button"
+                class="media-upload-remove"
+                @click.prevent.stop="clearUploadedVideoFile"
+              >
+                移除文件
+              </button>
+            </div>
+            <span class="media-upload-rule">请上传小于 500MB，市场推荐 1-2 分钟</span>
             <span class="media-upload-tip">视频建议：正脸清晰 + 光线稳定 + 口型完整 + 无明显遮挡</span>
           </n-upload-dragger>
         </n-upload>
         <div class="upload-video-hint">
+          <n-text type="info">上传要求：小于 500MB，推荐 1-2 分钟；数字人库最长支持 10 分钟。</n-text>
           <n-text depth="3">
             数字人库支持上传 10 分钟以内的视频，当前时长：{{ uploadedVideoDurationText }}
           </n-text>
@@ -452,7 +471,6 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
 }
 
-.saved-video-action-row,
 .saved-video-empty-actions {
   display: flex;
   flex-wrap: wrap;
@@ -469,8 +487,7 @@ onBeforeUnmount(() => {
   justify-content: stretch;
 }
 
-.saved-video-empty-actions :deep(.n-button),
-.saved-video-action-row :deep(.n-button) {
+.saved-video-empty-actions :deep(.n-button) {
   min-width: 128px;
 }
 
@@ -531,13 +548,42 @@ onBeforeUnmount(() => {
 
 .media-upload-card p {
   max-width: 360px;
-  margin: 8px 0 20px;
+  margin: 8px 0 16px;
   color: #98a2b3;
   font-size: 15px;
   font-weight: 700;
   line-height: 1.5;
   text-align: center;
   word-break: break-all;
+}
+
+.media-upload-actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  margin: 0 0 14px;
+}
+
+.media-upload-remove {
+  height: 32px;
+  padding: 0 15px;
+  border: 1px solid rgba(239, 68, 68, 0.24);
+  border-radius: 999px;
+  color: #dc2626;
+  font-size: 13px;
+  font-weight: 800;
+  background: rgba(254, 242, 242, 0.92);
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.media-upload-remove:hover {
+  border-color: rgba(239, 68, 68, 0.42);
+  background: #fff1f2;
+  transform: translateY(-1px);
 }
 
 .media-upload-tip {
@@ -553,6 +599,23 @@ onBeforeUnmount(() => {
   line-height: 1.35;
   text-align: center;
   background: linear-gradient(135deg, rgba(75, 107, 255, 0.1), rgba(75, 199, 187, 0.13));
+}
+
+.media-upload-rule {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  margin: -8px 0 10px;
+  padding: 8px 14px;
+  border: 1px solid rgba(75, 107, 255, 0.14);
+  border-radius: 999px;
+  color: #3451f0;
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.35;
+  text-align: center;
+  background: rgba(75, 107, 255, 0.07);
 }
 
 .upload-video-hint {

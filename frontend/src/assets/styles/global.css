@@ -12,30 +12,31 @@
   --app-pad-x: max(14px, var(--app-safe-left));
   --app-pad-x-end: max(14px, var(--app-safe-right));
 
-  --bg-main: #f4f7fb;
-  --bg-soft: #edf3fb;
-  --bg-soft-alt: #f8fbff;
-  --bg-card: rgba(255, 255, 255, 0.68);
-  --bg-card-strong: rgba(255, 255, 255, 0.9);
+  --bg-main: #fbfaff;
+  --bg-soft: #f5f2ff;
+  --bg-soft-alt: #ffffff;
+  --bg-card: rgba(255, 255, 255, 0.74);
+  --bg-card-strong: rgba(255, 255, 255, 0.94);
   --bg-card-solid: #ffffff;
   --bg-dark: #1c2740;
-  --text-main: #18243d;
-  --text-sub: #60718f;
-  --text-light: #96a3ba;
+  --text-main: #18142d;
+  --text-sub: #665f7d;
+  --text-light: #9a94aa;
   --text-inverse: #f8fbff;
-  --border-soft: rgba(121, 144, 184, 0.18);
-  --border-strong: rgba(75, 107, 255, 0.28);
-  --primary: #4b6bff;
-  --primary-hover: #6484ff;
-  --primary-deep: #3656d6;
-  --accent-teal: #4bc7bb;
-  --accent-sky: #87a7ff;
-  --accent-gold: #efb14b;
-  --accent-mint: #d7f4ef;
-  --accent-blush: #ffe7ee;
-  --shadow-soft: 0 18px 42px rgba(64, 86, 122, 0.08);
-  --shadow-panel: 0 28px 70px rgba(64, 86, 122, 0.12);
-  --shadow-glow: 0 18px 46px rgba(75, 107, 255, 0.18);
+  --border-soft: rgba(203, 213, 225, 0.58);
+  --border-strong: rgba(209, 213, 219, 0.86);
+  --border-hover: rgba(209, 213, 219, 0.96);
+  --primary: #7c3aed;
+  --primary-hover: #8b5cf6;
+  --primary-deep: #5b21b6;
+  --accent-teal: #a78bfa;
+  --accent-sky: #c4b5fd;
+  --accent-gold: #b794f4;
+  --accent-mint: #f1edff;
+  --accent-blush: #f6edff;
+  --shadow-soft: 0 18px 42px rgba(80, 64, 122, 0.08);
+  --shadow-panel: 0 28px 70px rgba(80, 64, 122, 0.12);
+  --shadow-glow: 0 18px 46px rgba(124, 58, 237, 0.18);
   --shadow-dark: 0 18px 36px rgba(18, 34, 58, 0.18);
   --transition-fast: 0.2s ease;
   --transition-smooth: 0.32s cubic-bezier(0.2, 0.85, 0.2, 1);
@@ -68,11 +69,11 @@ body,
   font-family: var(--font-sans);
   color: var(--text-main);
   background:
-    radial-gradient(circle at 12% 12%, rgba(75, 107, 255, 0.1), transparent 26%),
-    radial-gradient(circle at 88% 6%, rgba(75, 107, 255, 0.08), transparent 24%),
-    radial-gradient(circle at 78% 28%, rgba(75, 107, 255, 0.06), transparent 22%),
-    radial-gradient(circle at 28% 62%, rgba(75, 107, 255, 0.05), transparent 24%),
-    linear-gradient(180deg, #f8fbff 0%, #f4f7fb 46%, #edf3fb 100%);
+    radial-gradient(circle at 12% 10%, rgba(124, 58, 237, 0.1), transparent 26%),
+    radial-gradient(circle at 88% 6%, rgba(167, 139, 250, 0.12), transparent 24%),
+    radial-gradient(circle at 78% 28%, rgba(196, 181, 253, 0.12), transparent 22%),
+    radial-gradient(circle at 28% 62%, rgba(124, 58, 237, 0.06), transparent 24%),
+    linear-gradient(180deg, #ffffff 0%, #fbfaff 48%, #f5f2ff 100%);
 }
 
 body {
@@ -90,6 +91,7 @@ body::before {
     linear-gradient(90deg, rgba(144, 160, 191, 0.08) 1px, transparent 1px);
   background-size: 32px 32px;
   mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.42), transparent 78%);
+  opacity: 0.72;
 }
 
 #app {
@@ -151,17 +153,30 @@ a:hover {
 }
 
 .n-button.n-button--primary-type {
-  box-shadow: 0 14px 32px rgba(75, 107, 255, 0.22);
+  border-color: transparent !important;
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal)) !important;
+  box-shadow: 0 14px 32px rgba(124, 58, 237, 0.22);
+}
+
+.n-button.n-button--primary-type,
+.n-button.n-button--primary-type *,
+.n-radio-button.n-radio-button--checked,
+.n-radio-button.n-radio-button--checked *,
+.n-tabs-tab.n-tabs-tab--active,
+.n-tabs-tab.n-tabs-tab--active *,
+.n-tag.n-tag--primary-type,
+.n-tag.n-tag--primary-type * {
+  color: #ffffff !important;
 }
 
 .n-card,
 .n-modal .n-card,
 .n-dialog {
   border-radius: var(--radius-panel) !important;
-  border: 1px solid rgba(255, 255, 255, 0.54) !important;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(246, 249, 255, 0.84)) !important;
+  border: 1px solid var(--border-soft) !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(250, 248, 255, 0.9)) !important;
   box-shadow:
-    0 20px 48px rgba(64, 86, 122, 0.12),
+    0 20px 48px rgba(80, 64, 122, 0.1),
     inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
   backdrop-filter: blur(22px);
   -webkit-backdrop-filter: blur(22px);
@@ -181,7 +196,7 @@ a:hover {
 }
 
 .n-alert {
-  border: 1px solid rgba(121, 144, 184, 0.18);
+  border: 1px solid var(--border-soft);
   box-shadow: var(--shadow-soft);
 }
 
@@ -261,7 +276,7 @@ a:hover {
 
 ::selection {
   color: #ffffff;
-  background: rgba(75, 107, 255, 0.78);
+  background: rgba(124, 58, 237, 0.78);
 }
 
 code,
@@ -279,8 +294,8 @@ pre {
 }
 
 .app-message-root .n-message {
-  border: 1px solid rgba(255, 255, 255, 0.54);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(246, 249, 255, 0.88));
+  border: 1px solid var(--border-soft);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(250, 248, 255, 0.9));
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
 }
@@ -346,9 +361,9 @@ pre {
 }
 
 .glass-panel {
-  border: 1px solid rgba(255, 255, 255, 0.56);
+  border: 1px solid var(--border-soft);
   border-radius: var(--radius-panel);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(246, 249, 255, 0.76));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(250, 248, 255, 0.82));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.82),
     var(--shadow-soft);
@@ -359,9 +374,9 @@ pre {
 .surface-card {
   position: relative;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.58);
+  border: 1px solid var(--border-soft);
   border-radius: var(--radius-card);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(246, 249, 255, 0.8));
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(250, 248, 255, 0.84));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
     var(--shadow-soft);
@@ -374,12 +389,24 @@ pre {
   height: 42%;
   content: '';
   border-radius: 50%;
-  background: rgba(135, 167, 255, 0.12);
+  background: rgba(167, 139, 250, 0.12);
   filter: blur(10px);
 }
 
+.n-card:hover,
+.glass-panel:hover,
+.surface-card:hover,
+.panel:hover,
+.resource-card:hover,
+.voice-card:hover,
+.template-card:hover,
+.studio-panel:hover,
+.n-upload-dragger:hover {
+  border-color: var(--border-hover) !important;
+}
+
 .surface-card:hover {
-  border-color: rgba(75, 107, 255, 0.26);
+  border-color: var(--border-hover);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.92),
     var(--shadow-panel);

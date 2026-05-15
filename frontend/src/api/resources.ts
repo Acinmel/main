@@ -58,7 +58,9 @@ export async function listVoiceResources(params: ListResourcesParams) {
 }
 
 export async function cloneVoiceResource(body: CreateVoiceResourceBody) {
-  const { data } = await http.post<VoiceResource>('v1/resources/voices/clone', body)
+  const { data } = await http.post<VoiceResource>('v1/resources/voices/clone', body, {
+    timeout: 600_000,
+  })
   return data
 }
 
@@ -71,7 +73,7 @@ export async function cloneVoiceResourceUpload(body: CreateVoiceResourceDraft) {
   form.append('name', body.name)
   const { data } = await http.post<VoiceResource>('v1/resources/voices/clone-upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 180_000,
+    timeout: 600_000,
   })
   return data
 }

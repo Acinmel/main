@@ -62,6 +62,8 @@ const navItems = computed(() => {
 
 const pageTitle = computed(() => String(route.meta.title || 'AI 内容工作台'))
 
+const isStudioRoute = computed(() => route.name === 'studio')
+
 const primaryTo = computed(() => {
   if (isPendingNonAdmin.value) return { name: 'account-pending' as const }
   return user.isLoggedIn
@@ -121,7 +123,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="shell">
+  <div class="shell" :class="{ 'shell--studio': isStudioRoute }">
     <aside class="shell__sidebar glass-panel">
       <RouterLink :to="{ name: 'landing' }" class="shell__brand">
         <span class="shell__logo">K</span>
@@ -435,6 +437,112 @@ onMounted(() => {
 .shell__main {
   min-width: 0;
   min-height: 0;
+}
+
+.shell--studio {
+  --shell-sidebar-width: 282px;
+  --shell-gap: 0px;
+  --shell-pad: 0px;
+  background: #f8f9fc;
+}
+
+.shell--studio .shell__sidebar {
+  top: 0;
+  height: 100dvh;
+  padding: 24px 22px;
+  border-radius: 0;
+  border-right: 1px solid #eceff6;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.shell--studio .shell__brand {
+  align-items: flex-start;
+  min-height: 58px;
+}
+
+.shell--studio .shell__logo {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #ff8bc7, #7c3aed);
+  box-shadow: 0 10px 24px rgba(124, 58, 237, 0.16);
+}
+
+.shell--studio .shell__brand-copy strong {
+  color: #697386;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.shell--studio .shell__brand-copy small {
+  color: #c2a4ff;
+  font-size: 10px;
+  letter-spacing: 0.28em;
+}
+
+.shell--studio .shell__nav {
+  gap: 18px;
+  margin-top: 56px;
+}
+
+.shell--studio .shell__nav-link {
+  position: relative;
+  min-height: 56px;
+  padding: 0 26px;
+  border: 0;
+  border-radius: 14px;
+  color: #6f7888;
+  background: transparent;
+  box-shadow: none;
+  font-size: 15px;
+}
+
+.shell--studio .shell__nav-link:hover {
+  color: #7c3aed;
+  border-color: transparent;
+  background: rgba(124, 58, 237, 0.06);
+  box-shadow: none;
+}
+
+.shell--studio .shell__nav-link.router-link-active {
+  color: #7c3aed;
+  border-color: transparent;
+  background: rgba(124, 58, 237, 0.1);
+  box-shadow: none;
+}
+
+.shell--studio .shell__nav-link.router-link-active::before {
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  left: 0;
+  width: 5px;
+  content: '';
+  border-radius: 0 999px 999px 0;
+  background: #7c3aed;
+}
+
+.shell--studio .shell__member {
+  margin: auto 0 0;
+  padding: 18px;
+  border: 0;
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: 0 18px 45px rgba(36, 51, 90, 0.06);
+}
+
+.shell--studio .shell__topbar {
+  display: none;
+}
+
+.shell--studio .shell__content {
+  gap: 0;
+}
+
+.shell--studio .shell__main {
+  height: 100dvh;
+  overflow: hidden;
 }
 
 @media (max-width: 1320px) {

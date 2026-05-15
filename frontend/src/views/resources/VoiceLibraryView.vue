@@ -113,7 +113,8 @@ async function cloneVoice(body: CreateVoiceResourceDraft) {
     list.prepend(item)
     cloneOpen.value = false
     if (item.provider === 'local-upload') {
-      message.warning('音频已保存到音色库；模型克隆未通过，可先作为本地语音使用。')
+      const reason = item.cloneError ? `原因：${item.cloneError.slice(0, 160)}` : '可先作为本地音频样本使用'
+      message.warning(`音频已保存到音色库；模型克隆未通过，已保存为本地样本。${reason}`)
       return
     }
     message.success('声音克隆已创建')

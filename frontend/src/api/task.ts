@@ -267,6 +267,7 @@ export type VoiceTuningRequest = {
   voiceEmotionIntensity?: number
   voiceRate?: number
   voiceVolume?: number
+  voicePitch?: number
 }
 
 export async function createVoicePreview(body: {
@@ -293,7 +294,8 @@ export async function createSubtitleWorkflowPreview(
     script: string
     avatarResourceId: string
     voiceResourceId: string
-    subtitleTemplateId: string
+    subtitleTemplateId?: string
+    subtitlesEnabled?: boolean
     previewSeconds?: number
   } & VoiceTuningRequest,
   opts?: { signal?: AbortSignal },
@@ -322,6 +324,143 @@ export async function finalizeSubtitleWorkflow(body: { draftId: string }, opts?:
 }
 
 /** 数字人：风格列表 */
+export type SmartClipCutMode = 'light' | 'standard' | 'strong'
+export type SmartClipRenderStatus = 'pending' | 'processing' | 'completed' | 'failed'
+
+export interface SmartClipCutConfig {
+  silenceThreshold: number
+  minSilenceDuration: number
+  keepPause: number
+}
+
+export interface SmartClipCutPoint {
+  id: string
+  type: 'silence'
+  startTime: number
+  endTime: number
+  duration: number
+  suggestCutStart: number
+  suggestCutEnd: number
+  cutDuration: number
+  keepDuration: number
+  enabled: boolean
+  confidence: number
+}
+
+export interface SmartClipCutSummary {
+  totalCount: number
+  totalCutDuration: number
+  originalDuration: number
+  estimatedDuration: number
+}
+
+export interface SmartClipHighlightRange {
+  start: number
+  end: number
+  color?: string
+  fontWeight?: number
+}
+
+export interface SmartClipSubtitle {
+  id: string
+  startTime: number
+  endTime: number
+  text: string
+  highlightRanges?: SmartClipHighlightRange[]
+}
+
+export interface SmartClipRenderTask {
+  taskId: string
+  status: SmartClipRenderStatus
+  progress: number
+  outputUrl?: string
+  duration?: number
+  error?: string
+}
+
+export async function detectSmartClipCutPoints(
+  projectId: string,
+  body: {
+    mode: SmartClipCutMode
+    config: SmartClipCutConfig
+    avatarResourceId?: string
+    sourceVideoUrl?: string
+  },
+) {
+  const { data } = await http.post<{
+    cutPoints: SmartClipCutPoint[]
+    summary: SmartClipCutSummary
+  }>(`v1/video-projects/${encodeURIComponent(projectId)}/detect-cut-points`, body, {
+    timeout: 300_000,
+  })
+  return data
+}
+
+export async function renderSmartClipFinal(
+  projectId: string,
+  body: {
+    script: string
+    avatarResourceId: string
+    voiceResourceId: string
+    subtitleTemplateId: string
+    subtitles: SmartClipSubtitle[]
+    cutConfig: {
+      enabled: boolean
+      mode: SmartClipCutMode
+      config: SmartClipCutConfig
+      cutPoints: SmartClipCutPoint[]
+    }
+    backgroundMusic: {
+      enabled: boolean
+      musicId: string
+      volume: number
+    }
+    pipMaterials: {
+      enabled: boolean
+      items: unknown[]
+    }
+    renderOptions: {
+      resolution: string
+      format: 'mp4'
+      burnSubtitles: boolean
+    }
+  } & VoiceTuningRequest,
+) {
+  const {
+    voiceLanguage,
+    voiceEmotion,
+    voiceEmotionIntensity,
+    voiceRate,
+    voiceVolume,
+    voicePitch,
+    ...payload
+  } = body
+  const { data } = await http.post<SmartClipRenderTask>(
+    `v1/video-projects/${encodeURIComponent(projectId)}/render-final`,
+    {
+      ...payload,
+      voiceTuning: {
+        language: voiceLanguage,
+        emotion: voiceEmotion,
+        emotionIntensity: voiceEmotionIntensity,
+        speechRate: voiceRate,
+        volume: voiceVolume,
+        pitch: voicePitch,
+      },
+    },
+    { timeout: 120_000 },
+  )
+  return data
+}
+
+export async function getSmartClipRenderTask(taskId: string) {
+  const { data } = await http.get<SmartClipRenderTask>(
+    `v1/render-tasks/${encodeURIComponent(taskId)}`,
+    { timeout: 30_000 },
+  )
+  return data
+}
+
 export async function getDigitalHumanStyles() {
   const { data } = await http.get<{ styles: { id: string; label: string }[] }>(
     'v1/tools/digital-human-styles',

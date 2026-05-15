@@ -116,6 +116,7 @@ export class QwenVoiceCloneService {
         `${this.resolveAudioBaseUrl()}/services/audio/tts/customization`,
         apiKey,
         payload,
+        { timeoutMs: this.resolveVoiceCloneTimeoutMs() },
       );
 
       const voice = this.readString(response?.output?.voice);
@@ -150,6 +151,7 @@ export class QwenVoiceCloneService {
       `${this.resolveAudioBaseUrl()}/services/audio/tts/customization`,
       apiKey,
       payload,
+      { timeoutMs: this.resolveVoiceCloneTimeoutMs() },
     );
 
     const voice = this.readString(response?.output?.voice);
@@ -248,6 +250,7 @@ export class QwenVoiceCloneService {
     instruction?: string | null;
     speechRate?: number | null;
     volume?: number | null;
+    pitch?: number | null;
   }): Promise<{
     buffer: Buffer;
     mimeType: string;
@@ -271,14 +274,13 @@ export class QwenVoiceCloneService {
     }
 
     const style = this.buildSynthesisStyle(model, params);
+    const languageType = this.normalizeTtsLanguageType(params.languageType);
     const payload = {
       model,
       input: {
         text: params.text,
         voice: params.voice,
-        ...(params.languageType?.trim()
-          ? { language_type: params.languageType.trim() }
-          : {}),
+        ...(languageType ? { language_type: languageType } : {}),
         ...style.input,
       },
       ...(Object.keys(style.parameters).length ? { parameters: style.parameters } : {}),
@@ -311,6 +313,31 @@ export class QwenVoiceCloneService {
       styleApplied: style.applied,
       styleHint: style.hint,
     };
+  }
+
+  async synthesizeDefaultVoice(params: {
+    text: string;
+    languageType?: string | null;
+    instruction?: string | null;
+    speechRate?: number | null;
+    volume?: number | null;
+    pitch?: number | null;
+  }): Promise<{
+    buffer: Buffer;
+    mimeType: string;
+    providerVoice: string;
+    requestId: string | null;
+    audioUrl: string | null;
+    styleApplied?: boolean;
+    styleHint?: string;
+  }> {
+    const voice = this.resolveDefaultTtsVoice();
+    const targetModel = this.resolveDefaultTtsModel();
+    return this.synthesizeVoice({
+      ...params,
+      voice,
+      targetModel,
+    });
   }
 
   async deleteVoice(voice: string): Promise<void> {
@@ -347,6 +374,7 @@ export class QwenVoiceCloneService {
     instruction?: string | null;
     speechRate?: number | null;
     volume?: number | null;
+    pitch?: number | null;
   }): Promise<{
     buffer: Buffer;
     mimeType: string;
@@ -375,6 +403,7 @@ export class QwenVoiceCloneService {
         language_hints: this.normalizeLanguageHints(params.languageType),
         ...style.input,
       },
+      ...(Object.keys(style.parameters).length ? { parameters: style.parameters } : {}),
     };
 
     const response = await this.postJson(
@@ -407,6 +436,7 @@ export class QwenVoiceCloneService {
 
   private resolveAudioBaseUrl(): string {
     return (
+      this.config.get<string>('TTS_API_URL')?.trim() ||
       this.config.get<string>('QWEN_TTS_BASE_URL')?.trim() ||
       this.config.get<string>('DASHSCOPE_TTS_BASE_URL')?.trim() ||
       DASHSCOPE_AUDIO_BASE
@@ -419,6 +449,31 @@ export class QwenVoiceCloneService {
       this.config.get<string>('DASHSCOPE_API_KEY')?.trim() ||
       ''
     );
+  }
+
+  private resolveDefaultTtsVoice(): string {
+    return (
+      this.config.get<string>('QWEN_TTS_DEFAULT_VOICE')?.trim() ||
+      this.config.get<string>('DASHSCOPE_TTS_DEFAULT_VOICE')?.trim() ||
+      'longxiaochun_v2'
+    );
+  }
+
+  private resolveDefaultTtsModel(): string {
+    return (
+      this.config.get<string>('QWEN_TTS_DEFAULT_MODEL')?.trim() ||
+      this.config.get<string>('DASHSCOPE_TTS_MODEL')?.trim() ||
+      'cosyvoice-v2'
+    );
+  }
+
+  private resolveVoiceCloneTimeoutMs(): number {
+    const raw = Number(
+      this.config.get('QWEN_VOICE_CLONE_TIMEOUT_MS') ??
+        this.config.get('VOICE_CLONE_TIMEOUT_MS') ??
+        600_000,
+    );
+    return Number.isFinite(raw) && raw >= 60_000 ? raw : 600_000;
   }
 
   private resolveSampleData(sample: CreateQwenVoiceCloneParams['sample']): string {
@@ -471,6 +526,7 @@ export class QwenVoiceCloneService {
       instruction?: string | null;
       speechRate?: number | null;
       volume?: number | null;
+      pitch?: number | null;
     },
   ): {
     input: Record<string, unknown>;
@@ -480,39 +536,50 @@ export class QwenVoiceCloneService {
   } {
     const instruction = this.limitInstruction(params.instruction);
     const hasInstruction = Boolean(instruction);
-    const supportsStyleControls = this.supportsInstructionControls(model);
+    const supportsInstruction = this.supportsInstructionControls(model);
+    const supportsParameterControls = this.supportsParameterControls(model);
     const input: Record<string, unknown> = {};
     const parameters: Record<string, unknown> = {};
 
-    if (hasInstruction && supportsStyleControls) {
+    if (hasInstruction && supportsInstruction) {
       // CosyVoice-style models understand instruction prompts for emotion and delivery.
       input.instruction = instruction;
     }
 
     if (
-      supportsStyleControls &&
+      supportsParameterControls &&
       typeof params.speechRate === 'number' &&
       Number.isFinite(params.speechRate)
     ) {
-      input.rate = Math.min(2, Math.max(0.5, Number(params.speechRate.toFixed(2))));
+      parameters.rate = Math.min(2, Math.max(0.5, Number(params.speechRate.toFixed(2))));
     }
 
     if (
-      supportsStyleControls &&
+      supportsParameterControls &&
       typeof params.volume === 'number' &&
       Number.isFinite(params.volume)
     ) {
-      input.volume = Math.min(100, Math.max(0, Math.round(params.volume * 50)));
+      parameters.volume = Math.min(100, Math.max(0, Math.round(params.volume * 50)));
+    }
+
+    if (
+      supportsParameterControls &&
+      typeof params.pitch === 'number' &&
+      Number.isFinite(params.pitch)
+    ) {
+      parameters.pitch = Math.min(2, Math.max(0.5, Number(params.pitch.toFixed(2))));
     }
 
     const applied = Object.keys(input).length > 0 || Object.keys(parameters).length > 0;
-    if ((hasInstruction || params.speechRate || params.volume) && !supportsStyleControls) {
+    if (hasInstruction && !supportsInstruction) {
       return {
         input,
         parameters,
         applied,
         hint:
-          '当前音色模型不支持动态情绪/语速/音量控制，已按原音色合成；如需明显情绪变化，需要接入支持 instruction 的 TTS 合成链路。',
+          applied
+            ? '当前音色模型不支持情绪指令，已应用语速/音量/音调参数生成。'
+            : '当前音色模型不支持情绪指令，已按原音色合成。',
       };
     }
 
@@ -520,7 +587,7 @@ export class QwenVoiceCloneService {
       input,
       parameters,
       applied,
-      hint: applied ? `已使用 ${model} 的情绪/语气指令生成配音。` : undefined,
+      hint: applied ? `已使用 ${model} 的情绪指令或语速/音量/音调参数生成配音。` : undefined,
     };
   }
 
@@ -529,7 +596,12 @@ export class QwenVoiceCloneService {
   }
 
   private supportsInstructionControls(model: string): boolean {
-    return this.isCosyVoiceModel(model) || /instruct/i.test(model);
+    const normalized = model.trim().toLowerCase();
+    return /^cosyvoice-v3/i.test(normalized) || /instruct/i.test(normalized);
+  }
+
+  private supportsParameterControls(model: string): boolean {
+    return this.isCosyVoiceModel(model);
   }
 
   private limitInstruction(value?: string | null): string | null {
@@ -548,25 +620,79 @@ export class QwenVoiceCloneService {
     return ['zh'];
   }
 
+  private normalizeTtsLanguageType(language?: string | null): string | null {
+    const raw = language?.trim();
+    if (!raw) return null;
+    const key = raw.toLowerCase().replace(/_/g, '-');
+    const map: Record<string, string> = {
+      auto: 'auto',
+      zh: 'chinese',
+      'zh-cn': 'chinese',
+      'zh-hans': 'chinese',
+      'zh-hant': 'chinese',
+      'zh-hk': 'chinese',
+      'zh-tw': 'chinese',
+      cn: 'chinese',
+      chinese: 'chinese',
+      mandarin: 'chinese',
+      yue: 'chinese',
+      cantonese: 'chinese',
+      en: 'english',
+      'en-us': 'english',
+      'en-gb': 'english',
+      english: 'english',
+      de: 'german',
+      german: 'german',
+      it: 'italian',
+      italian: 'italian',
+      pt: 'portuguese',
+      'pt-br': 'portuguese',
+      portuguese: 'portuguese',
+      es: 'spanish',
+      spanish: 'spanish',
+      ja: 'japanese',
+      jp: 'japanese',
+      japanese: 'japanese',
+      ko: 'korean',
+      korean: 'korean',
+      fr: 'french',
+      french: 'french',
+      ru: 'russian',
+      russian: 'russian',
+    };
+    return map[key] ?? 'auto';
+  }
+
   private async postJson(
     url: string,
     apiKey: string,
     payload: Record<string, unknown>,
+    options: { timeoutMs?: number } = {},
   ): Promise<any> {
-    const timeoutMs = Number(this.config.get('OPENAI_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(options.timeoutMs ?? this.config.get('OPENAI_TIMEOUT_MS') ?? 120_000);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      let response: Response;
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (this.isAbortError(error)) {
+          throw new BadRequestException(
+            `阿里云语音接口请求超时（${Math.round(timeoutMs / 1000)}秒），请稍后重试`,
+          );
+        }
+        throw error;
+      }
 
       const text = await response.text().catch(() => '');
       const json = text ? this.tryParseJson(text) : null;
@@ -582,6 +708,13 @@ export class QwenVoiceCloneService {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private isAbortError(error: unknown): boolean {
+    return (
+      error instanceof Error &&
+      (error.name === 'AbortError' || /aborted/i.test(error.message))
+    );
   }
 
   private async fetchBinary(url: string): Promise<{

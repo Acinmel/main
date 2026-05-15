@@ -2,9 +2,17 @@
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
 import { NButton, NTag } from 'naive-ui'
+import creatorAvatar1 from '@/assets/p1.png'
+import creatorAvatar2 from '@/assets/p2.png'
+import creatorAvatar3 from '@/assets/p3.png'
+import creatorAvatar4 from '@/assets/p4.png'
 import bilibiliLogo from '@/assets/platform-logos/bilibili-logo.png'
 import douyinLogo from '@/assets/platform-logos/douyin-logo.png'
 import xiaohongshuLogo from '@/assets/platform-logos/xiaohongshu-logo.png'
+import womenFactoryImage from '@/assets/women-factory.png'
+import womenMeetingImage from '@/assets/women-meeting.png'
+import womenSecondImage from '@/assets/women-second.png'
+import womenTalkImage from '@/assets/women-talk.png'
 import { useUserStore } from '@/stores/user'
 
 const user = useUserStore()
@@ -21,13 +29,26 @@ const copyPlatformLogos = [
   { name: 'Xiaohongshu', src: xiaohongshuLogo },
 ]
 
+const creatorAvatars = [
+  { name: '创作者头像 1', src: creatorAvatar1 },
+  { name: '创作者头像 2', src: creatorAvatar2 },
+  { name: '创作者头像 3', src: creatorAvatar3 },
+  { name: '创作者头像 4', src: creatorAvatar4 },
+]
+
+const talkVisualImages = [
+  { name: '一键成片展示', src: womenTalkImage },
+  { name: '会议场景展示', src: womenMeetingImage },
+  { name: '工厂场景展示', src: womenFactoryImage },
+]
+
 type CreationStep = {
   no: string
   title: string
   desc: string
   tag: string
   tone: string
-  visual?: 'platforms'
+  visual?: 'platforms' | 'women' | 'talk'
 }
 
 const creationSteps: CreationStep[] = [
@@ -45,6 +66,7 @@ const creationSteps: CreationStep[] = [
     desc: '音色克隆与 AI 分身驱动',
     tag: 'AI DRIVING',
     tone: 'teal',
+    visual: 'women',
   },
   {
     no: '03',
@@ -52,6 +74,7 @@ const creationSteps: CreationStep[] = [
     desc: '智能剪辑，快速出片',
     tag: '00:12:45:08',
     tone: 'gold',
+    visual: 'talk',
   },
   {
     no: '04',
@@ -89,9 +112,9 @@ const creationSteps: CreationStep[] = [
         </RouterLink>
         <div class="landing__social-proof">
           <div class="landing__avatars">
-            <span />
-            <span />
-            <span />
+            <span v-for="avatar in creatorAvatars" :key="avatar.name">
+              <img :src="avatar.src" :alt="avatar.name" loading="lazy" />
+            </span>
           </div>
           <div>
             <strong>10,000+</strong>
@@ -123,6 +146,35 @@ const creationSteps: CreationStep[] = [
                   class="landing-card__platform-logo"
                 >
                   <img :src="logo.src" :alt="logo.name" loading="lazy" />
+                </span>
+              </div>
+            </template>
+            <template v-else-if="step.visual === 'women' || step.visual === 'talk'">
+              <div
+                :class="[
+                  'landing-card__platform-halo',
+                  step.visual === 'talk'
+                    ? 'landing-card__platform-halo--talk'
+                    : 'landing-card__platform-halo--woman',
+                ]"
+              />
+              <div
+                v-if="step.visual === 'talk'"
+                class="landing-card__platform-stack landing-card__platform-stack--talk"
+              >
+                <span
+                  v-for="image in talkVisualImages"
+                  :key="image.name"
+                  class="landing-card__platform-logo landing-card__platform-logo--woman landing-card__platform-logo--talk"
+                >
+                  <img :src="image.src" :alt="image.name" loading="lazy" />
+                </span>
+              </div>
+              <div v-else class="landing-card__platform-stack landing-card__platform-stack--woman">
+                <span
+                  class="landing-card__platform-logo landing-card__platform-logo--woman"
+                >
+                  <img :src="womenSecondImage" alt="配音与数字人展示" loading="lazy" />
                 </span>
               </div>
             </template>
@@ -285,24 +337,26 @@ const creationSteps: CreationStep[] = [
 }
 
 .landing__avatars span {
-  width: 22px;
-  height: 22px;
-  margin-left: -7px;
+  display: block;
+  width: 26px;
+  height: 26px;
+  margin-left: -8px;
+  overflow: hidden;
   border: 2px solid #ffffff;
   border-radius: 999px;
-  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  background: #ffffff;
+  box-shadow: 0 8px 16px rgba(80, 64, 122, 0.14);
 }
 
 .landing__avatars span:first-child {
   margin-left: 0;
 }
 
-.landing__avatars span:nth-child(2) {
-  background: linear-gradient(135deg, var(--accent-teal), #77d1c9);
-}
-
-.landing__avatars span:nth-child(3) {
-  background: linear-gradient(135deg, #ffbfc9, #ffdf96);
+.landing__avatars img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .landing__social-proof strong,
@@ -517,6 +571,77 @@ const creationSteps: CreationStep[] = [
   transform: scale(0.86) rotate(-3deg);
 }
 
+.landing-card__platform-halo--woman {
+  right: 12px;
+  bottom: 0;
+  width: 138px;
+  height: 154px;
+  border-radius: 38px;
+  background:
+    radial-gradient(circle at 34% 24%, rgba(255, 255, 255, 0.9), transparent 36%),
+    linear-gradient(135deg, rgba(124, 58, 237, 0.16), rgba(167, 139, 250, 0.18));
+  transform: rotate(-5deg);
+}
+
+.landing-card__platform-halo--talk {
+  right: 8px;
+  bottom: -2px;
+  width: 146px;
+  height: 150px;
+  border-radius: 40px;
+  background:
+    radial-gradient(circle at 36% 24%, rgba(255, 255, 255, 0.92), transparent 36%),
+    linear-gradient(135deg, rgba(124, 58, 237, 0.14), rgba(183, 148, 244, 0.18));
+  transform: rotate(7deg);
+}
+
+.landing-card__platform-logo--woman {
+  right: 24px;
+  bottom: 18px;
+  z-index: 3;
+  width: 106px;
+  height: 132px;
+  border-radius: 30px;
+  transform: rotate(5deg);
+}
+
+.landing-card__platform-logo--talk {
+  right: 18px;
+  bottom: 16px;
+  width: 104px;
+  height: 128px;
+  transform: rotate(-6deg);
+}
+
+.landing-card__platform-stack--talk .landing-card__platform-logo--talk:nth-child(1) {
+  right: 18px;
+  bottom: 16px;
+  z-index: 3;
+  transform: rotate(-6deg);
+}
+
+.landing-card__platform-stack--talk .landing-card__platform-logo--talk:nth-child(2) {
+  right: 54px;
+  bottom: 42px;
+  z-index: 2;
+  width: 96px;
+  height: 120px;
+  transform: scale(0.92) rotate(8deg);
+}
+
+.landing-card__platform-stack--talk .landing-card__platform-logo--talk:nth-child(3) {
+  right: -2px;
+  bottom: 50px;
+  z-index: 1;
+  width: 92px;
+  height: 116px;
+  transform: scale(0.86) rotate(-12deg);
+}
+
+.landing-card__platform-logo--woman img {
+  object-position: center top;
+}
+
 .landing-card:hover .landing-card__platform-halo {
   opacity: 1;
   transform: translate(-12px, -12px) rotate(2deg) scale(1.04);
@@ -539,6 +664,34 @@ const creationSteps: CreationStep[] = [
 
 .landing-card:hover .landing-card__platform-logo:nth-child(3) {
   transform: translate(-24px, -42px) rotate(-6deg) scale(0.92);
+}
+
+.landing-card:hover .landing-card__platform-halo--woman {
+  transform: translate(-14px, -14px) rotate(-9deg) scale(1.04);
+}
+
+.landing-card:hover .landing-card__platform-logo--woman {
+  transform: translate(-32px, -28px) rotate(2deg) scale(1.03);
+}
+
+.landing-card:hover .landing-card__platform-halo--talk {
+  transform: translate(-14px, -14px) rotate(4deg) scale(1.04);
+}
+
+.landing-card:hover .landing-card__platform-logo--talk {
+  transform: translate(-32px, -30px) rotate(-9deg) scale(1.03);
+}
+
+.landing-card:hover .landing-card__platform-stack--talk .landing-card__platform-logo--talk:nth-child(1) {
+  transform: translate(-34px, -30px) rotate(-9deg) scale(1.03);
+}
+
+.landing-card:hover .landing-card__platform-stack--talk .landing-card__platform-logo--talk:nth-child(2) {
+  transform: translate(-42px, -38px) rotate(6deg) scale(0.98);
+}
+
+.landing-card:hover .landing-card__platform-stack--talk .landing-card__platform-logo--talk:nth-child(3) {
+  transform: translate(-24px, -46px) rotate(-14deg) scale(0.92);
 }
 
 .landing-card__visual-chip {

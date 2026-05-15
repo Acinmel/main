@@ -157,7 +157,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       );
       CREATE INDEX IF NOT EXISTS idx_avatar_resources_user ON avatar_resources(user_id);
       CREATE INDEX IF NOT EXISTS idx_avatar_resources_updated ON avatar_resources(updated_at, id);
-      CREATE INDEX IF NOT EXISTS idx_avatar_resources_expires ON avatar_resources(expires_at);
 
       CREATE TABLE IF NOT EXISTS voice_resources (
         id TEXT PRIMARY KEY NOT NULL,
@@ -178,7 +177,6 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       );
       CREATE INDEX IF NOT EXISTS idx_voice_resources_user ON voice_resources(user_id);
       CREATE INDEX IF NOT EXISTS idx_voice_resources_updated ON voice_resources(updated_at, id);
-      CREATE INDEX IF NOT EXISTS idx_voice_resources_expires ON voice_resources(expires_at);
 
       CREATE TABLE IF NOT EXISTS subtitle_template_resources (
         id TEXT PRIMARY KEY NOT NULL,

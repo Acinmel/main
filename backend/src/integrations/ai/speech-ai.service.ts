@@ -25,6 +25,7 @@ export type VoiceTuningOptions = {
   emotionIntensity?: number | null;
   speechRate?: number | null;
   volume?: number | null;
+  pitch?: number | null;
 };
 
 type SpeechMimeType =
@@ -113,6 +114,7 @@ export class SpeechAiService {
         instruction: this.buildVoiceInstruction(params.voiceTuning),
         speechRate: params.voiceTuning?.speechRate,
         volume: params.voiceTuning?.volume,
+        pitch: params.voiceTuning?.pitch,
       });
 
       return {
@@ -122,6 +124,28 @@ export class SpeechAiService {
         voice: params.providerVoice,
         styleApplied: qwenSpeech.styleApplied,
         styleHint: qwenSpeech.styleHint,
+      };
+    }
+
+    if (this.qwenVoiceClone.isConfigured()) {
+      const qwenSpeech = await this.qwenVoiceClone.synthesizeDefaultVoice({
+        text: params.text,
+        languageType: params.voiceTuning?.language || this.detectLanguageType(params.text),
+        instruction: this.buildVoiceInstruction(params.voiceTuning),
+        speechRate: params.voiceTuning?.speechRate,
+        volume: params.voiceTuning?.volume,
+        pitch: params.voiceTuning?.pitch,
+      });
+
+      return {
+        ok: true,
+        buffer: qwenSpeech.buffer,
+        mimeType: this.normalizeMimeType(qwenSpeech.mimeType),
+        voice: qwenSpeech.providerVoice,
+        styleApplied: qwenSpeech.styleApplied,
+        styleHint:
+          qwenSpeech.styleHint ||
+          '当前音色没有可用的克隆 voice_id，已使用阿里云默认 TTS 音色按文案生成音频。',
       };
     }
 

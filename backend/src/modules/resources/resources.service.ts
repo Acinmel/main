@@ -244,7 +244,8 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
   async createAvatarFromUpload(
     userId: string,
     file: {
-      buffer: Buffer;
+      buffer?: Buffer;
+      path?: string;
       originalname: string;
       mimetype: string;
       size: number;
@@ -257,12 +258,34 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     await fs.mkdir(dir, { recursive: true });
     const ext = sanitizeUploadFilename(file.originalname, '.mp4');
     const fileName = `${AVATAR_UPLOAD_PREFIX}_${Date.now()}_${randomUUID().slice(0, 8)}${ext}`;
-    await fs.writeFile(path.join(dir, fileName), file.buffer);
-    return this.createAvatar(userId, {
-      ...body,
-      originalVideoUrl: fileName,
-      styleId: this.optionalString(body.styleId) || 'uploaded-video',
-    });
+    const outputPath = path.join(dir, fileName);
+    let tempPath = file.path;
+
+    try {
+      if (tempPath) {
+        try {
+          await fs.rename(tempPath, outputPath);
+        } catch {
+          await fs.copyFile(tempPath, outputPath);
+          await fs.rm(tempPath, { force: true });
+        }
+        tempPath = undefined;
+      } else if (file.buffer?.length) {
+        await fs.writeFile(outputPath, file.buffer);
+      } else {
+        throw new BadRequestException('视频文件读取失败，请重新上传');
+      }
+
+      return this.createAvatar(userId, {
+        ...body,
+        originalVideoUrl: fileName,
+        styleId: this.optionalString(body.styleId) || 'uploaded-video',
+      });
+    } finally {
+      if (tempPath) {
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+      }
+    }
   }
 
   async createVoice(userId: string, body: Record<string, unknown>) {
@@ -333,6 +356,8 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         sampleDurationMs: remoteSample.durationMs,
       });
     } catch (error) {
+      await this.removeVoiceSampleByUrl(stored.audioUrl);
+      throw new BadRequestException(`声音克隆失败：${this.toProviderErrorMessage(error)}`);
       return this.createVoice(userId, {
         name: trimName(body.name, '我的上传音频'),
         audioUrl: stored.audioUrl,
@@ -386,6 +411,8 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         sampleDurationMs: sample.durationMs,
       });
     } catch (error) {
+      await this.removeVoiceSampleByUrl(stored.audioUrl);
+      throw new BadRequestException(`声音克隆失败：${this.toProviderErrorMessage(error)}`);
       return this.createVoice(userId, {
         name: trimName(body.name, '我的上传音频'),
         audioUrl: stored.audioUrl,
@@ -1174,6 +1201,7 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     const durationSeconds = await this.ffmpegAudio.probeDurationSeconds({
       buffer: file.buffer,
       originalname: file.originalname,
+      mimetype: file.mimetype,
     });
     if (!durationSeconds) {
       throw new BadRequestException('无法识别样本音频时长，请上传 10-15 秒的清晰人声');
@@ -1282,13 +1310,20 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async validateAvatarVideoDuration(file: {
-    buffer: Buffer;
+    buffer?: Buffer;
+    path?: string;
     originalname: string;
+    mimetype?: string;
   }): Promise<void> {
-    const durationSeconds = await this.ffmpegAudio.probeDurationSeconds({
-      buffer: file.buffer,
-      originalname: file.originalname,
-    });
+    const durationSeconds = file.path
+      ? await this.ffmpegAudio.probeFileDurationSeconds(file.path)
+      : file.buffer?.length
+        ? await this.ffmpegAudio.probeDurationSeconds({
+            buffer: file.buffer,
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+          })
+        : null;
     if (!durationSeconds || !Number.isFinite(durationSeconds) || durationSeconds <= 0) {
       throw new BadRequestException('无法识别数字人视频时长，请上传可正常播放的视频文件');
     }

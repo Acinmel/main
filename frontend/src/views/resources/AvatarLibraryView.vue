@@ -18,11 +18,13 @@ const props = withDefaults(
     title?: string
     subtitle?: string
     actionText?: string
+    showSearch?: boolean
   }>(),
   {
     title: '数字人库',
-    subtitle: '管理你的数字人视频素材，直接挑选已保存视频进入后续创作。',
-    actionText: '添加数字人',
+    subtitle: '海量高清数字人，满足多种应用场景',
+    actionText: '定制数字人',
+    showSearch: true,
   },
 )
 
@@ -31,6 +33,7 @@ const router = useRouter()
 const scope = ref<ResourceScope>('all')
 const scrollRef = ref<HTMLElement | null>(null)
 const selectedIds = ref<string[]>([])
+const keyword = ref('')
 const createOpen = ref(false)
 const creating = ref(false)
 const deleteOpen = ref(false)
@@ -47,6 +50,11 @@ const list = useCursorList<AvatarResource>((cursor) =>
 )
 const actions = useResourceActions('avatars')
 const batchDeleteDisabled = computed(() => selectedIds.value.length === 0)
+const visibleItems = computed(() => {
+  const q = keyword.value.trim().toLowerCase()
+  if (!q) return list.items.value
+  return list.items.value.filter((item) => item.name.toLowerCase().includes(q))
+})
 
 useDebouncedInfiniteScroll(() => scrollRef.value, () => void list.loadMore())
 
@@ -215,10 +223,13 @@ async function preview(item: AvatarResource) {
   <main ref="scrollRef" class="resource-page">
     <HeaderFilter
       v-model="scope"
+      v-model:search-value="keyword"
       :title="props.title"
       :subtitle="props.subtitle"
       :action-text="props.actionText"
       :batch-delete-disabled="batchDeleteDisabled"
+      :show-search="props.showSearch"
+      search-placeholder="搜索..."
       @action="createOpen = true"
       @batch-delete="requestDelete(selectedIds)"
     />
@@ -230,9 +241,10 @@ async function preview(item: AvatarResource) {
 
     <n-spin :show="list.loading.value">
       <n-empty v-if="list.empty.value" description="暂无数字人视频素材" class="resource-state" />
+      <n-empty v-else-if="visibleItems.length === 0" description="没有匹配的数字人" class="resource-state" />
       <div v-else class="resource-grid resource-grid--avatar">
         <AvatarResourceCard
-          v-for="item in list.items.value"
+          v-for="item in visibleItems"
           :key="item.id"
           :item="item"
           :selected="selectedIds.includes(item.id)"
@@ -282,20 +294,22 @@ async function preview(item: AvatarResource) {
 .resource-page {
   height: calc(100vh - 88px);
   overflow: auto;
-  padding: 22px 28px 48px;
+  padding: 36px 44px 56px;
   color: var(--text-main);
   background:
-    radial-gradient(circle at 86% 14%, rgba(75, 107, 255, 0.1), transparent 24%),
-    linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.16));
+    radial-gradient(circle at 82% 8%, rgba(73, 107, 255, 0.1), transparent 26%),
+    radial-gradient(circle at 18% 0%, rgba(67, 207, 191, 0.08), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.22), rgba(246, 249, 255, 0.04));
 }
 
 .resource-grid {
   display: grid;
-  gap: 18px;
+  gap: 34px 32px;
 }
 
 .resource-grid--avatar {
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  align-items: start;
 }
 
 .resource-state {
@@ -317,7 +331,15 @@ async function preview(item: AvatarResource) {
 
 @media (max-width: 760px) {
   .resource-page {
-    padding: 18px 16px 40px;
+    padding: 22px 16px 40px;
+  }
+
+  .resource-grid {
+    gap: 18px;
+  }
+
+  .resource-grid--avatar {
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   }
 }
 </style>

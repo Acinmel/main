@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { NButton, NCard, NCheckbox, NInput, NSpace, NTag, NText } from 'naive-ui'
+import { NButton, NCard, NCheckbox, NInput, NTag, NText } from 'naive-ui'
 import type { AvatarResource } from '@/types/resources'
 
 const props = defineProps<{
@@ -37,6 +37,13 @@ function pauseVideoPreview(event: Event) {
   const video = event.currentTarget as HTMLVideoElement
   video.pause()
 }
+
+function formatCreatedAt(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  const pad = (unit: number) => String(unit).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
 </script>
 
 <template>
@@ -60,9 +67,17 @@ function pauseVideoPreview(event: Event) {
         :checked="selected"
         @update:checked="emit('update:selected', $event)"
       />
+      <div class="resource-card__actions">
+        <n-button size="small" type="primary" :disabled="!hasSourceVideo" @click="emit('create')">创作</n-button>
+        <n-button size="small" secondary :disabled="!hasSourceVideo" @click="emit('preview')">预览</n-button>
+        <n-button v-if="item.owner === 'mine'" size="small" secondary @click="editing = true">改名</n-button>
+        <n-button v-if="item.owner === 'mine'" size="small" type="error" secondary @click="emit('delete')">
+          删除
+        </n-button>
+      </div>
     </div>
     <div class="resource-card__body">
-      <n-space justify="space-between" align="center" :wrap="false">
+      <div class="resource-card__meta">
         <n-input
           v-if="editing"
           v-model:value="draftName"
@@ -71,21 +86,12 @@ function pauseVideoPreview(event: Event) {
           @blur="saveName"
           @keyup.enter="saveName"
         />
-        <n-text v-else strong>{{ item.name }}</n-text>
-        <n-tag size="small" :type="item.owner === 'mine' ? 'success' : 'info'">
+        <n-text v-else strong class="resource-card__name">{{ item.name }}</n-text>
+        <n-tag size="small" :type="item.owner === 'mine' ? 'success' : 'info'" class="resource-card__tag">
           {{ item.owner === 'mine' ? '我的' : '推荐' }}
         </n-tag>
-      </n-space>
-      <n-space class="resource-card__actions" size="small">
-        <n-button size="tiny" :disabled="!hasSourceVideo" @click="emit('create')">立即创作</n-button>
-        <n-button size="tiny" :disabled="!hasSourceVideo" @click="emit('preview')">
-          原始视频
-        </n-button>
-        <n-button v-if="item.owner === 'mine'" size="tiny" @click="editing = true">编辑名称</n-button>
-        <n-button v-if="item.owner === 'mine'" size="tiny" type="error" quaternary @click="emit('delete')">
-          删除
-        </n-button>
-      </n-space>
+      </div>
+      <n-text depth="3" class="resource-card__date">上传于 {{ formatCreatedAt(item.createdAt) }}</n-text>
       <n-text v-if="!hasSourceVideo" depth="3" class="resource-card__hint">
         这个数字人还没有绑定原始视频，先补充视频素材后才能做对口型预览。
       </n-text>
@@ -95,13 +101,14 @@ function pauseVideoPreview(event: Event) {
 
 <style scoped>
 .resource-card {
+  position: relative;
   overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.58);
-  border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(246, 249, 255, 0.82));
+  border: 1px solid rgba(223, 230, 244, 0.9);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.92);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.94),
-    var(--shadow-soft);
+    0 18px 40px rgba(64, 78, 118, 0.08);
   transition:
     border-color var(--transition-fast),
     box-shadow var(--transition-fast),
@@ -109,18 +116,20 @@ function pauseVideoPreview(event: Event) {
 }
 
 .resource-card:hover {
-  border-color: var(--border-strong);
+  border-color: rgba(124, 58, 237, 0.28);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.96),
-    var(--shadow-panel);
-  transform: translateY(-5px);
+    0 24px 54px rgba(64, 78, 118, 0.14);
+  transform: translateY(-6px);
 }
 
 .resource-card__media {
   position: relative;
-  aspect-ratio: 4 / 5;
+  aspect-ratio: 3 / 4;
   overflow: hidden;
-  background: linear-gradient(180deg, #eef3fb, #dfe8f7);
+  background:
+    linear-gradient(180deg, rgba(17, 24, 39, 0.04), rgba(17, 24, 39, 0.1)),
+    linear-gradient(180deg, #eef3fb, #dfe8f7);
 }
 
 .resource-card__media img,
@@ -149,9 +158,9 @@ function pauseVideoPreview(event: Event) {
 .resource-card__media-label {
   position: absolute;
   right: 10px;
-  bottom: 10px;
+  top: 12px;
   z-index: 1;
-  padding: 6px 10px;
+  padding: 7px 11px;
   color: #ffffff;
   font-size: 12px;
   font-weight: 800;
@@ -164,8 +173,8 @@ function pauseVideoPreview(event: Event) {
 
 .resource-card__check {
   position: absolute;
-  top: 10px;
-  left: 10px;
+  top: 12px;
+  left: 12px;
   padding: 6px;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.82);
@@ -173,16 +182,90 @@ function pauseVideoPreview(event: Event) {
 }
 
 .resource-card__body {
-  padding: 14px;
+  padding: 20px 22px 18px;
+  background: rgba(255, 255, 255, 0.96);
 }
 
 .resource-card__actions {
-  margin-top: 12px;
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  left: 14px;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  padding-top: 42px;
+  opacity: 0;
+  background: linear-gradient(180deg, transparent, rgba(15, 23, 42, 0.62));
+  transform: translateY(10px);
+  transition:
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
+  pointer-events: none;
+}
+
+.resource-card:hover .resource-card__actions,
+.resource-card:focus-within .resource-card__actions {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.resource-card__actions :deep(.n-button) {
+  min-width: 58px;
+  border-radius: 999px;
+  font-weight: 800;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+}
+
+.resource-card__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.resource-card__name {
+  min-width: 0;
+  color: #101828;
+  font-size: 20px;
+  font-weight: 900;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.resource-card__tag {
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 7px;
+  color: #6f35f0;
+  font-weight: 900;
+  background: rgba(124, 58, 237, 0.1);
+}
+
+.resource-card__date {
+  display: block;
+  margin-top: 8px;
+  color: #8b98ad;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 .resource-card__hint {
   display: block;
   margin-top: 10px;
   line-height: 1.45;
+}
+
+@media (hover: none) {
+  .resource-card__actions {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
 }
 </style>

@@ -541,6 +541,7 @@ export class AliLipSyncService {
       apiUrl:
         provider === 'aliyun-videoretalk'
           ? this.config.get<string>('ALI_VIDEORETALK_API_URL')?.trim() ||
+            this.config.get<string>('VIDEO_RETALK_API_URL')?.trim() ||
             `${normalizedDashScopeBase}/services/aigc/image2video/video-synthesis/`
           : genericApiUrl,
       taskBaseUrl:

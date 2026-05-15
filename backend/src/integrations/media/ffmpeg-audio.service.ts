@@ -19,6 +19,18 @@ export type TranscribeMediaInput = {
   size: number;
 };
 
+export type SilenceSegment = {
+  startTime: number;
+  endTime: number;
+  duration: number;
+};
+
+export type VideoCutRange = {
+  startTime: number;
+  endTime: number;
+  enabled?: boolean;
+};
+
 /**
  * 视频 → FFmpeg 抽音轨（16kHz mono MP3）再送 ASR API，减轻上游解码压力、统一格式。
  * 可执行文件：FFMPEG_BIN → backend/ffmpeg/bin（Windows/Linux）→ PATH 中的 ffmpeg。
@@ -125,6 +137,32 @@ export class FfmpegAudioService {
     return map[ext] ?? 'application/octet-stream';
   }
 
+  private guessExtensionFromMime(mimetype?: string): string | null {
+    const mt = (mimetype || '').split(';')[0]?.trim().toLowerCase();
+    const map: Record<string, string> = {
+      'audio/mpeg': '.mp3',
+      'audio/mp3': '.mp3',
+      'audio/wav': '.wav',
+      'audio/wave': '.wav',
+      'audio/x-wav': '.wav',
+      'audio/mp4': '.m4a',
+      'audio/aac': '.aac',
+      'audio/ogg': '.ogg',
+      'audio/flac': '.flac',
+      'audio/webm': '.webm',
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+      'video/webm': '.webm',
+      'video/x-matroska': '.mkv',
+    };
+    return mt ? map[mt] ?? null : null;
+  }
+
+  private extensionFromMedia(originalname?: string, mimetype?: string): string {
+    const ext = path.extname(originalname || '').toLowerCase();
+    return ext || this.guessExtensionFromMime(mimetype) || '.bin';
+  }
+
   private isLikelyVideo(originalname: string, mimetype: string): boolean {
     const m = (mimetype || '').toLowerCase();
     if (m.startsWith('video/')) return true;
@@ -134,7 +172,9 @@ export class FfmpegAudioService {
 
   private resolveFfmpegBinary(): string {
     const exe = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
-    const fromEnv = this.config.get<string>('FFMPEG_BIN')?.trim();
+    const fromEnv =
+      this.config.get<string>('FFMPEG_BIN')?.trim() ||
+      this.config.get<string>('FFMPEG_PATH')?.trim();
     if (fromEnv && existsSync(fromEnv)) return fromEnv;
 
     // cwd 可能是 backend 或仓库根目录；__dirname 为 dist/integrations/media，可定位到 backend/ffmpeg/bin
@@ -155,7 +195,9 @@ export class FfmpegAudioService {
     const exe = process.platform === 'win32' ? 'ffprobe.exe' : 'ffprobe';
     const fromEnv = this.config.get<string>('FFPROBE_BIN')?.trim();
     if (fromEnv && existsSync(fromEnv)) return fromEnv;
-    const ffmpegFromEnv = this.config.get<string>('FFMPEG_BIN')?.trim();
+    const ffmpegFromEnv =
+      this.config.get<string>('FFMPEG_BIN')?.trim() ||
+      this.config.get<string>('FFMPEG_PATH')?.trim();
     if (ffmpegFromEnv) {
       const alongside = path.join(path.dirname(ffmpegFromEnv), exe);
       if (existsSync(alongside)) return alongside;
@@ -175,7 +217,7 @@ export class FfmpegAudioService {
   }
 
   private async writeTempInput(dir: string, media: TranscribeMediaInput): Promise<string> {
-    const ext = path.extname(media.originalname) || '.bin';
+    const ext = this.extensionFromMedia(media.originalname, media.mimetype);
     const p = path.join(dir, `input${ext}`);
     await fs.writeFile(p, media.buffer);
     return p;
@@ -226,35 +268,17 @@ export class FfmpegAudioService {
   async probeDurationSeconds(input: {
     buffer: Buffer;
     originalname: string;
+    mimetype?: string;
   }): Promise<number | null> {
-    const bin = this.resolveFfprobeBinary();
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffprobe-'));
     const inputPath = path.join(
       tmpDir,
-      `input${path.extname(input.originalname) || '.bin'}`,
+      `input${this.extensionFromMedia(input.originalname, input.mimetype)}`,
     );
 
     try {
       await fs.writeFile(inputPath, input.buffer);
-      const { stdout } = await execFileAsync(
-        bin,
-        [
-          '-v',
-          'error',
-          '-show_entries',
-          'format=duration',
-          '-of',
-          'default=noprint_wrappers=1:nokey=1',
-          inputPath,
-        ],
-        {
-          timeout: 20_000,
-          maxBuffer: 2 * 1024 * 1024,
-          windowsHide: true,
-        },
-      );
-      const seconds = Number((stdout?.toString() ?? '').trim());
-      return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+      return await this.probeFileDurationSeconds(inputPath);
     } catch (error) {
       this.logger.warn(
         `FFprobe duration probe failed: ${
@@ -265,6 +289,112 @@ export class FfmpegAudioService {
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  async probeFileDurationSeconds(inputPath: string): Promise<number | null> {
+    const bin = this.resolveFfprobeBinary();
+    const attempts: string[][] = [
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        inputPath,
+      ],
+      [
+        '-v',
+        'error',
+        '-select_streams',
+        'a:0',
+        '-show_entries',
+        'stream=duration',
+        '-of',
+        'default=noprint_wrappers=1:nokey=1',
+        inputPath,
+      ],
+      [
+        '-v',
+        'error',
+        '-show_entries',
+        'format=duration:stream=duration',
+        '-of',
+        'csv=p=0',
+        inputPath,
+      ],
+    ];
+    let lastError: unknown = null;
+
+    for (const args of attempts) {
+      try {
+        const { stdout } = await execFileAsync(bin, args, {
+          timeout: 20_000,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+        });
+        const seconds = this.parseFirstPositiveDuration(stdout);
+        if (seconds) return seconds;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    const ffmpegDuration = await this.probeDurationWithFfmpeg(inputPath);
+    if (ffmpegDuration) return ffmpegDuration;
+
+    if (lastError) {
+      this.logger.warn(
+        `FFprobe file duration failed for ${path.basename(inputPath)}: ${
+          lastError instanceof Error ? lastError.message : String(lastError)
+        }`,
+      );
+    }
+    return null;
+  }
+
+  private parseFirstPositiveDuration(output: unknown): number | null {
+    const text = this.stringifyExecOutput(output);
+    const parts = text.split(/[\s,\r\n]+/).map((item) => item.trim()).filter(Boolean);
+    for (const part of parts) {
+      if (/^(n\/a|nan|inf)$/i.test(part)) continue;
+      const seconds = Number(part);
+      if (Number.isFinite(seconds) && seconds > 0) return seconds;
+    }
+    return null;
+  }
+
+  private async probeDurationWithFfmpeg(inputPath: string): Promise<number | null> {
+    const bin = this.resolveFfmpegBinary();
+    try {
+      await execFileAsync(bin, ['-nostdin', '-hide_banner', '-i', inputPath], {
+        timeout: 20_000,
+        maxBuffer: 2 * 1024 * 1024,
+        windowsHide: true,
+      });
+    } catch (error) {
+      const execError = error as { stdout?: unknown; stderr?: unknown };
+      const output = `${this.stringifyExecOutput(execError.stdout)}\n${this.stringifyExecOutput(execError.stderr)}`;
+      return this.parseFfmpegDuration(output);
+    }
+    return null;
+  }
+
+  private parseFfmpegDuration(output: string): number | null {
+    const match = output.match(/Duration:\s*(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)/i);
+    if (!match) return null;
+
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    const seconds = Number(match[3]);
+    const duration = hours * 3600 + minutes * 60 + seconds;
+    return Number.isFinite(duration) && duration > 0 ? duration : null;
+  }
+
+  private stringifyExecOutput(output: unknown): string {
+    if (!output) return '';
+    if (Buffer.isBuffer(output)) return output.toString();
+    return typeof output === 'string' ? output : String(output);
   }
 
   async replaceVideoAudio(params: {
@@ -387,19 +517,30 @@ export class FfmpegAudioService {
     inputVideoPath: string;
     outputVideoPath: string;
     clipSeconds?: number;
+    targetSeconds?: number;
   }): Promise<void> {
     const bin = this.resolveFfmpegBinary();
+    const normalizedClipSeconds =
+      typeof params.clipSeconds === 'number' && params.clipSeconds > 0
+        ? params.clipSeconds
+        : null;
+    const normalizedTargetSeconds =
+      typeof params.targetSeconds === 'number' && params.targetSeconds > 0
+        ? params.targetSeconds
+        : null;
+    const outputSeconds = normalizedClipSeconds ?? normalizedTargetSeconds;
     const args = [
       '-nostdin',
       '-hide_banner',
       '-loglevel',
       'error',
       '-y',
+      ...(normalizedTargetSeconds && !normalizedClipSeconds ? ['-stream_loop', '-1'] : []),
       '-i',
       params.inputVideoPath,
     ];
-    if (params.clipSeconds && params.clipSeconds > 0) {
-      args.push('-t', String(params.clipSeconds));
+    if (outputSeconds) {
+      args.push('-t', String(outputSeconds));
     }
     args.push(
       '-an',
@@ -457,6 +598,197 @@ export class FfmpegAudioService {
     });
   }
 
+  async detectSilences(params: {
+    inputPath: string;
+    noiseDb: number;
+    minSilenceDuration: number;
+  }): Promise<SilenceSegment[]> {
+    const bin = this.resolveFfmpegBinary();
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-i',
+      params.inputPath,
+      '-af',
+      `silencedetect=noise=${params.noiseDb}dB:d=${params.minSilenceDuration}`,
+      '-f',
+      'null',
+      '-',
+    ];
+    const { stdout, stderr } = await execFileAsync(bin, args, {
+      timeout: 20 * 60_000,
+      maxBuffer: 64 * 1024 * 1024,
+      windowsHide: true,
+    });
+
+    const log = `${stdout?.toString() ?? ''}\n${stderr?.toString() ?? ''}`;
+    const silences: SilenceSegment[] = [];
+    let currentStart: number | null = null;
+    for (const line of log.split(/\r?\n/)) {
+      const startMatch = line.match(/silence_start:\s*([0-9.]+)/i);
+      if (startMatch) {
+        currentStart = Number(startMatch[1]);
+        continue;
+      }
+
+      const endMatch = line.match(
+        /silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/i,
+      );
+      if (!endMatch) continue;
+      const endTime = Number(endMatch[1]);
+      const duration = Number(endMatch[2]);
+      const startTime =
+        typeof currentStart === 'number' && Number.isFinite(currentStart)
+          ? currentStart
+          : endTime - duration;
+      currentStart = null;
+      if (
+        Number.isFinite(startTime) &&
+        Number.isFinite(endTime) &&
+        Number.isFinite(duration) &&
+        endTime > startTime
+      ) {
+        silences.push({
+          startTime: Number(startTime.toFixed(3)),
+          endTime: Number(endTime.toFixed(3)),
+          duration: Number(duration.toFixed(3)),
+        });
+      }
+    }
+    return silences;
+  }
+
+  async cutVideoByRanges(params: {
+    inputVideoPath: string;
+    outputVideoPath: string;
+    cuts: VideoCutRange[];
+  }): Promise<void> {
+    const duration = await this.probeFileDurationSeconds(params.inputVideoPath);
+    if (!duration) {
+      throw new Error('Unable to probe video duration before applying cut points');
+    }
+
+    const normalizedCuts = params.cuts
+      .filter((cut) => cut.enabled !== false)
+      .map((cut) => ({
+        startTime: this.clampSeconds(cut.startTime, 0, duration),
+        endTime: this.clampSeconds(cut.endTime, 0, duration),
+      }))
+      .filter((cut) => cut.endTime - cut.startTime > 0.04)
+      .sort((a, b) => a.startTime - b.startTime);
+
+    if (!normalizedCuts.length) {
+      await fs.copyFile(params.inputVideoPath, params.outputVideoPath);
+      return;
+    }
+
+    const keepRanges: { startTime: number; endTime: number }[] = [];
+    let cursor = 0;
+    for (const cut of normalizedCuts) {
+      if (cut.endTime <= cursor) continue;
+      const start = Math.max(cursor, cut.startTime);
+      if (start - cursor > 0.05) {
+        keepRanges.push({ startTime: cursor, endTime: start });
+      }
+      cursor = Math.max(cursor, cut.endTime);
+    }
+    if (duration - cursor > 0.05) {
+      keepRanges.push({ startTime: cursor, endTime: duration });
+    }
+
+    if (!keepRanges.length) {
+      await fs.copyFile(params.inputVideoPath, params.outputVideoPath);
+      return;
+    }
+
+    const bin = this.resolveFfmpegBinary();
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-cut-'));
+    try {
+      const segmentPaths: string[] = [];
+      for (const [index, range] of keepRanges.entries()) {
+        const segmentPath = path.join(tmpDir, `segment-${String(index).padStart(3, '0')}.mp4`);
+        const segmentDuration = Math.max(0.05, range.endTime - range.startTime);
+        await execFileAsync(
+          bin,
+          [
+            '-nostdin',
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-y',
+            '-ss',
+            range.startTime.toFixed(3),
+            '-i',
+            params.inputVideoPath,
+            '-t',
+            segmentDuration.toFixed(3),
+            '-map',
+            '0:v:0',
+            '-map',
+            '0:a?',
+            '-c:v',
+            'libx264',
+            '-preset',
+            'veryfast',
+            '-crf',
+            '20',
+            '-c:a',
+            'aac',
+            '-movflags',
+            '+faststart',
+            segmentPath,
+          ],
+          {
+            timeout: 20 * 60_000,
+            maxBuffer: 64 * 1024 * 1024,
+            windowsHide: true,
+          },
+        );
+        segmentPaths.push(segmentPath);
+      }
+
+      if (segmentPaths.length === 1) {
+        await fs.copyFile(segmentPaths[0], params.outputVideoPath);
+        return;
+      }
+
+      const listPath = path.join(tmpDir, 'concat-list.txt');
+      const listContent = segmentPaths
+        .map((segmentPath) => `file '${segmentPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`)
+        .join('\n');
+      await fs.writeFile(listPath, listContent, 'utf8');
+
+      await execFileAsync(
+        bin,
+        [
+          '-nostdin',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-f',
+          'concat',
+          '-safe',
+          '0',
+          '-i',
+          listPath,
+          '-c',
+          'copy',
+          '-movflags',
+          '+faststart',
+          params.outputVideoPath,
+        ],
+        {
+          timeout: 20 * 60_000,
+          maxBuffer: 64 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+
   private escapeFilterPath(filePath: string): string {
     return path
       .resolve(filePath)
@@ -493,5 +825,10 @@ export class FfmpegAudioService {
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
+  }
+
+  private clampSeconds(value: number, min: number, max: number): number {
+    if (!Number.isFinite(value)) return min;
+    return Math.min(max, Math.max(min, value));
   }
 }

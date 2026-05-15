@@ -69,6 +69,11 @@ function onUploadChange(fileList: UploadFileInfo[]) {
   sampleFileList.value = nextList
 }
 
+function clearSampleFile() {
+  sampleFile.value = null
+  sampleFileList.value = []
+}
+
 watch(
   () => props.loading,
   (loading) => {
@@ -116,6 +121,11 @@ watch(
                   : '支持 MP3、WAV、M4A 等格式，最大 10MB'
               }}
             </p>
+            <div v-if="sampleFile" class="media-upload-actions" @click.stop>
+              <button type="button" class="media-upload-remove" @click.prevent.stop="clearSampleFile">
+                移除文件
+              </button>
+            </div>
             <span class="media-upload-tip">音频建议：15秒内 + 情绪饱满 + 内容完整 + 无杂音</span>
           </n-upload-dragger>
         </n-upload>
@@ -224,13 +234,42 @@ watch(
 
 .media-upload-card p {
   max-width: 360px;
-  margin: 8px 0 24px;
+  margin: 8px 0 18px;
   color: #98a2b3;
   font-size: 16px;
   font-weight: 700;
   line-height: 1.5;
   text-align: center;
   word-break: break-all;
+}
+
+.media-upload-actions {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  margin: 0 0 16px;
+}
+
+.media-upload-remove {
+  height: 34px;
+  padding: 0 16px;
+  border: 1px solid rgba(239, 68, 68, 0.24);
+  border-radius: 999px;
+  color: #dc2626;
+  font-size: 13px;
+  font-weight: 800;
+  background: rgba(254, 242, 242, 0.92);
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.media-upload-remove:hover {
+  border-color: rgba(239, 68, 68, 0.42);
+  background: #fff1f2;
+  transform: translateY(-1px);
 }
 
 .media-upload-tip {

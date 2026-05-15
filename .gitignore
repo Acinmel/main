@@ -41,8 +41,11 @@ backend/ffmpeg/bin/*.dll
 *.wmv
 *.flv
 *.wav
+*.mp3
 *.flac
 *.aac
+*.exe
+backend/uploads/**
 # 压缩包 / 镜像
 dist-release/
 *.zip

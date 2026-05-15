@@ -21,6 +21,7 @@ import { createAliLipSyncVideo } from '@/api/task'
 import { describeHttpOrNetworkError } from '@/utils/httpErrorMessage'
 
 const MAX_VIDEO_SECONDS = 5 * 60
+const MAX_VIDEO_BYTES = 500 * 1024 * 1024
 
 const message = useMessage()
 
@@ -118,6 +119,11 @@ async function onUploadChange(options: { fileList: UploadFileInfo[] }) {
   sourceFile.value = file
 
   if (!file) return
+  if (file.size > MAX_VIDEO_BYTES) {
+    sourceFile.value = null
+    message.warning('请上传小于 500MB 的视频文件')
+    return
+  }
   if (!file.type.startsWith('video/') && !/\.(mp4|mov|webm|m4v|mkv)$/i.test(file.name)) {
     sourceFile.value = null
     message.warning('请上传视频文件')
@@ -203,6 +209,9 @@ onUnmounted(() => {
         <n-space vertical :size="16">
           <n-alert type="info" :show-icon="false">
             请上传 MP4 / MOV / WebM 等常见视频格式。页面会先读取本地视频时长，超过 5 分钟将无法提交。
+          </n-alert>
+          <n-alert type="warning" :show-icon="false">
+            上传建议：请上传小于 500MB 的视频；市场测试更推荐 1-2 分钟，口型稳定性和生成等待时间会更好。
           </n-alert>
 
           <n-upload
