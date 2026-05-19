@@ -16,10 +16,9 @@ export class AuditService {
     const xf = typeof xff === 'string' ? xff.split(',')[0]?.trim() : '';
     const raw =
       xf ||
-      (
-        typeof req.socket?.remoteAddress === 'string'
-          ? req.socket.remoteAddress
-          : ''
+      (typeof req.socket?.remoteAddress === 'string'
+        ? req.socket.remoteAddress
+        : ''
       ).trim();
     return raw.length > 0 ? raw.slice(0, 64) : '';
   }

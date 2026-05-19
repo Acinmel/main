@@ -14,7 +14,12 @@ const execFileAsync = promisify(execFile);
 
 type YtdlpInvoker =
   | { kind: 'binary'; executable: string }
-  | { kind: 'python'; python: string; pythonpath: string; pythonPrefixArgs: string[] };
+  | {
+      kind: 'python';
+      python: string;
+      pythonpath: string;
+      pythonPrefixArgs: string[];
+    };
 
 /** 链接拉媒体供口播转写（ASR）；抖音失败码沿用历史命名（douyin_no_ytdlp / douyin_ytdlp_failed） */
 export type TranscriptionMediaDownloadOutcome =
@@ -30,6 +35,27 @@ export interface DownloadedMediaBuffer {
   mimetype: string;
   size: number;
 }
+
+type DyAwemeLite = {
+  awemeType?: number;
+  videoPlayAddr?: string | string[];
+};
+
+type DyPostDetailLike = {
+  images?: { urlList: string[] }[];
+  video?: { playAddr: string[] };
+};
+
+type DyPostDetailFilterLike = {
+  toAwemeData: () => DyAwemeLite;
+};
+
+type DyDownloaderModule = {
+  DouyinHandler: new (config: { cookie: string }) => {
+    fetchOneVideo: (urlOrAwemeId: string) => Promise<unknown>;
+  };
+  PostDetailFilter: new (...args: never[]) => DyPostDetailFilterLike;
+};
 
 /**
  * 为口播转写准备本地媒体字节：
@@ -54,7 +80,8 @@ export class VideoMediaDownloadService {
     assertUrlSafeForServerFetch(pageUrl);
 
     const maxBytes = Number(
-      this.config.get('VIDEO_MEDIA_MAX_BYTES') ?? DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES,
+      this.config.get('VIDEO_MEDIA_MAX_BYTES') ??
+        DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES,
     );
     const douyin = this.isDouyinUrl(canonicalUrl);
     const invoker = this.resolveYtdlpInvoker();
@@ -62,7 +89,9 @@ export class VideoMediaDownloadService {
     if (douyin) {
       const dyCookie = this.config.get<string>('DY_DOWNLOADER_COOKIE')?.trim();
       if (!dyCookie) {
-        this.logger.warn('抖音下载仅走 dy-downloader，请配置 DY_DOWNLOADER_COOKIE，见 backend/.env.example');
+        this.logger.warn(
+          '抖音下载仅走 dy-downloader，请配置 DY_DOWNLOADER_COOKIE，见 backend/.env.example',
+        );
         return { ok: false, failure: 'douyin_no_ytdlp' };
       }
       const fromDy = await this.tryDownloadDouyinViaDyDownloader(
@@ -79,7 +108,11 @@ export class VideoMediaDownloadService {
     }
 
     if (invoker) {
-      const fromYtdlp = await this.tryDownloadViaYtDlp(canonicalUrl, maxBytes, invoker);
+      const fromYtdlp = await this.tryDownloadViaYtDlp(
+        canonicalUrl,
+        maxBytes,
+        invoker,
+      );
       if (fromYtdlp) {
         this.logger.log(`yt-dlp 已下载媒体 ${fromYtdlp.size} 字节`);
         return { ok: true, media: fromYtdlp };
@@ -87,7 +120,10 @@ export class VideoMediaDownloadService {
       this.logger.warn('yt-dlp 未得到可用媒体，回退 HTML 直链解析');
     }
 
-    const fromHtml = await this.tryHtmlHeuristicDownload(canonicalUrl, maxBytes);
+    const fromHtml = await this.tryHtmlHeuristicDownload(
+      canonicalUrl,
+      maxBytes,
+    );
     if (fromHtml) {
       return { ok: true, media: fromHtml };
     }
@@ -103,7 +139,10 @@ export class VideoMediaDownloadService {
   }
 
   /** 自目录向上查找名为 yt-dlp-master 且含 yt_dlp 包的目录（适配任意工作目录深度） */
-  private findYtDlpMasterWalkingUp(fromDir: string, maxDepth = 12): string | null {
+  private findYtDlpMasterWalkingUp(
+    fromDir: string,
+    maxDepth = 12,
+  ): string | null {
     let dir = path.resolve(fromDir);
     for (let i = 0; i < maxDepth; i++) {
       const candidate = path.join(dir, 'yt-dlp-master');
@@ -132,7 +171,11 @@ export class VideoMediaDownloadService {
     };
     const explicit = this.config.get<string>('YT_DLP_SOURCE_DIR')?.trim();
     if (explicit) {
-      push(path.isAbsolute(explicit) ? explicit : path.join(process.cwd(), explicit));
+      push(
+        path.isAbsolute(explicit)
+          ? explicit
+          : path.join(process.cwd(), explicit),
+      );
     }
     push(this.findYtDlpMasterWalkingUp(process.cwd()));
     push(this.findYtDlpMasterWalkingUp(__dirname));
@@ -155,7 +198,9 @@ export class VideoMediaDownloadService {
       this.config.get<string>('PYTHON_BIN')?.trim() ||
       (process.platform === 'win32' ? 'python' : 'python3');
     const prefixRaw = this.config.get<string>('YTDLP_PYTHON_ARGS')?.trim();
-    const pythonPrefixArgs = prefixRaw ? prefixRaw.split(/\s+/).filter(Boolean) : [];
+    const pythonPrefixArgs = prefixRaw
+      ? prefixRaw.split(/\s+/).filter(Boolean)
+      : [];
     for (const root of this.collectYtDlpSourceCandidateRoots()) {
       if (this.isYtDlpSourceRoot(root)) {
         this.logger.log(
@@ -175,15 +220,16 @@ export class VideoMediaDownloadService {
     maxBytes: number,
     cookie: string,
   ): Promise<DownloadedMediaBuffer | null> {
-    const timeoutMs = Number(this.config.get('DY_DOWNLOADER_FETCH_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(
+      this.config.get('DY_DOWNLOADER_FETCH_TIMEOUT_MS') ?? 120_000,
+    );
     const ua =
       this.config.get<string>('VIDEO_FETCH_USER_AGENT')?.trim() ||
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 动态 import 与包导出类型组合
-    let dy: any;
+    let dy: DyDownloaderModule;
     try {
-      dy = await import('dy-downloader');
+      dy = (await import('dy-downloader')) as unknown as DyDownloaderModule;
     } catch (e) {
       this.logger.warn(
         `无法加载 dy-downloader: ${e instanceof Error ? e.message : String(e)}（请在 backend/DY-DOWNLOADER 执行 npm install && npm run build）`,
@@ -195,19 +241,11 @@ export class VideoMediaDownloadService {
       const handler = new dy.DouyinHandler({ cookie });
       const postDetail = await handler.fetchOneVideo(pageUrl);
 
-      type AwemeLite = {
-        awemeType?: number;
-        videoPlayAddr?: string | string[];
-      };
-
-      let aweme: AwemeLite;
+      let aweme: DyAwemeLite;
       if (postDetail instanceof dy.PostDetailFilter) {
         aweme = postDetail.toAwemeData();
       } else {
-        const sp = postDetail as {
-          images?: { urlList: string[] }[];
-          video?: { playAddr: string[] };
-        };
+        const sp = postDetail as DyPostDetailLike;
         aweme = {
           awemeType: sp.images && sp.images.length > 0 ? 68 : 0,
           videoPlayAddr: sp.video?.playAddr,
@@ -250,6 +288,10 @@ export class VideoMediaDownloadService {
           this.logger.warn(`dy-downloader 拉流 HTTP ${res.status}`);
           return null;
         }
+        const contentLength = Number(res.headers.get('content-length') ?? 0);
+        if (contentLength > maxBytes) {
+          return null;
+        }
         const buf = Buffer.from(await res.arrayBuffer());
         if (buf.length === 0 || buf.length > maxBytes) {
           return null;
@@ -283,7 +325,9 @@ export class VideoMediaDownloadService {
       this.config.get<string>('VIDEO_FETCH_USER_AGENT')?.trim() ||
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
-    const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ytdlp-'));
+    const tmpRoot = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-ytdlp-'),
+    );
     const outTemplate = path.join(tmpRoot, 'media.%(ext)s');
 
     const maxSizeArg =
@@ -307,7 +351,9 @@ export class VideoMediaDownloadService {
       pageUrl,
     ];
 
-    const cookiesBrowser = this.config.get<string>('YTDLP_COOKIES_FROM_BROWSER')?.trim();
+    const cookiesBrowser = this.config
+      .get<string>('YTDLP_COOKIES_FROM_BROWSER')
+      ?.trim();
     if (cookiesBrowser) {
       args.unshift('--cookies-from-browser', cookiesBrowser);
     }
@@ -321,7 +367,8 @@ export class VideoMediaDownloadService {
       invoker.kind === 'binary'
         ? args
         : [...invoker.pythonPrefixArgs, '-m', 'yt_dlp', ...args];
-    const executable = invoker.kind === 'binary' ? invoker.executable : invoker.python;
+    const executable =
+      invoker.kind === 'binary' ? invoker.executable : invoker.python;
     const env =
       invoker.kind === 'python'
         ? { ...process.env, PYTHONPATH: invoker.pythonpath }
@@ -341,7 +388,9 @@ export class VideoMediaDownloadService {
       this.logger.warn(
         `yt-dlp 执行失败: ${err.message ?? String(e)}${stderr ? ` · ${stderr.slice(0, 600)}` : ''}`,
       );
-      await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+      await fs
+        .rm(tmpRoot, { recursive: true, force: true })
+        .catch(() => undefined);
       return null;
     }
 
@@ -382,7 +431,9 @@ export class VideoMediaDownloadService {
       this.logger.warn(`读取 yt-dlp 输出失败: ${msg}`);
       return null;
     } finally {
-      await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => undefined);
+      await fs
+        .rm(tmpRoot, { recursive: true, force: true })
+        .catch(() => undefined);
     }
   }
 
@@ -393,9 +444,15 @@ export class VideoMediaDownloadService {
     const ua =
       this.config.get<string>('VIDEO_FETCH_USER_AGENT')?.trim() ||
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
-    const timeoutMs = Number(this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 45_000);
+    const timeoutMs = Number(
+      this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 45_000,
+    );
 
-    const { html, resolvedUrl } = await this.pullHtml(canonicalUrl, ua, timeoutMs);
+    const { html, resolvedUrl } = await this.pullHtml(
+      canonicalUrl,
+      ua,
+      timeoutMs,
+    );
     if (!html || html.length < 200) {
       this.logger.warn('页面 HTML 过短，跳过媒体下载');
       return null;
@@ -448,7 +505,10 @@ export class VideoMediaDownloadService {
     }
   }
 
-  private buildPageHeaders(targetUrl: string, userAgent: string): Record<string, string> {
+  private buildPageHeaders(
+    targetUrl: string,
+    userAgent: string,
+  ): Record<string, string> {
     const headers: Record<string, string> = {
       'User-Agent': userAgent,
       Accept:
@@ -534,8 +594,7 @@ export class VideoMediaDownloadService {
       while ((m = escaped.exec(html))) {
         push(m[0].replace(/\\\//g, '/').replace(/\\u002f/gi, '/'));
       }
-      const plain =
-        /https:\/\/[a-zA-Z0-9.-]*douyinvod\.com[^"'\\\s<>]+/gi;
+      const plain = /https:\/\/[a-zA-Z0-9.-]*douyinvod\.com[^"'\\\s<>]+/gi;
       while ((m = plain.exec(html))) {
         push(m[0]);
       }
@@ -623,7 +682,10 @@ export class VideoMediaDownloadService {
     }
   }
 
-  private buildMediaHeaders(mediaUrl: string, userAgent: string): Record<string, string> {
+  private buildMediaHeaders(
+    mediaUrl: string,
+    userAgent: string,
+  ): Record<string, string> {
     const h: Record<string, string> = {
       'User-Agent': userAgent,
       Accept: '*/*',
@@ -651,14 +713,27 @@ export class VideoMediaDownloadService {
     return { mime: map[ext] || 'application/octet-stream' };
   }
 
-  private guessFilenameAndMime(url: string, buf: Buffer): { name: string; mime: string } {
+  private runtimeTempDir(): string {
+    return path.resolve(
+      this.config.get<string>('TEMP_DIR')?.trim() ||
+        this.config.get<string>('TMP_DIR')?.trim() ||
+        os.tmpdir(),
+    );
+  }
+
+  private guessFilenameAndMime(
+    url: string,
+    buf: Buffer,
+  ): { name: string; mime: string } {
     let ext = '.mp4';
     try {
       const p = new URL(url).pathname;
       const dot = p.lastIndexOf('.');
       if (dot !== -1) {
         const e = p.slice(dot).toLowerCase();
-        if (['.mp4', '.m4a', '.webm', '.mov', '.mp3', '.wav', '.mpeg'].includes(e)) {
+        if (
+          ['.mp4', '.m4a', '.webm', '.mov', '.mp3', '.wav', '.mpeg'].includes(e)
+        ) {
           ext = e;
         }
       }
@@ -666,7 +741,12 @@ export class VideoMediaDownloadService {
       // ignore
     }
     const sniff = buf.slice(0, 12);
-    if (sniff[4] === 0x66 && sniff[5] === 0x74 && sniff[6] === 0x79 && sniff[7] === 0x70) {
+    if (
+      sniff[4] === 0x66 &&
+      sniff[5] === 0x74 &&
+      sniff[6] === 0x79 &&
+      sniff[7] === 0x70
+    ) {
       ext = '.mp4';
     }
     const { mime } = this.mimeFromFilename(`x${ext}`);

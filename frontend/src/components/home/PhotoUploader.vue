@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { CloudUploadOutline } from '@vicons/ionicons5'
-import { NIcon, NText, NUpload, NUploadDragger, type UploadFileInfo } from 'naive-ui'
+import { NIcon, NText, NUpload, NUploadDragger, type UploadFileInfo, useMessage } from 'naive-ui'
+
+const message = useMessage()
+const MAX_PHOTO_BYTES = 8 * 1024 * 1024
 
 const emit = defineEmits<{
   (e: 'update:file', file: File | null): void
@@ -19,6 +22,18 @@ withDefaults(
 function handleChange(data: { fileList: UploadFileInfo[] }) {
   const raw = data.fileList[0]?.file
   if (!raw) {
+    emit('update:file', null)
+    previewUrl.value = null
+    return
+  }
+  if (raw.size <= 0 || raw.size > MAX_PHOTO_BYTES) {
+    message.warning('请上传 8MB 以内的 JPG / PNG 图片')
+    emit('update:file', null)
+    previewUrl.value = null
+    return
+  }
+  if (!['image/jpeg', 'image/png'].includes(raw.type)) {
+    message.warning('请上传 JPG / PNG 图片')
     emit('update:file', null)
     previewUrl.value = null
     return

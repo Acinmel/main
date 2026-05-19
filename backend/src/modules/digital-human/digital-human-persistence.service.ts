@@ -59,22 +59,35 @@ export class DigitalHumanPersistenceService {
 
     const old = await this.findByUserId(userId);
     if (old) {
-      await this.unlinkQuiet(path.join(this.storageRoot, old.output_relative_path));
-      await this.unlinkQuiet(path.join(this.storageRoot, old.selfie_relative_path));
+      await this.unlinkQuiet(
+        path.join(this.storageRoot, old.output_relative_path),
+      );
+      await this.unlinkQuiet(
+        path.join(this.storageRoot, old.selfie_relative_path),
+      );
     }
 
-    const selfieExt: '.png' | '.jpg' = payload.selfieMime.includes('png') ? '.png' : '.jpg';
+    const selfieExt: '.png' | '.jpg' = payload.selfieMime.includes('png')
+      ? '.png'
+      : '.jpg';
     const outRel = `${dir}/output${payload.outputExt}`.replace(/\\/g, '/');
     const selfRel = `${dir}/selfie${selfieExt}`.replace(/\\/g, '/');
 
-    await fs.writeFile(path.join(this.storageRoot, outRel), payload.outputBuffer);
-    await fs.writeFile(path.join(this.storageRoot, selfRel), payload.selfieBuffer);
+    await fs.writeFile(
+      path.join(this.storageRoot, outRel),
+      payload.outputBuffer,
+    );
+    await fs.writeFile(
+      path.join(this.storageRoot, selfRel),
+      payload.selfieBuffer,
+    );
 
     const now = new Date().toISOString();
-    const existing = await this.databaseService.queryOne<{ created_at: string }>(
-      'SELECT created_at FROM digital_human_templates WHERE user_id = ?',
-      [userId],
-    );
+    const existing = await this.databaseService.queryOne<{
+      created_at: string;
+    }>('SELECT created_at FROM digital_human_templates WHERE user_id = ?', [
+      userId,
+    ]);
 
     if (existing) {
       await this.databaseService.execute(
@@ -107,8 +120,12 @@ export class DigitalHumanPersistenceService {
     if (!row) {
       return false;
     }
-    await this.unlinkQuiet(path.join(this.storageRoot, row.output_relative_path));
-    await this.unlinkQuiet(path.join(this.storageRoot, row.selfie_relative_path));
+    await this.unlinkQuiet(
+      path.join(this.storageRoot, row.output_relative_path),
+    );
+    await this.unlinkQuiet(
+      path.join(this.storageRoot, row.selfie_relative_path),
+    );
     await this.databaseService.execute(
       'DELETE FROM digital_human_templates WHERE user_id = ?',
       [userId],

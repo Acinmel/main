@@ -24,6 +24,10 @@ export function useSingleAudioPlayer() {
 
   async function resolveAudioSource(url: string) {
     if (/^(https?:|data:|blob:)/i.test(url)) return url
+    // Signed or provider-stream URLs should be played directly to avoid full blob download.
+    if (/[?&](token|expires)=/i.test(url) || /\/provider-stream(\?|$)/i.test(url)) {
+      return url
+    }
     const token = localStorage.getItem('kb_token')
     const res = await fetch(url, {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,

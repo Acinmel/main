@@ -1,5 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'node:crypto';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 import type { RewriteStyle } from '../../modules/tasks/tasks.types';
 import { mockHookedOralScript, mockSuggest } from './ai-mock.util';
 import {
@@ -26,9 +28,19 @@ export interface HookedOralScriptResult {
   llmUsed: boolean;
 }
 
+type CacheEntry<T> = {
+  expiresAt: number;
+  value: T;
+};
+
 @Injectable()
 export class RewriteAiService {
   private readonly logger = new Logger(RewriteAiService.name);
+  private readonly suggestCache = new Map<string, CacheEntry<string>>();
+  private readonly hookedCache = new Map<
+    string,
+    CacheEntry<HookedOralScriptResult>
+  >();
 
   constructor(private readonly config: ConfigService) {}
 
@@ -37,18 +49,46 @@ export class RewriteAiService {
     style: RewriteStyle;
     sourceVideoUrl: string;
   }): Promise<string> {
+    const cacheKey = this.cacheKey(
+      'suggest',
+      params.source,
+      params.style,
+      params.sourceVideoUrl,
+    );
+    const cached = this.getCache(this.suggestCache, cacheKey);
+    if (cached) return cached;
+
     const apiKey = resolveRewriteApiKey(this.config);
     if (!apiKey) {
-      this.logger.warn('OPENAI_API_KEY / ARK_API_KEY 未配置，改写使用本地 mock');
-      return mockSuggest(params.source, params.style, params.sourceVideoUrl);
+      this.logger.warn(
+        'OPENAI_API_KEY / ARK_API_KEY 未配置，改写使用本地 mock',
+      );
+      const text = mockSuggest(
+        params.source,
+        params.style,
+        params.sourceVideoUrl,
+      );
+      this.setCache(this.suggestCache, cacheKey, text);
+      return text;
     }
 
     try {
-      return await this.requestChatCompletion(this.buildMessages(params), 0.7);
+      const text = await this.requestChatCompletion(
+        this.buildMessages(params),
+        0.7,
+      );
+      this.setCache(this.suggestCache, cacheKey, text);
+      return text;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.logger.warn(`LLM 调用失败，回退 mock：${msg}`);
-      return mockSuggest(params.source, params.style, params.sourceVideoUrl);
+      const text = mockSuggest(
+        params.source,
+        params.style,
+        params.sourceVideoUrl,
+      );
+      this.setCache(this.suggestCache, cacheKey, text);
+      return text;
     }
   }
 
@@ -57,15 +97,29 @@ export class RewriteAiService {
     sourceVideoUrl?: string;
   }): Promise<HookedOralScriptResult> {
     const rawSource = params.source.trim();
+    const cacheKey = this.cacheKey(
+      'hooked',
+      rawSource,
+      params.sourceVideoUrl ?? '',
+    );
+    const cached = this.getCache(this.hookedCache, cacheKey);
+    if (cached) return cached;
+
     const strategy = pickRandomOralScriptStrategy();
     if (!rawSource) {
-      return mockHookedOralScript(params.source, strategy);
+      const result = mockHookedOralScript(params.source, strategy);
+      this.setCache(this.hookedCache, cacheKey, result);
+      return result;
     }
 
     const apiKey = resolveRewriteApiKey(this.config);
     if (!apiKey) {
-      this.logger.warn('OPENAI_API_KEY / ARK_API_KEY 未配置，口播优化使用本地 mock');
-      return mockHookedOralScript(rawSource, strategy);
+      this.logger.warn(
+        'OPENAI_API_KEY / ARK_API_KEY 未配置，口播优化使用本地 mock',
+      );
+      const result = mockHookedOralScript(rawSource, strategy);
+      this.setCache(this.hookedCache, cacheKey, result);
+      return result;
     }
 
     try {
@@ -77,12 +131,57 @@ export class RewriteAiService {
         }),
         strategy.temperature,
       );
-      return this.parseHookedOralScriptResult(content, rawSource, strategy, true);
+      const result = this.parseHookedOralScriptResult(
+        content,
+        rawSource,
+        strategy,
+        true,
+      );
+      this.setCache(this.hookedCache, cacheKey, result);
+      return result;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       this.logger.warn(`口播优化调用失败，回退 mock：${msg}`);
-      return mockHookedOralScript(rawSource, strategy);
+      const result = mockHookedOralScript(rawSource, strategy);
+      this.setCache(this.hookedCache, cacheKey, result);
+      return result;
     }
+  }
+
+  private cacheTtlMs(): number {
+    const parsed = Number(
+      this.config.get('AI_REWRITE_CACHE_TTL_MS') ?? 30 * 60_000,
+    );
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 30 * 60_000;
+  }
+
+  private cacheKey(...parts: string[]): string {
+    return createHash('sha256').update(parts.join('\0')).digest('hex');
+  }
+
+  private getCache<T>(
+    cache: Map<string, CacheEntry<T>>,
+    key: string,
+  ): T | null {
+    const row = cache.get(key);
+    if (!row) return null;
+    if (row.expiresAt <= Date.now()) {
+      cache.delete(key);
+      return null;
+    }
+    return row.value;
+  }
+
+  private setCache<T>(
+    cache: Map<string, CacheEntry<T>>,
+    key: string,
+    value: T,
+  ): void {
+    cache.set(key, { value, expiresAt: Date.now() + this.cacheTtlMs() });
+    if (cache.size <= 300) return;
+    const firstEntry = cache.keys().next();
+    const firstKey = firstEntry.done ? undefined : firstEntry.value;
+    if (firstKey) cache.delete(firstKey);
   }
 
   private async requestChatCompletion(
@@ -101,19 +200,24 @@ export class RewriteAiService {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          temperature,
-          messages,
-        }),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(
+        this.config,
+        () =>
+          fetch(url, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              model,
+              temperature,
+              messages,
+            }),
+            signal: controller.signal,
+          }),
+        { retries: 1 },
+      );
 
       if (!res.ok) {
         const errText = await res.text().catch(() => '');
@@ -182,7 +286,9 @@ export class RewriteAiService {
           '5. 输出必须是严格 JSON，不要 Markdown，不要解释。',
           '6. JSON 结构必须是 {"hook3s":"...","hook10s":"...","optimizedScript":"..."}',
           `7. 本次必须采用「${params.strategy.label}」方案。`,
-          ...params.strategy.systemHints.map((hint, index) => `${index + 8}. ${hint}`),
+          ...params.strategy.systemHints.map(
+            (hint, index) => `${index + 8}. ${hint}`,
+          ),
         ].join('\n'),
       },
       {
@@ -220,7 +326,8 @@ export class RewriteAiService {
       const json = JSON.parse(candidate) as Partial<HookedOralScriptResult>;
       const hook3s = json.hook3s?.trim() || fallback.hook3s;
       const hook10s = json.hook10s?.trim() || fallback.hook10s;
-      const optimizedScript = json.optimizedScript?.trim() || fallback.optimizedScript;
+      const optimizedScript =
+        json.optimizedScript?.trim() || fallback.optimizedScript;
       return {
         hook3s,
         hook10s,

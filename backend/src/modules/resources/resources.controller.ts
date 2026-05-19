@@ -3,7 +3,7 @@ import {
   Controller,
   Delete,
   Get,
-  NotFoundException,
+  Headers,
   Param,
   Patch,
   Post,
@@ -16,7 +16,7 @@ import {
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { randomUUID } from 'node:crypto';
-import { createReadStream, existsSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Express, Request, Response } from 'express';
@@ -26,14 +26,18 @@ import { Public } from '../auth/public.decorator';
 import type { ResourceScope } from './resources.types';
 
 const AVATAR_VIDEO_MAX_BYTES = 500 * 1024 * 1024;
-const AVATAR_UPLOAD_TMP_DIR = path.join(os.tmpdir(), 'shuziren-avatar-uploads');
+const AVATAR_UPLOAD_TMP_DIR = path.join(
+  path.resolve(process.env.TEMP_DIR || process.env.TMP_DIR || os.tmpdir()),
+  'shuziren-avatar-uploads',
+);
 const avatarUploadStorage = diskStorage({
   destination: (_req, _file, cb) => {
     mkdirSync(AVATAR_UPLOAD_TMP_DIR, { recursive: true });
     cb(null, AVATAR_UPLOAD_TMP_DIR);
   },
   filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || '').toLowerCase() || '.upload';
+    const ext =
+      path.extname(file.originalname || '').toLowerCase() || '.upload';
     cb(null, `${Date.now()}_${randomUUID()}${ext}`);
   },
 });
@@ -53,20 +57,6 @@ function scopeOf(value?: string): ResourceScope {
 function limitOf(value?: string): number | undefined {
   const n = Number(value);
   return Number.isFinite(n) ? n : undefined;
-}
-
-function guessAudioMimeFromFilename(filename: string): string {
-  const ext = path.extname(filename).toLowerCase();
-  const map: Record<string, string> = {
-    '.mp3': 'audio/mpeg',
-    '.wav': 'audio/wav',
-    '.m4a': 'audio/mp4',
-    '.aac': 'audio/aac',
-    '.ogg': 'audio/ogg',
-    '.flac': 'audio/flac',
-    '.webm': 'audio/webm',
-  };
-  return map[ext] ?? 'application/octet-stream';
 }
 
 @Controller('v1/resources')
@@ -104,12 +94,74 @@ export class ResourcesController {
     @UploadedFile() file: Express.Multer.File | undefined,
     @Body() body: Record<string, unknown>,
   ) {
-    return this.resources.createAvatarFromUpload(req.userId!, file!, body ?? {});
+    return this.resources.createAvatarFromUpload(
+      req.userId!,
+      file!,
+      body ?? {},
+    );
+  }
+
+  @Get('avatars/upload-videos')
+  listAvatarUploadVideos(@Req() req: Request, @Query('limit') limit?: string) {
+    const n = Number(limit);
+    return this.resources.listAvatarUploadVideos(
+      req.userId!,
+      Number.isFinite(n) ? n : undefined,
+    );
+  }
+
+  @Get('avatar-video-files/:fileName/stream')
+  async streamAvatarUploadVideo(
+    @Req() req: Request,
+    @Param('fileName') fileName: string,
+    @Headers('range') range: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const file = await this.resources.openOwnedAvatarVideoStreamOrThrow(
+      req.userId!,
+      fileName,
+      range,
+    );
+    res.setHeader('Content-Type', file.mimetype);
+    res.setHeader('Cache-Control', 'private, max-age=120');
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (file.rangeNotSatisfiable) {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${file.totalSize}`);
+    } else if (file.range) {
+      res.status(206);
+      res.setHeader(
+        'Content-Range',
+        `bytes ${file.range.start}-${file.range.end}/${file.totalSize}`,
+      );
+    }
+    res.setHeader('Content-Length', String(file.contentLength));
+    return new StreamableFile(file.stream);
+  }
+
+  @Get('avatar-video-files/:fileName/metadata')
+  getAvatarUploadVideoMetadata(
+    @Req() req: Request,
+    @Param('fileName') fileName: string,
+  ) {
+    return this.resources.getOwnedAvatarVideoMetadataOrThrow(
+      req.userId!,
+      fileName,
+    );
   }
 
   @Patch('avatars/:id')
-  renameAvatar(@Req() req: Request, @Param('id') id: string, @Body() body: RenameResourceDto) {
-    return this.resources.rename('avatar_resources', req.userId!, id, body?.name);
+  renameAvatar(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() body: RenameResourceDto,
+  ) {
+    return this.resources.rename(
+      'avatar_resources',
+      req.userId!,
+      id,
+      body?.name,
+    );
   }
 
   @Delete('avatars/:id')
@@ -119,7 +171,11 @@ export class ResourcesController {
 
   @Post('avatars/batch-delete')
   batchDeleteAvatars(@Req() req: Request, @Body() body: BatchDeleteDto) {
-    return this.resources.deleteMany('avatar_resources', req.userId!, body?.ids);
+    return this.resources.deleteMany(
+      'avatar_resources',
+      req.userId!,
+      body?.ids,
+    );
   }
 
   @Get('voices')
@@ -147,7 +203,9 @@ export class ResourcesController {
   }
 
   @Post('voices/clone-upload')
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }))
+  @UseInterceptors(
+    FileInterceptor('file', { limits: { fileSize: 10 * 1024 * 1024 } }),
+  )
   cloneVoiceFromUpload(
     @Req() req: Request,
     @UploadedFile() file: Express.Multer.File | undefined,
@@ -157,8 +215,17 @@ export class ResourcesController {
   }
 
   @Patch('voices/:id')
-  renameVoice(@Req() req: Request, @Param('id') id: string, @Body() body: RenameResourceDto) {
-    return this.resources.rename('voice_resources', req.userId!, id, body?.name);
+  renameVoice(
+    @Req() req: Request,
+    @Param('id') id: string,
+    @Body() body: RenameResourceDto,
+  ) {
+    return this.resources.rename(
+      'voice_resources',
+      req.userId!,
+      id,
+      body?.name,
+    );
   }
 
   @Delete('voices/:id')
@@ -172,34 +239,44 @@ export class ResourcesController {
   }
 
   @Get('voice-files/:fileName/stream')
-  streamVoiceFile(
+  async streamVoiceFile(
     @Param('fileName') fileName: string,
     @Res({ passthrough: true }) res: Response,
-  ): StreamableFile {
-    const full = this.resources.resolveVoiceSamplePathOrThrow(fileName);
-    if (!existsSync(full)) {
-      throw new NotFoundException('音频样本不存在');
-    }
-    res.setHeader('Content-Type', guessAudioMimeFromFilename(full));
+  ): Promise<StreamableFile> {
+    const file = await this.resources.openVoiceSampleStreamOrThrow(fileName);
+    res.setHeader('Content-Type', file.mimetype);
     res.setHeader('Cache-Control', 'private, max-age=300');
-    return new StreamableFile(createReadStream(full));
+    if (typeof file.contentLength === 'number') {
+      res.setHeader('Content-Length', String(file.contentLength));
+    }
+    if (file.etag) {
+      res.setHeader('ETag', file.etag);
+    }
+    return new StreamableFile(file.stream);
   }
 
   @Public()
   @Get('voice-files/:fileName/provider-stream')
-  streamProviderVoiceFile(
+  async streamProviderVoiceFile(
     @Param('fileName') fileName: string,
     @Query('token') token: string | undefined,
     @Query('expires') expires: string | undefined,
     @Res({ passthrough: true }) res: Response,
-  ): StreamableFile {
-    const full = this.resources.resolveProviderVoiceSamplePathOrThrow(fileName, token, expires);
-    if (!existsSync(full)) {
-      throw new NotFoundException('音频样本不存在');
-    }
-    res.setHeader('Content-Type', guessAudioMimeFromFilename(full));
+  ): Promise<StreamableFile> {
+    const file = await this.resources.openProviderVoiceSampleStreamOrThrow(
+      fileName,
+      token,
+      expires,
+    );
+    res.setHeader('Content-Type', file.mimetype);
     res.setHeader('Cache-Control', 'private, max-age=60');
-    return new StreamableFile(createReadStream(full));
+    if (typeof file.contentLength === 'number') {
+      res.setHeader('Content-Length', String(file.contentLength));
+    }
+    if (file.etag) {
+      res.setHeader('ETag', file.etag);
+    }
+    return new StreamableFile(file.stream);
   }
 
   @Get('subtitle-templates')
@@ -217,7 +294,10 @@ export class ResourcesController {
   }
 
   @Post('subtitle-templates')
-  createSubtitleTemplate(@Req() req: Request, @Body() body: Record<string, unknown>) {
+  createSubtitleTemplate(
+    @Req() req: Request,
+    @Body() body: Record<string, unknown>,
+  ) {
     return this.resources.createSubtitleTemplate(req.userId!, body ?? {});
   }
 
@@ -237,11 +317,22 @@ export class ResourcesController {
 
   @Delete('subtitle-templates/:id')
   deleteSubtitleTemplate(@Req() req: Request, @Param('id') id: string) {
-    return this.resources.deleteOne('subtitle_template_resources', req.userId!, id);
+    return this.resources.deleteOne(
+      'subtitle_template_resources',
+      req.userId!,
+      id,
+    );
   }
 
   @Post('subtitle-templates/batch-delete')
-  batchDeleteSubtitleTemplates(@Req() req: Request, @Body() body: BatchDeleteDto) {
-    return this.resources.deleteMany('subtitle_template_resources', req.userId!, body?.ids);
+  batchDeleteSubtitleTemplates(
+    @Req() req: Request,
+    @Body() body: BatchDeleteDto,
+  ) {
+    return this.resources.deleteMany(
+      'subtitle_template_resources',
+      req.userId!,
+      body?.ids,
+    );
   }
 }

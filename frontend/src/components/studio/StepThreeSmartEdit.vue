@@ -44,6 +44,7 @@
         :subtitles="subtitles"
         :enabled="textSubtitlesEnabled"
         :rendering="rendering"
+        :render-disabled-reason="renderDisabledReason"
         @update:enabled="$emit('update:textSubtitlesEnabled', $event)"
         @update:subtitles="$emit('update:subtitles', $event)"
         @toggle-highlight="$emit('toggle-highlight', $event)"
@@ -101,6 +102,7 @@ defineProps<{
   rendering: boolean
   finalVideoUrl?: string | null
   resultHint?: string
+  renderDisabledReason?: string
 }>()
 
 defineEmits<{

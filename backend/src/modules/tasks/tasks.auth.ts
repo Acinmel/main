@@ -18,7 +18,8 @@ export function requireJwtUserId(authHeader?: string): string {
     throw new UnauthorizedException(MSG_LOGIN);
   }
   const secret =
-    process.env.JWT_SECRET?.trim() || 'dev-only-jwt-secret-change-in-production';
+    process.env.JWT_SECRET?.trim() ||
+    'dev-only-jwt-secret-change-in-production';
   try {
     const p = jwt.verify(token, secret) as { sub?: string };
     if (p.sub && typeof p.sub === 'string' && p.sub.length > 0) {

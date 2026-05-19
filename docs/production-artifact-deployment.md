@@ -35,6 +35,35 @@ sudo cp /opt/shuziren/backend/.env /opt/shuziren-runtime/backend.env
 sudo chmod 600 /opt/shuziren-runtime/.env /opt/shuziren-runtime/backend.env
 ```
 
+生产环境至少确认以下变量已经在服务器本地文件中配置：
+
+- `/opt/shuziren-runtime/.env`
+  - `WEB_PORT`
+  - `PUBLIC_UPLOAD_BASE_URL`
+  - `PUBLIC_BASE_URL`
+  - `VOICE_PROVIDER_STREAM_SECRET`
+  - `CORS_ORIGINS`
+- `/opt/shuziren-runtime/backend.env`
+  - `UPLOAD_DIR=/workspace/uploads`
+  - `USER_UPLOAD_RESOURCE_TTL_DAYS=7`
+  - `USER_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS=3600000`
+  - `DASHSCOPE_API_KEY`
+  - `VIDEO_RETALK_API_URL`
+  - `TTS_API_URL`
+
+推荐取值示例：
+
+```bash
+PUBLIC_BASE_URL=https://your-domain.example
+PUBLIC_UPLOAD_BASE_URL=https://your-domain.example/uploads
+CORS_ORIGINS=https://your-domain.example
+WEB_BIND_HOST=127.0.0.1
+VOICE_PROVIDER_STREAM_SECRET=replace-with-random-secret
+UPLOAD_DIR=/workspace/uploads
+USER_UPLOAD_RESOURCE_TTL_DAYS=7
+USER_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS=3600000
+```
+
 如果当前服务器没有 `backend/.env`，可以创建空文件：
 
 ```bash
@@ -52,7 +81,7 @@ sudo chmod 600 /opt/shuziren-runtime/backend.env
 docker compose -p shuziren -f /opt/shuziren-runtime/current/compose.runtime.yml ps
 ```
 
-原因：当前生产数据卷名称为 `shuziren_mysql_data`、`shuziren_video_downloads`、`shuziren_digital_human_storage`。项目名变化会导致 Compose 创建新数据卷，表现为数据库或业务文件“丢失”。
+原因：当前生产数据卷名称为 `shuziren_mysql_data`、`shuziren_uploads_data`、`shuziren_video_downloads`、`shuziren_digital_human_storage`。项目名变化会导致 Compose 创建新数据卷，表现为数据库或业务文件“丢失”。
 
 ## 发布包内容
 

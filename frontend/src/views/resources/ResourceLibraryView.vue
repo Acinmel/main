@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { NTabPane, NTabs } from 'naive-ui'
-import { ref, watch } from 'vue'
+import { defineAsyncComponent, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import AvatarLibraryView from '@/views/resources/AvatarLibraryView.vue'
-import SubtitleTemplateLibraryView from '@/views/resources/SubtitleTemplateLibraryView.vue'
-import VoiceLibraryView from '@/views/resources/VoiceLibraryView.vue'
+
+const AvatarLibraryView = defineAsyncComponent(() => import('@/views/resources/AvatarLibraryView.vue'))
+const VoiceLibraryView = defineAsyncComponent(() => import('@/views/resources/VoiceLibraryView.vue'))
+const SubtitleTemplateLibraryView = defineAsyncComponent(
+  () => import('@/views/resources/SubtitleTemplateLibraryView.vue'),
+)
 
 type ResourceTab = 'avatars' | 'voices' | 'subtitle-templates'
 
@@ -37,13 +40,13 @@ watch(activeTab, (value) => {
       animated
       class="resource-library__tabs"
     >
-      <n-tab-pane name="avatars" tab="数字人库" display-directive="show">
+      <n-tab-pane name="avatars" tab="数字人库" display-directive="if">
         <AvatarLibraryView />
       </n-tab-pane>
-      <n-tab-pane name="voices" tab="音色库" display-directive="show">
+      <n-tab-pane name="voices" tab="音色库" display-directive="if">
         <VoiceLibraryView />
       </n-tab-pane>
-      <n-tab-pane name="subtitle-templates" tab="字幕模板库" display-directive="show">
+      <n-tab-pane name="subtitle-templates" tab="字幕模板库" display-directive="if">
         <SubtitleTemplateLibraryView />
       </n-tab-pane>
     </n-tabs>

@@ -117,7 +117,10 @@ export class AuthService implements OnModuleInit {
     return 'active';
   }
 
-  private mapEffectiveRole(email: string, raw: string | null | undefined): UserRole {
+  private mapEffectiveRole(
+    email: string,
+    raw: string | null | undefined,
+  ): UserRole {
     if (this.normalizeEmail(email) === FIXED_ADMIN_EMAIL && raw === 'admin') {
       return 'admin';
     }

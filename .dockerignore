@@ -1,3 +1,38 @@
 # api 构建上下文为仓库根时，避免把本机依赖打进镜像
 **/node_modules
 .git
+dist-release
+.tmp-chrome-cdp
+*.log
+tmp_*.json
+tmp_*.wav
+
+# Local/runtime media and binaries are recreated by containers or mounted volumes.
+backend/ffmpeg
+backend/uploads
+backend/data
+**/*.mp4
+**/*.mov
+**/*.mkv
+**/*.avi
+**/*.webm
+**/*.m4v
+**/*.wmv
+**/*.flv
+**/*.wav
+**/*.mp3
+**/*.flac
+**/*.aac
+**/*.exe
+
+# Frontend generated/typecheck artifacts and superseded source backups.
+frontend/src/**/*.js
+frontend/src/assets/*.png
+
+# Runtime-required source assets must remain in Docker build context.
+!backend/scripts/**
+!backend/**/*.py
+!backend/public/**
+!backend/templates/**
+!backend/storage/**
+!database/migrations/**

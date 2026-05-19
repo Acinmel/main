@@ -5,6 +5,7 @@ import {
   resolveChatCompletionsUrl,
   resolveChatModel,
 } from './openai-ark-compat.util';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 
 /**
  * 第二步「生成视频」：用大模型优化口播稿（OpenAI 兼容 Chat Completions）。
@@ -41,7 +42,9 @@ export class VideoGenerateLlmService {
       : resolveChatCompletionsUrl(this.config);
     const model = resolveChatModel(this.config);
     const timeoutMs = Number(
-      this.config.get('LLM_TIMEOUT_MS') ?? this.config.get('OPENAI_TIMEOUT_MS') ?? 120_000,
+      this.config.get('LLM_TIMEOUT_MS') ??
+        this.config.get('OPENAI_TIMEOUT_MS') ??
+        120_000,
     );
 
     const system = `你是短视频口播编辑。请将用户口播稿整理为适合数字人成片与口播配音（TTS）的终稿：口语自然、节奏清晰、无多余寒暄与链接说明；可适当分段但不编号；不要编造事实。润色后的正文将直接作为口播台词提交给视频模型生成口播音频，请保持可朗读、与事实一致。若稿件已足够好，可只做轻微润色。`;
@@ -62,15 +65,20 @@ export class VideoGenerateLlmService {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(
+        this.config,
+        () =>
+          fetch(url, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          }),
+        { retries: 1 },
+      );
       clearTimeout(timer);
 
       if (!res.ok) {
@@ -95,6 +103,9 @@ export class VideoGenerateLlmService {
   estimateDurationSeconds(scriptLength: number): number {
     const base = 12;
     const perChar = 0.02;
-    return Math.min(180, Math.max(15, Math.round(base + scriptLength * perChar)));
+    return Math.min(
+      180,
+      Math.max(15, Math.round(base + scriptLength * perChar)),
+    );
   }
 }

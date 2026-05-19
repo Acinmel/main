@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { assertUrlSafeForServerFetch } from '../../common/url-safety.util';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 import {
   getDigitalHumanStyleOrThrow,
   listDigitalHumanStylesPublic,
@@ -49,12 +50,25 @@ export class DigitalHumanImageService {
           '已配置 SEEDREAM_HTTP_URL 但未配置 SEEDREAM_API_KEY，无法调用 Seedream 兼容接口',
         );
       }
-      return this.generateViaSeedreamHttp(params, style.id, style.label, contentUsed, seedreamUrl, seedreamKey);
+      return this.generateViaSeedreamHttp(
+        params,
+        style.id,
+        style.label,
+        contentUsed,
+        seedreamUrl,
+        seedreamKey,
+      );
     }
 
     const arkKey = this.config.get<string>('ARK_API_KEY')?.trim();
     if (arkKey) {
-      return this.generateViaArk(params, style.id, style.label, contentUsed, arkKey);
+      return this.generateViaArk(
+        params,
+        style.id,
+        style.label,
+        contentUsed,
+        arkKey,
+      );
     }
 
     const apiUrl = this.config.get<string>('DIGITAL_HUMAN_API_URL')?.trim();
@@ -65,13 +79,14 @@ export class DigitalHumanImageService {
         styleLabel: style.label,
         contentUsed,
         mode: 'mock',
-        hint:
-          '未配置 SEEDREAM_HTTP_URL+SEEDREAM_API_KEY、ARK_API_KEY 或 DIGITAL_HUMAN_API_URL。可在 .env 中配置 jiekou Seedream（SEEDREAM_HTTP_URL）或火山方舟（ARK_API_KEY）。',
+        hint: '未配置 SEEDREAM_HTTP_URL+SEEDREAM_API_KEY、ARK_API_KEY 或 DIGITAL_HUMAN_API_URL。可在 .env 中配置 jiekou Seedream（SEEDREAM_HTTP_URL）或火山方舟（ARK_API_KEY）。',
       };
     }
 
     const apiKey = this.config.get<string>('DIGITAL_HUMAN_API_KEY')?.trim();
-    const timeoutMs = Number(this.config.get('DIGITAL_HUMAN_API_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(
+      this.config.get('DIGITAL_HUMAN_API_TIMEOUT_MS') ?? 120_000,
+    );
 
     const body = {
       content: contentUsed,
@@ -84,15 +99,17 @@ export class DigitalHumanImageService {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
-      const res = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(this.config, () =>
+        fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        }),
+      );
       clearTimeout(timer);
 
       if (!res.ok) {
@@ -103,7 +120,9 @@ export class DigitalHumanImageService {
       const json = (await res.json()) as Record<string, unknown>;
       const imageUrl = this.pickImageUrl(json);
       if (!imageUrl) {
-        throw new Error('响应中未找到图片 URL 字段（支持 image_url / url / data.image_url 等）');
+        throw new Error(
+          '响应中未找到图片 URL 字段（支持 image_url / url / data.image_url 等）',
+        );
       }
 
       return {
@@ -146,13 +165,16 @@ export class DigitalHumanImageService {
         ? true
         : wmRaw !== '0' && wmRaw !== 'false' && wmRaw !== 'no';
 
-    const timeoutMs = Number(this.config.get('SEEDREAM_HTTP_TIMEOUT_MS') ?? 300_000);
+    const timeoutMs = Number(
+      this.config.get('SEEDREAM_HTTP_TIMEOUT_MS') ?? 300_000,
+    );
 
     const seqRaw =
       this.config.get<string>('SEEDREAM_SEQUENTIAL_IMAGE_GENERATION')?.trim() ||
       this.config.get<string>('ARK_SEQUENTIAL_IMAGE_GENERATION')?.trim() ||
       'auto';
-    const sequentialImageGeneration = seqRaw === 'disabled' ? 'disabled' : 'auto';
+    const sequentialImageGeneration =
+      seqRaw === 'disabled' ? 'disabled' : 'auto';
 
     const maxRaw =
       this.config.get<string | number>('SEEDREAM_SEQUENTIAL_MAX_IMAGES') ??
@@ -164,8 +186,15 @@ export class DigitalHumanImageService {
       ? Math.min(15, Math.max(1, Math.floor(maxParsed)))
       : 3;
 
-    const prompt = this.buildArkPrompt(contentUsed, styleLabel, params.mimeType);
-    const dataUrl = this.bufferToImageDataUrl(params.imageBuffer, params.mimeType);
+    const prompt = this.buildArkPrompt(
+      contentUsed,
+      styleLabel,
+      params.mimeType,
+    );
+    const dataUrl = this.bufferToImageDataUrl(
+      params.imageBuffer,
+      params.mimeType,
+    );
     const imageField = this.buildSeedreamImageField(dataUrl);
 
     const body: Record<string, unknown> = {
@@ -182,7 +211,9 @@ export class DigitalHumanImageService {
       };
     }
 
-    const optMode = this.config.get<string>('SEEDREAM_OPTIMIZE_PROMPT_MODE')?.trim();
+    const optMode = this.config
+      .get<string>('SEEDREAM_OPTIMIZE_PROMPT_MODE')
+      ?.trim();
     if (optMode) {
       body.optimize_prompt_options = { mode: optMode };
     }
@@ -191,15 +222,17 @@ export class DigitalHumanImageService {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const res = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(this.config, () =>
+        fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        }),
+      );
 
       if (!res.ok) {
         const t = await res.text().catch(() => '');
@@ -232,9 +265,11 @@ export class DigitalHumanImageService {
    * jiekou 文档里 `image` 多为字符串数组（URL 或 data URL）；若 `image: [{}]` 需对象，设 SEEDREAM_IMAGE_ITEM_STYLE=object。
    */
   private buildSeedreamImageField(dataUrl: string): unknown[] {
-    const style = this.config.get<string>('SEEDREAM_IMAGE_ITEM_STYLE')?.trim() || 'string';
+    const style =
+      this.config.get<string>('SEEDREAM_IMAGE_ITEM_STYLE')?.trim() || 'string';
     if (style === 'object') {
-      const key = this.config.get<string>('SEEDREAM_IMAGE_OBJECT_KEY')?.trim() || 'image';
+      const key =
+        this.config.get<string>('SEEDREAM_IMAGE_OBJECT_KEY')?.trim() || 'image';
       return [{ [key]: dataUrl }];
     }
     return [dataUrl];
@@ -266,25 +301,39 @@ export class DigitalHumanImageService {
     if (base.endsWith('/v1')) base = base.slice(0, -3);
     const url = `${base}/images/generations`;
     const model =
-      this.config.get<string>('ARK_IMAGE_MODEL')?.trim() || 'doubao-seedream-5-0-260128';
+      this.config.get<string>('ARK_IMAGE_MODEL')?.trim() ||
+      'doubao-seedream-5-0-260128';
     const size = this.config.get<string>('ARK_IMAGE_SIZE')?.trim() || '2K';
     const wmRaw = this.config.get<string>('ARK_IMAGE_WATERMARK')?.trim();
     const watermark = wmRaw !== '0' && wmRaw !== 'false' && wmRaw !== 'no';
 
-    const timeoutMs = Number(this.config.get('ARK_IMAGE_TIMEOUT_MS') ?? 300_000);
+    const timeoutMs = Number(
+      this.config.get('ARK_IMAGE_TIMEOUT_MS') ?? 300_000,
+    );
 
     /** 组图：仅 `disabled` 关闭；其余为 `auto`（模型决定是否组图，见方舟文档） */
     const sequentialRaw =
-      this.config.get<string>('ARK_SEQUENTIAL_IMAGE_GENERATION')?.trim() || 'auto';
-    const sequentialImageGeneration = sequentialRaw === 'disabled' ? 'disabled' : 'auto';
+      this.config.get<string>('ARK_SEQUENTIAL_IMAGE_GENERATION')?.trim() ||
+      'auto';
+    const sequentialImageGeneration =
+      sequentialRaw === 'disabled' ? 'disabled' : 'auto';
 
-    const maxImagesParsed = Number(this.config.get('ARK_SEQUENTIAL_MAX_IMAGES') ?? 3);
+    const maxImagesParsed = Number(
+      this.config.get('ARK_SEQUENTIAL_MAX_IMAGES') ?? 3,
+    );
     const maxImages = Number.isFinite(maxImagesParsed)
       ? Math.min(15, Math.max(1, Math.floor(maxImagesParsed)))
       : 3;
 
-    const prompt = this.buildArkPrompt(contentUsed, styleLabel, params.mimeType);
-    const refImageDataUrl = this.bufferToImageDataUrl(params.imageBuffer, params.mimeType);
+    const prompt = this.buildArkPrompt(
+      contentUsed,
+      styleLabel,
+      params.mimeType,
+    );
+    const refImageDataUrl = this.bufferToImageDataUrl(
+      params.imageBuffer,
+      params.mimeType,
+    );
 
     const requestBody: Record<string, unknown> = {
       model,
@@ -307,15 +356,17 @@ export class DigitalHumanImageService {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(this.config, () =>
+        fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(requestBody),
+          signal: controller.signal,
+        }),
+      );
       clearTimeout(timer);
 
       if (!res.ok) {
@@ -351,7 +402,11 @@ export class DigitalHumanImageService {
   }
 
   /** Ark：风格预设 + 口播数字人说明；参考人脸已由 image[] 传入 */
-  private buildArkPrompt(contentUsed: string, styleLabel: string, mimeType: string): string {
+  private buildArkPrompt(
+    contentUsed: string,
+    styleLabel: string,
+    mimeType: string,
+  ): string {
     const suffix =
       this.config.get<string>('ARK_IMAGE_PROMPT_SUFFIX')?.trim() ||
       [
@@ -366,7 +421,9 @@ export class DigitalHumanImageService {
   /**
    * 拉取远端返回的图片 URL 到内存（用于落盘）；含 SSRF 校验与体积上限。
    */
-  async fetchRemoteImageBuffer(imageUrl: string): Promise<{ buffer: Buffer; ext: '.png' | '.jpg' }> {
+  async fetchRemoteImageBuffer(
+    imageUrl: string,
+  ): Promise<{ buffer: Buffer; ext: '.png' | '.jpg' }> {
     let u: URL;
     try {
       u = new URL(imageUrl);
@@ -375,21 +432,31 @@ export class DigitalHumanImageService {
     }
     assertUrlSafeForServerFetch(u);
 
-    const timeoutMs = Number(this.config.get('DIGITAL_HUMAN_API_TIMEOUT_MS') ?? 120_000);
-    const maxBytes = Number(this.config.get('DIGITAL_HUMAN_IMAGE_MAX_BYTES') ?? 15 * 1024 * 1024);
+    const timeoutMs = Number(
+      this.config.get('DIGITAL_HUMAN_API_TIMEOUT_MS') ?? 120_000,
+    );
+    const maxBytes = Number(
+      this.config.get('DIGITAL_HUMAN_IMAGE_MAX_BYTES') ?? 15 * 1024 * 1024,
+    );
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res: Response;
     try {
-      res = await fetch(imageUrl, { signal: controller.signal });
+      res = await runAiLimited(
+        this.config,
+        () => fetch(imageUrl, { signal: controller.signal }),
+        { retries: 1 },
+      );
     } finally {
       clearTimeout(timer);
     }
 
     if (!res.ok) {
       const t = await res.text().catch(() => '');
-      throw new BadRequestException(`拉取生成图失败：HTTP ${res.status} ${t.slice(0, 200)}`);
+      throw new BadRequestException(
+        `拉取生成图失败：HTTP ${res.status} ${t.slice(0, 200)}`,
+      );
     }
 
     const buf = Buffer.from(await res.arrayBuffer());
@@ -401,7 +468,12 @@ export class DigitalHumanImageService {
     const pathLower = u.pathname.toLowerCase();
     let ext: '.png' | '.jpg' = '.jpg';
     if (ct.includes('png') || pathLower.endsWith('.png')) ext = '.png';
-    else if (ct.includes('jpeg') || ct.includes('jpg') || pathLower.endsWith('.jpg') || pathLower.endsWith('.jpeg')) {
+    else if (
+      ct.includes('jpeg') ||
+      ct.includes('jpg') ||
+      pathLower.endsWith('.jpg') ||
+      pathLower.endsWith('.jpeg')
+    ) {
       ext = '.jpg';
     }
 
@@ -418,11 +490,13 @@ export class DigitalHumanImageService {
 
     const dataRaw = json.data;
     if (Array.isArray(dataRaw) && dataRaw.length > 0) {
-      const first = dataRaw[0];
+      const first: unknown = dataRaw[0];
       if (first && typeof first === 'object') {
         const o = first as Record<string, unknown>;
         const u =
-          (o.url as string) || (o.image_url as string) || (o.imageUrl as string);
+          (o.url as string) ||
+          (o.image_url as string) ||
+          (o.imageUrl as string);
         if (u && typeof u === 'string') return u;
       }
     }
@@ -450,7 +524,7 @@ export class DigitalHumanImageService {
 
     const imagesRaw = json.images;
     if (Array.isArray(imagesRaw) && imagesRaw.length > 0) {
-      const first = imagesRaw[0];
+      const first: unknown = imagesRaw[0];
       if (typeof first === 'string') return first;
       if (first && typeof first === 'object') {
         const o = first as Record<string, unknown>;

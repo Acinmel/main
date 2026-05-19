@@ -82,12 +82,17 @@ type DouyinRuntime = {
 
 function firstString(input: unknown): string {
   if (Array.isArray(input)) {
-    const first = input.find((item) => typeof item === 'string' && item.trim().length > 0);
+    const first: unknown = input.find(
+      (item) => typeof item === 'string' && item.trim().length > 0,
+    );
     return typeof first === 'string' ? first.trim() : '';
   }
   if (typeof input === 'string') return input.trim();
   if (input == null) return '';
-  return String(input).trim();
+  if (typeof input === 'number' || typeof input === 'boolean') {
+    return String(input).trim();
+  }
+  return '';
 }
 
 @Injectable()
@@ -177,7 +182,10 @@ export class DouyinBenchmarkService {
     }
   }
 
-  private async resolveSecUserId(dy: DouyinRuntime, homepageUrl: string): Promise<string> {
+  private async resolveSecUserId(
+    dy: DouyinRuntime,
+    homepageUrl: string,
+  ): Promise<string> {
     try {
       const secUserId = await dy.getSecUserId(homepageUrl);
       if (!secUserId?.trim()) {
@@ -203,9 +211,16 @@ export class DouyinBenchmarkService {
       maxCounts: 3,
       pageCounts: 6,
     })) {
-      postIds = (page.awemeId ?? []).slice(0, 3).map((item) => item?.trim()).filter(Boolean) as string[];
-      postTitles = (page.desc ?? []).slice(0, 3).map((item) => item?.trim() || '这条作品没有公开文案');
-      postCovers = (page.cover ?? []).slice(0, 3).map((item) => item?.trim() || '');
+      postIds = (page.awemeId ?? [])
+        .slice(0, 3)
+        .map((item) => item?.trim())
+        .filter(Boolean);
+      postTitles = (page.desc ?? [])
+        .slice(0, 3)
+        .map((item) => item?.trim() || '这条作品没有公开文案');
+      postCovers = (page.cover ?? [])
+        .slice(0, 3)
+        .map((item) => item?.trim() || '');
       const times = page.createTime;
       postTimes = Array.isArray(times)
         ? times.slice(0, 3).map((item) => item?.trim() || '')
@@ -233,7 +248,8 @@ export class DouyinBenchmarkService {
         diggCount: this.safeCount(detailValue?.diggCount),
         commentCount: this.safeCount(detailValue?.commentCount),
         shareCount: this.safeCount(detailValue?.shareCount),
-        createdAt: firstString(detailValue?.createTime) || postTimes[index] || '',
+        createdAt:
+          firstString(detailValue?.createTime) || postTimes[index] || '',
       };
     });
   }
@@ -244,13 +260,19 @@ export class DouyinBenchmarkService {
   ): string[] {
     const suggestions: string[] = [];
     if (samples[0]) {
-      suggestions.push(`延展「${this.trimForIdea(samples[0].title)}」做一条观点型口播`);
+      suggestions.push(
+        `延展「${this.trimForIdea(samples[0].title)}」做一条观点型口播`,
+      );
     }
     if (samples[1]) {
-      suggestions.push(`参考「${this.trimForIdea(samples[1].title)}」改写成你的案例分享`);
+      suggestions.push(
+        `参考「${this.trimForIdea(samples[1].title)}」改写成你的案例分享`,
+      );
     }
     if (samples[2]) {
-      suggestions.push(`围绕「${this.trimForIdea(samples[2].title)}」做一个反常识开场`);
+      suggestions.push(
+        `围绕「${this.trimForIdea(samples[2].title)}」做一个反常识开场`,
+      );
     }
 
     const identityBase =

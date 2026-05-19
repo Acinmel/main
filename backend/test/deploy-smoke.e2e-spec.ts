@@ -36,7 +36,11 @@ function mysqlHost(): string {
   return process.env.E2E_MYSQL_HOST?.trim() || '127.0.0.1';
 }
 
-function tcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+function tcpReachable(
+  host: string,
+  port: number,
+  timeoutMs: number,
+): Promise<boolean> {
   return new Promise((resolve) => {
     const s = net.createConnection({ host, port, timeout: timeoutMs }, () => {
       s.destroy();
@@ -55,7 +59,9 @@ async function fetchOk(url: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(url, init);
   if (!res.ok) {
     const t = await res.text().catch(() => '');
-    throw new Error(`${url} → ${res.status} ${res.statusText} ${t.slice(0, 200)}`);
+    throw new Error(
+      `${url} → ${res.status} ${res.statusText} ${t.slice(0, 200)}`,
+    );
   }
   return res;
 }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton, NCard, NDescriptions, NDescriptionsItem, NSpace, NText, useMessage } from 'naive-ui'
+import { NButton, NCard, NDescriptions, NDescriptionsItem, NProgress, NSpace, NText, useMessage } from 'naive-ui'
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { createTask, startExtract, uploadTaskPhoto } from '@/api/task'
@@ -10,6 +10,8 @@ const draft = useTaskDraftStore()
 const router = useRouter()
 const message = useMessage()
 const loading = ref(false)
+const submitStage = ref('')
+const photoUploadPercent = ref(0)
 
 function goHome() {
   void router.push({ name: 'studio' })
@@ -28,13 +30,21 @@ async function submit() {
   }
 
   loading.value = true
+  submitStage.value = '创建任务'
+  photoUploadPercent.value = 0
   try {
     const initial = draft.transcriptDraft.trim()
     const task = await createTask({
       sourceVideoUrl: link.normalizedUrl,
       ...(initial ? { initialTranscript: initial } : {}),
     })
-    await uploadTaskPhoto(task.id, draft.photoFile)
+    submitStage.value = '上传形象照片'
+    await uploadTaskPhoto(task.id, draft.photoFile, {
+      onUploadProgress: (percentage) => {
+        photoUploadPercent.value = percentage
+      },
+    })
+    submitStage.value = '启动后台抽取'
     await startExtract(task.id)
     message.success('任务已创建，已开始抽取口播（模拟流水线）')
     await router.push({ name: 'task-transcript', params: { id: task.id } })
@@ -44,6 +54,7 @@ async function submit() {
     message.error(String(msg))
   } finally {
     loading.value = false
+    submitStage.value = ''
   }
 }
 </script>
@@ -93,6 +104,15 @@ async function submit() {
           <n-button :disabled="loading" @click="goHome">返回修改</n-button>
           <n-button type="primary" :loading="loading" @click="submit">确认并抽取口播</n-button>
         </n-space>
+        <div v-if="loading" class="submit-progress">
+          <n-text depth="3">{{ submitStage || '正在提交' }}</n-text>
+          <n-progress
+            type="line"
+            :percentage="photoUploadPercent || 12"
+            :processing="photoUploadPercent < 100"
+            indicator-placement="inside"
+          />
+        </div>
       </n-space>
     </n-card>
   </div>
@@ -108,5 +128,14 @@ async function submit() {
 .card {
   background: rgba(15, 23, 42, 0.96);
   border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+.submit-progress {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.42);
 }
 </style>

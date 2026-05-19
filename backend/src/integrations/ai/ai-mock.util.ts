@@ -1,4 +1,7 @@
-import type { RewriteStyle, TranscriptSegmentDto } from '../../modules/tasks/tasks.types';
+import type {
+  RewriteStyle,
+  TranscriptSegmentDto,
+} from '../../modules/tasks/tasks.types';
 import type { OralScriptStrategy } from './oral-script-strategies';
 
 /** Mock transcript text when ASR is unavailable. */
@@ -59,8 +62,12 @@ export function mockHookedOralScript(
     mockBodyLead: '先把核心信息整理出来：',
     mockEnding: '照这个结构继续展开，会更适合直接做成视频口播。',
   };
-  const firstSnippet = sentences[0]?.slice(0, 22) || '这条内容和你接下来要做的事直接相关。';
-  const secondSnippet = sentences[1]?.slice(0, 28) || core[0]?.slice(0, 28) || '最值得先讲的重点其实已经很明确。';
+  const firstSnippet =
+    sentences[0]?.slice(0, 22) || '这条内容和你接下来要做的事直接相关。';
+  const secondSnippet =
+    sentences[1]?.slice(0, 28) ||
+    core[0]?.slice(0, 28) ||
+    '最值得先讲的重点其实已经很明确。';
   const hook3s = `${activeStrategy.mockHook3Lead}${firstSnippet}`;
   const hook10s =
     core.length >= 2

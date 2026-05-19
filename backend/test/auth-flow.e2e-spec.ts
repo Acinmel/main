@@ -8,6 +8,20 @@ import { App } from 'supertest/types';
 import { configureHttpApp } from '../src/app.config';
 import { AppModule } from '../src/app.module';
 
+function readToken(body: unknown): string {
+  if (!body || typeof body !== 'object') return '';
+  const token = (body as { token?: unknown }).token;
+  return typeof token === 'string' ? token : '';
+}
+
+function readUserEmail(body: unknown): string {
+  if (!body || typeof body !== 'object') return '';
+  const user = (body as { user?: unknown }).user;
+  if (!user || typeof user !== 'object') return '';
+  const email = (user as { email?: unknown }).email;
+  return typeof email === 'string' ? email : '';
+}
+
 describe('Auth flow (e2e)', () => {
   let app: INestApplication<App>;
   let tmpDir: string;
@@ -45,15 +59,15 @@ describe('Auth flow (e2e)', () => {
       .post('/api/v1/auth/register')
       .send({ email, password });
     expect([200, 201]).toContain(reg.status);
-    expect(reg.body.token).toBeTruthy();
-    const token = reg.body.token as string;
+    const token = readToken(reg.body);
+    expect(token).toBeTruthy();
 
     await request(app.getHttpServer())
       .get('/api/v1/auth/me')
       .set('Authorization', `Bearer ${token}`)
       .expect(200)
       .expect((res) => {
-        expect(res.body.user.email).toBe(email.toLowerCase());
+        expect(readUserEmail(res.body)).toBe(email.toLowerCase());
       });
 
     await request(app.getHttpServer())
@@ -65,11 +79,12 @@ describe('Auth flow (e2e)', () => {
       .post('/api/v1/auth/login')
       .send({ email, password });
     expect([200, 201]).toContain(login.status);
-    expect(login.body.token).toBeTruthy();
+    const loginToken = readToken(login.body);
+    expect(loginToken).toBeTruthy();
 
-    const tmpl = await request(app.getHttpServer())
+    await request(app.getHttpServer())
       .get('/api/v1/tools/digital-human-template')
-      .set('Authorization', `Bearer ${login.body.token}`)
+      .set('Authorization', `Bearer ${loginToken}`)
       .expect(403);
   });
 

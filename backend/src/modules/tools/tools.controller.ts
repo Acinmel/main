@@ -4,11 +4,13 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   HttpException,
   InternalServerErrorException,
   NotFoundException,
   Param,
   Post,
+  Query,
   Req,
   Res,
   StreamableFile,
@@ -20,6 +22,7 @@ import { constants as fsConstants } from 'fs';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Express, Request, Response } from 'express';
 import { createReadStream, existsSync, mkdirSync } from 'fs';
@@ -58,6 +61,9 @@ import { DigitalHumanPersistenceService } from '../digital-human/digital-human-p
 import { ResourcesService } from '../resources/resources.service';
 import { Public } from '../auth/public.decorator';
 import { SubtitleWorkflowService } from './subtitle-workflow.service';
+import { RecentExtractionService } from './recent-extraction.service';
+import { VoicePreviewTaskService } from './voice-preview-task.service';
+import { SavedVideoService } from './saved-video.service';
 
 class SourceVideoUrlDto {
   /** 支持抖音整段分享文案或纯 URL */
@@ -137,6 +143,16 @@ class GenerateLipSyncVideoDto {
   videoExtension?: boolean;
 }
 
+class RecentExtractionDto {
+  sourceUrl!: string;
+  platform?: string;
+  title?: string;
+  summary?: string;
+  coverUrl?: string;
+  videoUrl?: string;
+  extractedAt?: string;
+}
+
 class LocalMediaFileNotFoundError extends Error {
   constructor(readonly checkedPath: string) {
     super(`File not found: ${checkedPath}`);
@@ -153,15 +169,24 @@ function getLipSyncVideoMaxBytes(): number {
 
 /** 默认保存到项目内 backend/data/download-video；可用 VIDEO_SAVE_DIR 覆盖。 */
 function getVideoSaveDir(config: ConfigService): string {
-  return resolveConfiguredDir(config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
+  return resolveConfiguredDir(
+    config.get<string>('VIDEO_SAVE_DIR'),
+    'download-video',
+  );
 }
 
 function getPreviewVideoSaveDir(config: ConfigService): string {
-  return resolveConfiguredDir(config.get<string>('PREVIEW_VIDEO_SAVE_DIR'), 'preview-videos');
+  return resolveConfiguredDir(
+    config.get<string>('PREVIEW_VIDEO_SAVE_DIR'),
+    'preview-videos',
+  );
 }
 
 function getPreviewAudioSaveDir(config: ConfigService): string {
-  return resolveConfiguredDir(config.get<string>('PREVIEW_AUDIO_SAVE_DIR'), 'preview-audios');
+  return resolveConfiguredDir(
+    config.get<string>('PREVIEW_AUDIO_SAVE_DIR'),
+    'preview-audios',
+  );
 }
 
 function getUploadRootFromEnv(): string {
@@ -177,7 +202,11 @@ function safeUploadExt(originalname: string, fallback: string): string {
   return /^\.[a-z0-9]{2,6}$/i.test(ext) ? ext : fallback;
 }
 
-function uploadFileName(prefix: string, originalname: string, fallbackExt: string): string {
+function uploadFileName(
+  prefix: string,
+  originalname: string,
+  fallbackExt: string,
+): string {
   return `${prefix}_${Date.now()}_${randomUUID().slice(0, 10)}${safeUploadExt(
     originalname,
     fallbackExt,
@@ -238,7 +267,10 @@ function buildVoiceTuning(body: VoiceTuningDto): VoiceTuningOptions {
   };
 }
 
-function getLipSyncPublicMediaDir(config: ConfigService, kind: 'videos' | 'audios'): string {
+function getLipSyncPublicMediaDir(
+  config: ConfigService,
+  kind: 'videos' | 'audios',
+): string {
   const root = resolveConfiguredDir(
     config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR'),
     'lip-sync-public',
@@ -247,9 +279,10 @@ function getLipSyncPublicMediaDir(config: ConfigService, kind: 'videos' | 'audio
 }
 
 function sanitizeFilenameForDisk(name: string): string {
-  const base = path
-    .basename(name)
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+  const blocked = '<>:"/\\|?*';
+  const base = [...path.basename(name)]
+    .map((ch) => (ch.charCodeAt(0) < 32 || blocked.includes(ch) ? '_' : ch))
+    .join('')
     .trim();
   if (!base) return 'video.mp4';
   return base;
@@ -322,6 +355,9 @@ export class ToolsController {
     private readonly speechAi: SpeechAiService,
     private readonly resources: ResourcesService,
     private readonly subtitleWorkflow: SubtitleWorkflowService,
+    private readonly recentExtractions: RecentExtractionService,
+    private readonly voicePreviewTasks: VoicePreviewTaskService,
+    private readonly savedVideos: SavedVideoService,
   ) {}
 
   /**
@@ -354,10 +390,11 @@ export class ToolsController {
       throw new BadRequestException(`口播文案过长（>${max}）`);
     }
 
-    const { text, usedLlm } = await this.videoGenerateLlm.optimizeScriptForVideo(
-      script,
-      body.sourceVideoUrl?.trim(),
-    );
+    const { text, usedLlm } =
+      await this.videoGenerateLlm.optimizeScriptForVideo(
+        script,
+        body.sourceVideoUrl?.trim(),
+      );
 
     const promptSuffix = '  --duration 12 --camerafixed false --watermark true';
     /** 方舟图生视频默认提示：纯口播 + 文案驱动音频；允许手势，禁止物品/商品展示类画面 */
@@ -366,8 +403,7 @@ export class ToolsController {
     const fullPrompt = `${i2vAudioFromScriptPrefix}${text}${promptSuffix}`;
 
     if (this.arkI2vVideo.isConfigured()) {
-      const imageRef =
-        body.imageDataUrl?.trim() || body.imageUrl?.trim() || '';
+      const imageRef = body.imageDataUrl?.trim() || body.imageUrl?.trim() || '';
       if (!imageRef) {
         throw new BadRequestException(
           '已配置火山方舟图生视频：请提供 imageDataUrl 或 imageUrl 作为首帧参考图（首页请使用当前数字人形象）。',
@@ -383,7 +419,9 @@ export class ToolsController {
           `方舟创建图生视频任务失败：HTTP ${created.status} ${JSON.stringify(created.data).slice(0, 800)}`,
         );
       }
-      const taskId = this.arkI2vVideo.extractTaskIdFromCreateResponse(created.data);
+      const taskId = this.arkI2vVideo.extractTaskIdFromCreateResponse(
+        created.data,
+      );
       if (!taskId) {
         throw new BadRequestException(
           `方舟未返回任务 id：${JSON.stringify(created.data).slice(0, 600)}`,
@@ -400,25 +438,26 @@ export class ToolsController {
           this.videoGenerateLlm.estimateDurationSeconds(script.length) + 120,
         ),
         videoUrl,
-        hint:
-          '成片由火山方舟图生视频生成，可直接预览；正式任务仍可通过下方「创建任务」继续。',
+        hint: '成片由火山方舟图生视频生成，可直接预览；正式任务仍可通过下方「创建任务」继续。',
       };
     }
 
-    const customDemo = this.config.get<string>('GENERATE_VIDEO_DEMO_MP4_URL')?.trim();
+    const customDemo = this.config
+      .get<string>('GENERATE_VIDEO_DEMO_MP4_URL')
+      ?.trim();
     const videoUrl =
       customDemo === 'none' || customDemo === 'off'
         ? null
-        : customDemo ||
-          'https://www.w3schools.com/html/mov_bbb.mp4';
+        : customDemo || 'https://www.w3schools.com/html/mov_bbb.mp4';
 
     return {
       optimizedScript: text,
       llmUsed: usedLlm,
-      estimatedTotalSeconds: this.videoGenerateLlm.estimateDurationSeconds(script.length),
+      estimatedTotalSeconds: this.videoGenerateLlm.estimateDurationSeconds(
+        script.length,
+      ),
       videoUrl,
-      hint:
-        '未配置 ARK_API_KEY 时使用演示成片；配置后可使用火山方舟图生视频生成真实预览。',
+      hint: '未配置 ARK_API_KEY 时使用演示成片；配置后可使用火山方舟图生视频生成真实预览。',
     };
   }
 
@@ -447,13 +486,18 @@ export class ToolsController {
       limits: { fileSize: getLipSyncVideoMaxBytes() },
     }),
   )
-  async uploadVideoForLipSync(@UploadedFile() file: Express.Multer.File | undefined) {
+  async uploadVideoForLipSync(
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
     if (!file?.path || !file.size) {
       throw new BadRequestException('请上传视频文件（multipart 字段名：file）');
     }
     const mime = (file.mimetype || '').toLowerCase();
     const name = file.originalname || file.filename || '';
-    if (!mime.startsWith('video/') && !/\.(mp4|mov|webm|m4v|mkv)$/i.test(name)) {
+    if (
+      !mime.startsWith('video/') &&
+      !/\.(mp4|mov|webm|m4v|mkv)$/i.test(name)
+    ) {
       await fs.rm(file.path, { force: true }).catch(() => undefined);
       throw new BadRequestException('仅支持上传视频文件');
     }
@@ -472,13 +516,18 @@ export class ToolsController {
       limits: { fileSize: 50 * 1024 * 1024 },
     }),
   )
-  async uploadAudioForLipSync(@UploadedFile() file: Express.Multer.File | undefined) {
+  async uploadAudioForLipSync(
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
     if (!file?.path || !file.size) {
       throw new BadRequestException('请上传音频文件（multipart 字段名：file）');
     }
     const mime = (file.mimetype || '').toLowerCase();
     const name = file.originalname || file.filename || '';
-    if (!mime.startsWith('audio/') && !/\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(name)) {
+    if (
+      !mime.startsWith('audio/') &&
+      !/\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(name)
+    ) {
       await fs.rm(file.path, { force: true }).catch(() => undefined);
       throw new BadRequestException('仅支持上传音频文件');
     }
@@ -493,7 +542,10 @@ export class ToolsController {
   }
 
   @Post('generate-tts-audio')
-  async generateTtsAudio(@Req() req: Request, @Body() body: GenerateTtsAudioDto) {
+  async generateTtsAudio(
+    @Req() req: Request,
+    @Body() body: GenerateTtsAudioDto,
+  ) {
     const text = body.text?.trim() ?? '';
     if (text.length < 1) {
       throw new BadRequestException('text 不能为空');
@@ -503,7 +555,9 @@ export class ToolsController {
       ? await this.resources.getVoice(req.userId!, body.voiceResourceId.trim())
       : null;
     if (voice?.provider === 'local-upload') {
-      throw new BadRequestException('当前音色未完成模型克隆，不能用于文本转语音，请重新克隆。');
+      throw new BadRequestException(
+        '当前音色未完成模型克隆，不能用于文本转语音，请重新克隆。',
+      );
     }
 
     const speech = await this.speechAi.synthesizeAudio({
@@ -539,10 +593,18 @@ export class ToolsController {
       const videoRef = body.videoPath?.trim() || body.videoUrl?.trim();
       const audioRef = body.audioPath?.trim() || body.audioUrl?.trim();
       if (!videoRef) {
-        return { success: false, message: '文件不存在', path: 'videoPath/videoUrl 为空' };
+        return {
+          success: false,
+          message: '文件不存在',
+          path: 'videoPath/videoUrl 为空',
+        };
       }
       if (!audioRef) {
-        return { success: false, message: '文件不存在', path: 'audioPath/audioUrl 为空' };
+        return {
+          success: false,
+          message: '文件不存在',
+          path: 'audioPath/audioUrl 为空',
+        };
       }
 
       const [video, audio] = await Promise.all([
@@ -600,12 +662,17 @@ export class ToolsController {
     @Body('durationSeconds') durationSecondsRaw?: string,
   ) {
     if (!file?.buffer?.length) {
-      throw new BadRequestException('请上传视频文件（multipart 字段名：video）');
+      throw new BadRequestException(
+        '请上传视频文件（multipart 字段名：video）',
+      );
     }
 
     const mime = (file.mimetype || '').toLowerCase();
     const name = file.originalname || '';
-    if (!mime.startsWith('video/') && !/\.(mp4|mov|webm|m4v|mkv)$/i.test(name)) {
+    if (
+      !mime.startsWith('video/') &&
+      !/\.(mp4|mov|webm|m4v|mkv)$/i.test(name)
+    ) {
       throw new BadRequestException('仅支持上传视频文件');
     }
 
@@ -647,7 +714,10 @@ export class ToolsController {
   }
 
   @Post('lip-sync-preview')
-  async createLipSyncPreview(@Req() req: Request, @Body() body: LipSyncPreviewDto) {
+  async createLipSyncPreview(
+    @Req() req: Request,
+    @Body() body: LipSyncPreviewDto,
+  ) {
     const script = body.script?.trim() ?? '';
     if (script.length < 2) {
       throw new BadRequestException('口播文案过短或为空');
@@ -668,41 +738,15 @@ export class ToolsController {
       throw new BadRequestException('该数字人资源未配置原始视频');
     }
 
-    const videoMedia = await this.readVideoFromSourceRef(avatar.originalVideoUrl);
+    const videoMedia = await this.readVideoFromSourceRef(
+      avatar.originalVideoUrl,
+    );
     this.aliLipSync.ensureConfigured();
     const estimatedTotalSeconds = Math.min(
       180,
       Math.max(15, Math.round(script.length * 0.22)),
     );
     const hintParts: string[] = [];
-
-    const fallbackToPreview = async (
-      video: {
-        buffer: Buffer;
-        originalname: string;
-        mimetype?: string;
-      },
-      reason: string,
-      providerResponse: Record<string, unknown>,
-    ) => {
-      const previewUrl = await this.persistPreviewVideo({
-        buffer: video.buffer,
-        originalname: video.originalname,
-      });
-      return {
-        optimizedScript: script,
-        llmUsed: false,
-        estimatedTotalSeconds,
-        videoUrl: previewUrl,
-        hint: hintParts.join(' '),
-        providerResponse: {
-          ...providerResponse,
-          fallback: true,
-          reason,
-          previewMimeType: video.mimetype || guessMimeFromFilename(video.originalname),
-        },
-      };
-    };
 
     let speech!: Awaited<ReturnType<SpeechAiService['synthesizeAudio']>>;
     try {
@@ -719,22 +763,13 @@ export class ToolsController {
       hintParts.push(
         `当前环境未走通真实 TTS（${toSingleErrorMessage(e)}），已回退为原始出镜视频，便于先联调整体流程。`,
       );
-      throw new BadRequestException(`TTS 音频生成失败，无法进入 VideoReTalk：${toSingleErrorMessage(e)}`);
+      throw new BadRequestException(
+        `TTS 音频生成失败，无法进入 VideoReTalk：${toSingleErrorMessage(e)}`,
+      );
     }
 
-    let workingVideo:
-      | {
-          buffer: Buffer;
-          originalname: string;
-          mimetype: string;
-        }
-      | {
-          buffer: Buffer;
-          originalname: string;
-          mimetype?: string;
-        } = videoMedia;
     try {
-      workingVideo = await this.ffmpegAudio.replaceVideoAudio({
+      await this.ffmpegAudio.replaceVideoAudio({
         video: {
           buffer: videoMedia.buffer,
           originalname: videoMedia.originalname,
@@ -749,7 +784,9 @@ export class ToolsController {
       hintParts.push(
         `音轨替换失败（${toSingleErrorMessage(e)}），已回退为原始出镜视频。`,
       );
-      hintParts.push('本地换音轨预览失败不阻断 VideoReTalk，将继续使用原视频和 TTS 音频发起对口型。');
+      hintParts.push(
+        '本地换音轨预览失败不阻断 VideoReTalk，将继续使用原视频和 TTS 音频发起对口型。',
+      );
     }
 
     try {
@@ -757,7 +794,9 @@ export class ToolsController {
         video: {
           buffer: videoMedia.buffer,
           filename: videoMedia.originalname,
-          mimeType: videoMedia.mimetype || guessMimeFromFilename(videoMedia.originalname),
+          mimeType:
+            videoMedia.mimetype ||
+            guessMimeFromFilename(videoMedia.originalname),
         },
         audio: {
           buffer: speech.buffer,
@@ -782,7 +821,9 @@ export class ToolsController {
       hintParts.push(
         `对口型接口调用失败（${toSingleErrorMessage(e)}），已回退为换音轨预览。`,
       );
-      throw new BadRequestException(`VideoReTalk 对口型失败：${toSingleErrorMessage(e)}`);
+      throw new BadRequestException(
+        `VideoReTalk 对口型失败：${toSingleErrorMessage(e)}`,
+      );
     }
   }
 
@@ -792,80 +833,43 @@ export class ToolsController {
   }
 
   @Post('voice-preview')
-  async createVoicePreview(@Req() req: Request, @Body() body: VoicePreviewDto) {
-    const script = body.script?.trim() ?? '';
-    if (script.length < 2) {
-      throw new BadRequestException('口播文案过短或为空');
-    }
-    if (!body.voiceResourceId?.trim()) {
-      throw new BadRequestException('voiceResourceId 不能为空');
-    }
-
-    const voice = await this.resources.getVoice(req.userId!, body.voiceResourceId.trim());
-    const estimatedDurationSeconds = Math.max(2.8, Math.min(24, script.length * 0.22));
-    const voiceTuning = buildVoiceTuning(body);
-
-    if (voice.provider === 'local-upload') {
-      throw new BadRequestException('当前音色未完成模型克隆，不能用于文本转语音，请重新上传清晰音频并完成克隆。');
-      const localAudio = await this.resources.readManagedVoiceSample(voice.audioUrl);
-      if (!localAudio) {
-        throw new BadRequestException('未找到本地上传音频文件，请重新上传音色素材');
-      }
-      return {
-        audioUrl: await this.persistPreviewAudio({
-          buffer: localAudio!.buffer,
-          originalname: localAudio!.originalname,
-        }),
-        hint: `已使用「${voice.name}」本地上传音频作为试听音轨。本地音频不会重新应用情绪/强度，需使用 TTS 音色才能动态生成。`,
-        ttsMode: 'provider' as const,
-        voiceLabel: voice.name,
-        durationSeconds: voice.sampleDurationMs
-          ? Math.round((voice.sampleDurationMs ?? 0) / 1000)
-          : estimatedDurationSeconds,
-      };
-    }
-
-    try {
-      const speech = await this.speechAi.synthesizeAudio({
-        text: script,
-        voiceStyleId: voice.id,
-        voiceName: voice.name,
-        provider: voice.provider,
-        providerVoice: voice.providerVoice,
-        providerModel: voice.providerModel,
-        voiceTuning,
-      });
-      return {
-        audioUrl: await this.persistPreviewAudio({
-          buffer: speech.buffer,
-          originalname: `tts-preview${this.audioExtensionForMime(speech.mimeType)}`,
-        }),
-        hint: [`已用「${voice.name}」生成可试听的配音音轨。`, speech.styleHint]
-          .filter(Boolean)
-          .join(' '),
-        ttsMode: 'provider' as const,
-        voiceLabel: voice.name,
-        durationSeconds: estimatedDurationSeconds,
-      };
-    } catch (e) {
-      throw new BadRequestException(`TTS 调用失败：${toSingleErrorMessage(e)}`);
-      const fallbackAudio = this.buildSilentWav(estimatedDurationSeconds);
-      return {
-        audioUrl: await this.persistPreviewAudio({
-          buffer: fallbackAudio,
-          originalname: 'tts-preview-fallback.wav',
-        }),
-        hint: `当前环境未走通真实 TTS（${toSingleErrorMessage(
-          e,
-        )}），已回退为静音占位音频，方便继续联调第二步流程。`,
-        ttsMode: 'mock' as const,
-        voiceLabel: voice.name,
-        durationSeconds: estimatedDurationSeconds,
-      };
-    }
+  createVoicePreview(@Req() req: Request, @Body() body: VoicePreviewDto) {
+    const task = this.voicePreviewTasks.createTask(req.userId!, {
+      script: body.script,
+      voiceResourceId: body.voiceResourceId,
+      voiceTuning: buildVoiceTuning(body),
+    });
+    return {
+      ...task,
+      pollPath: `/api/v1/tools/voice-preview-tasks/${encodeURIComponent(task.previewTaskId)}`,
+      audioUrl: task.audioUrl ?? null,
+      durationSeconds: task.durationSeconds ?? null,
+      hint:
+        task.hint ??
+        'Voice preview task accepted and audio is being generated.',
+      ttsMode: task.ttsMode ?? null,
+      voiceLabel: task.voiceLabel ?? null,
+      error: task.error ?? null,
+    };
   }
 
-  /** 数字人风格列表（id + 中文名；具体提示词仅服务端在调用时使用） */
+  @Get('voice-preview-tasks/:taskId')
+  async getVoicePreviewTask(
+    @Req() req: Request,
+    @Param('taskId') taskId: string,
+  ) {
+    const task = await this.voicePreviewTasks.getTask(req.userId!, taskId);
+    return {
+      ...task,
+      audioUrl: task.audioUrl ?? null,
+      durationSeconds: task.durationSeconds ?? null,
+      hint: task.hint ?? null,
+      ttsMode: task.ttsMode ?? null,
+      voiceLabel: task.voiceLabel ?? null,
+      error: task.error ?? null,
+    };
+  }
+
   @Post('subtitle-workflow-preview')
   async createSubtitleWorkflowPreview(
     @Req() req: Request,
@@ -886,7 +890,10 @@ export class ToolsController {
   }
 
   @Post('subtitle-workflow-finalize')
-  async finalizeSubtitleWorkflow(@Req() req: Request, @Body() body: SubtitleWorkflowFinalizeDto) {
+  async finalizeSubtitleWorkflow(
+    @Req() req: Request,
+    @Body() body: SubtitleWorkflowFinalizeDto,
+  ) {
     return this.subtitleWorkflow.finalizeDraft(req.userId!, {
       draftId: body.draftId,
     });
@@ -986,7 +993,9 @@ export class ToolsController {
     let outputBuffer: Buffer;
     let outputExt: '.png' | '.jpg';
     if (result.imageUrl) {
-      const fetched = await this.digitalHumanImage.fetchRemoteImageBuffer(result.imageUrl);
+      const fetched = await this.digitalHumanImage.fetchRemoteImageBuffer(
+        result.imageUrl,
+      );
       outputBuffer = fetched.buffer;
       outputExt = fetched.ext;
     } else {
@@ -1017,14 +1026,19 @@ export class ToolsController {
     media: TranscribeMediaInput,
     opts?: { persistedVideoPath?: string },
   ): Promise<TranscribeResultDto> {
-    const prepared = await this.ffmpegAudio.prepareForTranscription(media, opts);
+    const prepared = await this.ffmpegAudio.prepareForTranscription(
+      media,
+      opts,
+    );
     return this.transcription.transcribeMedia(prepared);
   }
 
   /**
    * 仅从本地磁盘上的已保存文件解析口播（FFmpeg 抽轨 → ASR），不依赖内存中的下载 buffer。
    */
-  private async transcribeFromDisk(absPath: string): Promise<TranscribeResultDto> {
+  private async transcribeFromDisk(
+    absPath: string,
+  ): Promise<TranscribeResultDto> {
     const st = await fs.stat(absPath);
     const name = path.basename(absPath);
     const media: TranscribeMediaInput = {
@@ -1039,16 +1053,21 @@ export class ToolsController {
   /**
    * 转写偶发失败（网络/冷启动）时静默重试一次，不改变下载与落盘逻辑。
    */
-  private async transcribeFromDiskWithRetry(absPath: string): Promise<TranscribeResultDto> {
+  private async transcribeFromDiskWithRetry(
+    absPath: string,
+  ): Promise<TranscribeResultDto> {
     try {
       return await this.transcribeFromDisk(absPath);
-    } catch (first: unknown) {
+    } catch {
       await new Promise((r) => setTimeout(r, 1200));
       return await this.transcribeFromDisk(absPath);
     }
   }
 
-  private resolveSavedVideoPathOrThrow(config: ConfigService, fileName: string): string {
+  private resolveSavedVideoPathOrThrow(
+    config: ConfigService,
+    fileName: string,
+  ): string {
     const base = assertSafeSavedBasename(fileName);
     const dir = path.resolve(getVideoSaveDir(config));
     const full = path.resolve(path.join(dir, base));
@@ -1065,7 +1084,9 @@ export class ToolsController {
     const dir = path.resolve(getVideoSaveDir(this.config));
     const basename = path.basename(ref);
     if (!basename || /[\\/]/.test(basename) || basename.includes('..')) {
-      throw new BadRequestException('本地视频仅支持 VIDEO_SAVE_DIR 目录下的文件名');
+      throw new BadRequestException(
+        '本地视频仅支持 VIDEO_SAVE_DIR 目录下的文件名',
+      );
     }
     const full = path.resolve(path.join(dir, basename));
     const rel = path.relative(dir, full);
@@ -1114,9 +1135,15 @@ export class ToolsController {
     return { full, kind };
   }
 
-  private publicUploadUrl(kind: 'video' | 'audio' | 'output', fileName: string): string {
-    const configured = this.config.get<string>('PUBLIC_UPLOAD_BASE_URL')?.trim();
-    const port = this.config.get<string>('PORT')?.trim() || process.env.PORT || '3000';
+  private publicUploadUrl(
+    kind: 'video' | 'audio' | 'output',
+    fileName: string,
+  ): string {
+    const configured = this.config
+      .get<string>('PUBLIC_UPLOAD_BASE_URL')
+      ?.trim();
+    const port =
+      this.config.get<string>('PORT')?.trim() || process.env.PORT || '3000';
     const base = configured || `http://localhost:${port}/uploads`;
     return `${base.replace(/\/+$/, '')}/${kind}/${encodeURIComponent(fileName)}`;
   }
@@ -1135,11 +1162,17 @@ export class ToolsController {
       const url = new URL(value);
       const prefix = `/uploads/${kind}/`;
       if (!url.pathname.startsWith(prefix)) return null;
-      candidate = path.join(kindDir, decodeURIComponent(url.pathname.slice(prefix.length)));
+      candidate = path.join(
+        kindDir,
+        decodeURIComponent(url.pathname.slice(prefix.length)),
+      );
     } else if (value.startsWith('/uploads/')) {
       const prefix = `/uploads/${kind}/`;
       if (!value.startsWith(prefix)) return null;
-      candidate = path.join(kindDir, decodeURIComponent(value.slice(prefix.length)));
+      candidate = path.join(
+        kindDir,
+        decodeURIComponent(value.slice(prefix.length)),
+      );
     } else if (value.replace(/\\/g, '/').startsWith(`uploads/${kind}/`)) {
       candidate = path.resolve(value);
     } else {
@@ -1147,7 +1180,11 @@ export class ToolsController {
     }
 
     const full = path.resolve(candidate);
-    if (full.startsWith(kindDir + path.sep) || full === kindDir || path.isAbsolute(value)) {
+    if (
+      full.startsWith(kindDir + path.sep) ||
+      full === kindDir ||
+      path.isAbsolute(value)
+    ) {
       return full;
     }
     return null;
@@ -1177,11 +1214,13 @@ export class ToolsController {
       throw new Error(`下载媒体文件失败：HTTP ${response.status}`);
     }
     const urlPath = new URL(response.url || ref).pathname;
-    const filename = path.basename(urlPath) || (kind === 'video' ? 'input.mp4' : 'input.mp3');
+    const filename =
+      path.basename(urlPath) || (kind === 'video' ? 'input.mp4' : 'input.mp3');
     return {
       buffer: Buffer.from(await response.arrayBuffer()),
       filename,
-      mimeType: response.headers.get('content-type') || guessMimeFromFilename(filename),
+      mimeType:
+        response.headers.get('content-type') || guessMimeFromFilename(filename),
     };
   }
 
@@ -1194,7 +1233,8 @@ export class ToolsController {
     if (!response.ok) {
       throw new Error(`下载 VideoReTalk 输出视频失败：HTTP ${response.status}`);
     }
-    const sourceName = path.basename(new URL(response.url || videoUrl).pathname) || 'output.mp4';
+    const sourceName =
+      path.basename(new URL(response.url || videoUrl).pathname) || 'output.mp4';
     const fileName = uploadFileName('output', sourceName, '.mp4');
     const outputPath = path.join(getUploadDir('output'), fileName);
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
@@ -1219,19 +1259,6 @@ export class ToolsController {
     return `/api/v1/tools/preview-videos/${encodeURIComponent(fileName)}/stream`;
   }
 
-  private async persistPreviewAudio(params: {
-    buffer: Buffer;
-    originalname: string;
-  }): Promise<string> {
-    const dir = path.resolve(getPreviewAudioSaveDir(this.config));
-    await fs.mkdir(dir, { recursive: true });
-    const ext = path.extname(params.originalname || '').toLowerCase() || '.mp3';
-    const safeExt = /^\.[a-z0-9]{2,6}$/i.test(ext) ? ext : '.mp3';
-    const fileName = `${Date.now()}_${randomUUID().slice(0, 8)}${safeExt}`;
-    await fs.writeFile(path.join(dir, fileName), params.buffer);
-    return `/api/v1/tools/preview-audios/${encodeURIComponent(fileName)}/stream`;
-  }
-
   private audioExtensionForMime(mimeType: string): string {
     if (mimeType === 'audio/wav') return '.wav';
     if (mimeType === 'audio/aac') return '.aac';
@@ -1242,31 +1269,9 @@ export class ToolsController {
     return '.mp3';
   }
 
-  private buildSilentWav(durationSeconds: number): Buffer {
-    const sampleRate = 16_000;
-    const channels = 1;
-    const bitsPerSample = 16;
-    const totalSamples = Math.max(1, Math.round(sampleRate * durationSeconds));
-    const dataSize = totalSamples * channels * (bitsPerSample / 8);
-    const buffer = Buffer.alloc(44 + dataSize);
-
-    buffer.write('RIFF', 0);
-    buffer.writeUInt32LE(36 + dataSize, 4);
-    buffer.write('WAVE', 8);
-    buffer.write('fmt ', 12);
-    buffer.writeUInt32LE(16, 16);
-    buffer.writeUInt16LE(1, 20);
-    buffer.writeUInt16LE(channels, 22);
-    buffer.writeUInt32LE(sampleRate, 24);
-    buffer.writeUInt32LE(sampleRate * channels * (bitsPerSample / 8), 28);
-    buffer.writeUInt16LE(channels * (bitsPerSample / 8), 32);
-    buffer.writeUInt16LE(bitsPerSample, 34);
-    buffer.write('data', 36);
-    buffer.writeUInt32LE(dataSize, 40);
-    return buffer;
-  }
-
-  private async readVideoFromSourceRef(sourceRef: string): Promise<TranscribeMediaInput> {
+  private async readVideoFromSourceRef(
+    sourceRef: string,
+  ): Promise<TranscribeMediaInput> {
     const local = this.resolveSavedVideoPathMaybe(sourceRef);
     if (local) {
       try {
@@ -1278,24 +1283,33 @@ export class ToolsController {
           size: buffer.length,
         };
       } catch {
-        throw new NotFoundException(`未找到本地视频文件：${path.basename(local)}`);
+        throw new NotFoundException(
+          `未找到本地视频文件：${path.basename(local)}`,
+        );
       }
     }
 
     const normalized = normalizeSourceVideoUrl(sourceRef) || sourceRef.trim();
     if (!/^https?:\/\//i.test(normalized)) {
-      throw new BadRequestException('视频资源需填写可访问的视频 URL，或 VIDEO_SAVE_DIR 下的文件名');
+      throw new BadRequestException(
+        '视频资源需填写可访问的视频 URL，或 VIDEO_SAVE_DIR 下的文件名',
+      );
     }
 
     if (normalized.toLowerCase().includes('douyin.com')) {
-      const dl = await this.videoMediaDownload.tryDownloadForTranscription(normalized);
+      const dl =
+        await this.videoMediaDownload.tryDownloadForTranscription(normalized);
       if (!dl.ok) {
-        throw new BadRequestException('抖音视频下载失败，请先确认 Cookie 与链接有效');
+        throw new BadRequestException(
+          '抖音视频下载失败，请先确认 Cookie 与链接有效',
+        );
       }
       return dl.media;
     }
 
-    const timeoutMs = Number(this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(
+      this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 120_000,
+    );
     const maxBytes = getLipSyncVideoMaxBytes();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -1313,7 +1327,8 @@ export class ToolsController {
         throw new BadRequestException('视频文件为空或超过上传上限');
       }
       const filename = sanitizeFilenameForDisk(
-        path.basename(new URL(res.url || normalized).pathname) || 'avatar-video.mp4',
+        path.basename(new URL(res.url || normalized).pathname) ||
+          'avatar-video.mp4',
       );
       return {
         buffer,
@@ -1342,15 +1357,38 @@ export class ToolsController {
       seedreamConfigured: Boolean(seedreamUrl && seedreamKey),
       remoteConfigured: Boolean(remote),
       /** 仅长度，便于确认是否注入成功（勿当密钥用） */
-      arkKeyLength: ark?.length ?? 0,
     };
   }
 
   /** 是否已配置 DY_DOWNLOADER_COOKIE（不返回具体值，供前端展示） */
   @Get('dy-downloader-cookie')
   dyDownloaderCookieStatus() {
-    const configured = !!this.config.get<string>('DY_DOWNLOADER_COOKIE')?.trim();
+    const configured = !!this.config
+      .get<string>('DY_DOWNLOADER_COOKIE')
+      ?.trim();
     return { configured };
+  }
+
+  @Get('recent-extractions')
+  async listRecentExtractions(
+    @Req() req: Request,
+    @Query('limit') limitRaw?: string,
+  ) {
+    const parsedLimit = Number(limitRaw);
+    const items = await this.recentExtractions.listByUser(
+      req.userId!,
+      Number.isFinite(parsedLimit) ? parsedLimit : undefined,
+    );
+    return { items };
+  }
+
+  @Post('recent-extractions')
+  async saveRecentExtraction(
+    @Req() req: Request,
+    @Body() body: RecentExtractionDto,
+  ) {
+    const item = await this.recentExtractions.upsertForUser(req.userId!, body);
+    return { item };
   }
 
   @Post('douyin-homepage-learn')
@@ -1386,7 +1424,9 @@ export class ToolsController {
 
     const ffmpeg = await this.ffmpegAudio.probeBinary();
     const asr = await this.transcription.checkHealth();
-    const dyCookieConfigured = !!this.config.get<string>('DY_DOWNLOADER_COOKIE')?.trim();
+    const dyCookieConfigured = !!this.config
+      .get<string>('DY_DOWNLOADER_COOKIE')
+      ?.trim();
 
     return {
       videoSaveDir: { path: dir, writable, error: dirError },
@@ -1401,7 +1441,9 @@ export class ToolsController {
   getSavedTranscript(@Param('transcriptId') transcriptId: string) {
     const row = this.transcriptStore.get(transcriptId);
     if (!row) {
-      throw new NotFoundException('未找到该 transcriptId，可能已过期或服务已重启');
+      throw new NotFoundException(
+        '未找到该 transcriptId，可能已过期或服务已重启',
+      );
     }
     return row;
   }
@@ -1415,9 +1457,13 @@ export class ToolsController {
       limits: { fileSize: getTranscribeMediaMaxBytes() },
     }),
   )
-  async transcribeUpload(@UploadedFile() file: Express.Multer.File | undefined) {
+  async transcribeUpload(
+    @UploadedFile() file: Express.Multer.File | undefined,
+  ) {
     if (!file?.buffer?.length) {
-      throw new BadRequestException('请上传音视频文件（multipart 字段名：file）');
+      throw new BadRequestException(
+        '请上传音视频文件（multipart 字段名：file）',
+      );
     }
     const media: TranscribeMediaInput = {
       buffer: file.buffer,
@@ -1453,10 +1499,13 @@ export class ToolsController {
       throw new BadRequestException('URL 格式无效');
     }
     if (!host.includes('douyin.com')) {
-      throw new BadRequestException('本接口仅支持抖音作品页 / 分享链接（douyin.com）');
+      throw new BadRequestException(
+        '本接口仅支持抖音作品页 / 分享链接（douyin.com）',
+      );
     }
 
-    const dl = await this.videoMediaDownload.tryDownloadForTranscription(normalized);
+    const dl =
+      await this.videoMediaDownload.tryDownloadForTranscription(normalized);
     if (!dl.ok) {
       if (dl.failure === 'douyin_no_ytdlp') {
         throw new BadRequestException(
@@ -1494,7 +1543,8 @@ export class ToolsController {
         '无法识别有效的视频链接，请粘贴含 v.douyin.com 短链或作品页链接的分享文案。',
       );
     }
-    const dl = await this.videoMediaDownload.tryDownloadForTranscription(normalized);
+    const dl =
+      await this.videoMediaDownload.tryDownloadForTranscription(normalized);
     if (!dl.ok) {
       const isDouyin = normalized.toLowerCase().includes('douyin.com');
       if (isDouyin && dl.failure === 'douyin_no_ytdlp') {
@@ -1567,10 +1617,12 @@ export class ToolsController {
    */
   @Post('source-video-file')
   async downloadSourceVideoFile(
+    @Req() req: Request,
     @Body() body: SourceVideoFileDto,
   ): Promise<{
     ok: true;
     savedPath: string;
+    fileName: string;
     message: string;
     transcript: TranscribeResultDto | null;
     transcriptionError?: string;
@@ -1585,7 +1637,8 @@ export class ToolsController {
         '无法识别有效的视频链接，请粘贴含 v.douyin.com 短链或作品页链接的分享文案。',
       );
     }
-    const dl = await this.videoMediaDownload.tryDownloadForTranscription(normalized);
+    const dl =
+      await this.videoMediaDownload.tryDownloadForTranscription(normalized);
     if (!dl.ok) {
       if (dl.failure === 'douyin_no_ytdlp') {
         throw new BadRequestException(
@@ -1609,6 +1662,12 @@ export class ToolsController {
     try {
       await fs.mkdir(dir, { recursive: true });
       await fs.writeFile(savedPath, buffer);
+      await this.savedVideos.upsertForUser(req.userId!, {
+        fileName: filename,
+        fileSize: buffer.length,
+        mimeType: guessMimeFromFilename(filename),
+        sourceVideoUrl: normalized,
+      });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new InternalServerErrorException(
@@ -1629,6 +1688,7 @@ export class ToolsController {
     return {
       ok: true,
       savedPath,
+      fileName: filename,
       message: shouldTranscribe
         ? `视频已保存到：${savedPath}`
         : `视频已保存到：${savedPath}（未转写；可调用 transcribe-saved-video）`,
@@ -1641,32 +1701,26 @@ export class ToolsController {
    * 列出保存目录中的视频文件（VIDEO_SAVE_DIR / 默认 backend/data/download-video），供「从本地文件转写口播」选择。
    */
   @Get('saved-videos')
-  async listSavedVideos() {
-    const dir = path.resolve(getVideoSaveDir(this.config));
-    await fs.mkdir(dir, { recursive: true });
-    const names = await fs.readdir(dir);
-    const items: { name: string; size: number; mtime: string; mtimeMs: number }[] = [];
-    for (const n of names) {
-      if (n.startsWith('.')) continue;
-      const p = path.join(dir, n);
+  async listSavedVideos(@Req() req: Request) {
+    const rows = await this.savedVideos.listByUser(req.userId!, 200);
+    const files: { name: string; size: number; mtime: string }[] = [];
+
+    for (const row of rows) {
+      const full = this.resolveSavedVideoPathOrThrow(this.config, row.fileName);
       try {
-        const st = await fs.stat(p);
-        if (!st.isFile()) continue;
-        items.push({
-          name: n,
-          size: st.size,
-          mtime: new Date(st.mtimeMs).toISOString(),
-          mtimeMs: st.mtimeMs,
+        const stat = await fs.stat(full);
+        if (!stat.isFile()) continue;
+        files.push({
+          name: row.fileName,
+          size: stat.size,
+          mtime: new Date(stat.mtimeMs).toISOString(),
         });
       } catch {
-        /* skip */
+        /* skip deleted files */
       }
     }
-    items.sort((a, b) => b.mtimeMs - a.mtimeMs);
-    return {
-      directory: dir,
-      files: items.slice(0, 200).map(({ name, size, mtime }) => ({ name, size, mtime })),
-    };
+
+    return { files };
   }
 
   /**
@@ -1674,17 +1728,55 @@ export class ToolsController {
    */
   @Get('saved-videos/:fileName/stream')
   async streamSavedVideo(
+    @Req() req: Request,
     @Param('fileName') fileName: string,
+    @Headers('range') rangeHeader: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const full = this.resolveSavedVideoPathOrThrow(this.config, fileName);
+    const safeFileName = assertSafeSavedBasename(fileName);
+    await this.savedVideos.assertOwnedByUser(req.userId!, safeFileName);
+    const full = this.resolveSavedVideoPathOrThrow(this.config, safeFileName);
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
     try {
-      await fs.access(full);
+      stat = await fs.stat(full);
     } catch {
       throw new NotFoundException(`未找到文件：${path.basename(full)}`);
     }
+    if (!stat.isFile()) {
+      throw new NotFoundException(`鏈壘鍒版枃浠讹細${path.basename(full)}`);
+    }
+
+    const size = stat.size;
     res.setHeader('Content-Type', guessMimeFromFilename(full));
     res.setHeader('Cache-Control', 'private, max-age=60');
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    if (size <= 0) {
+      res.setHeader('Content-Length', '0');
+      return new StreamableFile(createReadStream(full));
+    }
+
+    const range = this.parseHttpRange(rangeHeader, size);
+    if (rangeHeader && !range) {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${size}`);
+      res.setHeader('Content-Length', '0');
+      return new StreamableFile(Readable.from([]));
+    }
+
+    if (range) {
+      res.status(206);
+      res.setHeader(
+        'Content-Range',
+        `bytes ${range.start}-${range.end}/${size}`,
+      );
+      res.setHeader('Content-Length', String(range.end - range.start + 1));
+      return new StreamableFile(
+        createReadStream(full, { start: range.start, end: range.end }),
+      );
+    }
+
+    res.setHeader('Content-Length', String(size));
     return new StreamableFile(createReadStream(full));
   }
 
@@ -1715,7 +1807,9 @@ export class ToolsController {
     try {
       await fs.access(full);
     } catch {
-      throw new NotFoundException(`lip-sync public media not found: ${path.basename(full)}`);
+      throw new NotFoundException(
+        `lip-sync public media not found: ${path.basename(full)}`,
+      );
     }
     res.setHeader('Content-Type', guessMimeFromFilename(full));
     res.setHeader('Cache-Control', 'public, max-age=3600');
@@ -1724,29 +1818,122 @@ export class ToolsController {
 
   @Get('preview-audios/:fileName/stream')
   async streamPreviewAudio(
+    @Req() req: Request,
     @Param('fileName') fileName: string,
+    @Query('token') token: string | undefined,
+    @Query('expires') expires: string | undefined,
+    @Headers('range') rangeHeader: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
-    const full = this.resolvePreviewAudioPathOrThrow(fileName);
+    const safeFileName = assertSafeSavedBasename(fileName);
+    this.voicePreviewTasks.assertSignedAudioAccess(
+      req.userId!,
+      safeFileName,
+      token,
+      expires,
+    );
+
+    const full = this.resolvePreviewAudioPathOrThrow(safeFileName);
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
     try {
-      await fs.access(full);
+      stat = await fs.stat(full);
     } catch {
-      throw new NotFoundException(`未找到预览音频：${path.basename(full)}`);
+      throw new NotFoundException(
+        `preview audio not found: ${path.basename(full)}`,
+      );
     }
+    if (!stat.isFile()) {
+      throw new NotFoundException(
+        `preview audio not found: ${path.basename(full)}`,
+      );
+    }
+
+    const size = stat.size;
     res.setHeader('Content-Type', guessMimeFromFilename(full));
     res.setHeader('Cache-Control', 'private, max-age=300');
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    if (size <= 0) {
+      res.setHeader('Content-Length', '0');
+      return new StreamableFile(createReadStream(full));
+    }
+
+    const range = this.parseHttpRange(rangeHeader, size);
+    if (rangeHeader && !range) {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${size}`);
+      res.setHeader('Content-Length', '0');
+      return new StreamableFile(Readable.from([]));
+    }
+
+    if (range) {
+      res.status(206);
+      res.setHeader(
+        'Content-Range',
+        `bytes ${range.start}-${range.end}/${size}`,
+      );
+      res.setHeader('Content-Length', String(range.end - range.start + 1));
+      return new StreamableFile(
+        createReadStream(full, { start: range.start, end: range.end }),
+      );
+    }
+
+    res.setHeader('Content-Length', String(size));
     return new StreamableFile(createReadStream(full));
   }
 
+  private parseHttpRange(
+    rangeHeader: string | undefined,
+    size: number,
+  ): { start: number; end: number } | null {
+    if (!rangeHeader) return null;
+    const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim());
+    if (!match) return null;
+
+    const [, startRaw, endRaw] = match;
+    if (!startRaw && !endRaw) return null;
+
+    let start: number;
+    let end: number;
+    if (!startRaw) {
+      const suffixLength = Number(endRaw);
+      if (!Number.isFinite(suffixLength) || suffixLength <= 0) return null;
+      start = Math.max(0, size - suffixLength);
+      end = size - 1;
+    } else {
+      start = Number(startRaw);
+      end = endRaw ? Number(endRaw) : size - 1;
+    }
+
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 0 ||
+      end < start ||
+      start >= size
+    ) {
+      return null;
+    }
+
+    return { start, end: Math.min(end, size - 1) };
+  }
+
   @Post('transcribe-saved-video')
-  async transcribeSavedVideo(@Body() body: { fileName?: string }): Promise<{
+  async transcribeSavedVideo(
+    @Req() req: Request,
+    @Body() body: { fileName?: string },
+  ): Promise<{
     transcript: TranscribeResultDto | null;
     transcriptionError?: string;
   }> {
     if (!body?.fileName?.trim()) {
-      throw new BadRequestException('fileName 不能为空（保存目录下的文件名，含扩展名）');
+      throw new BadRequestException(
+        'fileName 不能为空（保存目录下的文件名，含扩展名）',
+      );
     }
-    const full = this.resolveSavedVideoPathOrThrow(this.config, body.fileName);
+    const safeFileName = assertSafeSavedBasename(body.fileName);
+    await this.savedVideos.assertOwnedByUser(req.userId!, safeFileName);
+    const full = this.resolveSavedVideoPathOrThrow(this.config, safeFileName);
     try {
       await fs.access(full);
     } catch {

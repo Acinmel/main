@@ -14,7 +14,7 @@
     </header>
 
     <div class="phone-wrap">
-      <video v-if="finalVideoUrl" class="preview-video" :src="finalVideoUrl" controls playsinline />
+      <video v-if="finalVideoUrl" class="preview-video" :src="finalVideoUrl" controls playsinline preload="metadata" />
       <div v-else class="preview-placeholder">
         <img v-if="coverUrl" :src="coverUrl" alt="生成结果封面" />
         <div v-else class="avatar-word">avatar</div>

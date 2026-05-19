@@ -5,16 +5,26 @@ import {
   NInput,
   NProgress,
   NSelect,
+  NSlider,
   NSpace,
   NTag,
   NText,
   useMessage,
-} from 'naive-ui'
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import VideoLinkInput from '@/components/home/VideoLinkInput.vue'
-import StepThreeSmartEdit from '@/components/studio/StepThreeSmartEdit.vue'
+} from "naive-ui";
 import {
+  computed,
+  defineAsyncComponent,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  ref,
+  watch,
+} from "vue";
+import { useRoute, useRouter } from "vue-router";
+import axios from "axios";
+import VideoLinkInput from "@/components/home/VideoLinkInput.vue";
+import {
+  avatarVideoStreamUrl,
   cloneVoiceResource,
   cloneVoiceResourceUpload,
   createAvatarResource,
@@ -22,24 +32,26 @@ import {
   listSubtitleTemplateResources,
   listVoiceResources,
   uploadAvatarResource,
-} from '@/api/resources'
+} from "@/api/resources";
 import {
   createSubtitleWorkflowPreview,
   createVoicePreview,
   detectSmartClipCutPoints,
   downloadSourceVideoFile,
-  fetchSavedVideoBlob,
   fetchVideoMeta,
   getSmartClipRenderTask,
   getDyDownloaderCookieConfigured,
+  getVoicePreviewTaskStatus,
+  listRecentExtractions,
   optimizeOralScript,
+  saveRecentExtraction,
   getTranscribePipelineHealth,
   learnDouyinHomepage,
   finalizeSubtitleWorkflow,
   renderSmartClipFinal,
   transcribeSavedVideo,
   transcribeFromUrl,
-} from '@/api/task'
+} from "@/api/task";
 import type {
   DouyinHomepageLearnedPost,
   DouyinHomepageLearnedProfile,
@@ -47,60 +59,64 @@ import type {
   SmartClipCutMode,
   SmartClipCutPoint,
   SmartClipCutSummary,
+  RecentExtractionRecord,
   SmartClipRenderTask,
   SmartClipSubtitle,
-} from '@/api/task'
-import NewAvatarModal from '@/components/resources/NewAvatarModal.vue'
-import VoiceCloneModal from '@/components/resources/VoiceCloneModal.vue'
-import { useSingleAudioPlayer } from '@/composables/useSingleAudioPlayer'
-import { useTranscriptDraftStream } from '@/composables/useTranscriptDraftStream'
-import { useTaskDraftStore } from '@/stores/taskDraft'
+} from "@/api/task";
+import { useSingleAudioPlayer } from "@/composables/useSingleAudioPlayer";
+import { useTranscriptDraftStream } from "@/composables/useTranscriptDraftStream";
+import { useTaskDraftStore } from "@/stores/taskDraft";
+import { useUserStore } from "@/stores/user";
 import type {
   AvatarResource,
   CreateAvatarResourceDraft,
   CreateVoiceResourceDraft,
   SubtitleTemplateResource,
   VoiceResource,
-} from '@/types/resources'
-import type { VideoMetaPreview } from '@/types/domain'
-import { isDouyinNormalizedUrl, validateSourceVideoInput } from '@/utils/douyinShareUrl'
-import { formatStatCount } from '@/utils/formatDisplay'
+} from "@/types/resources";
+import type { VideoMetaPreview } from "@/types/domain";
+import {
+  isDouyinNormalizedUrl,
+  validateSourceVideoInput,
+} from "@/utils/douyinShareUrl";
+import { formatStatCount } from "@/utils/formatDisplay";
 import {
   describeHttpOrNetworkError,
   describeHttpOrNetworkErrorMaybeBlob,
-} from '@/utils/httpErrorMessage'
+} from "@/utils/httpErrorMessage";
+
+const StepThreeSmartEdit = defineAsyncComponent(
+  () => import("@/components/studio/StepThreeSmartEdit.vue"),
+);
+const NewAvatarModal = defineAsyncComponent(
+  () => import("@/components/resources/NewAvatarModal.vue"),
+);
+const VoiceCloneModal = defineAsyncComponent(
+  () => import("@/components/resources/VoiceCloneModal.vue"),
+);
 
 type CreationStep = {
-  no: number
-  title: string
-  desc: string
-}
+  no: number;
+  title: string;
+  desc: string;
+};
 
-type SelectOption = { label: string; value: string }
-type StudioSourceMode = 'homepage' | 'hotlink'
-type VoiceSourceMode = 'tts' | 'local'
-type RenderModelChoice = 'new' | 'classic'
-type RenderResolutionChoice = '1080p' | '2k'
-
-type RecentExtractionRecord = {
-  id: string
-  sourceUrl: string
-  platform: string
-  title: string
-  summary: string
-  coverUrl: string
-  videoUrl: string
-  extractedAt: string
-}
-
-const RECENT_EXTRACTION_STORAGE_KEY = 'creative-studio:recent-extractions:v1'
+type SelectOption = { label: string; value: string };
+type StudioSourceMode = "homepage" | "hotlink";
+type VoiceSourceMode = "tts" | "local";
+type RenderModelChoice = "new" | "classic";
+type RenderResolutionChoice = "1080p" | "2k";
+type VoiceGenerationState = {
+  ready: boolean;
+  reason: string;
+};
 
 const hiddenRecommendedVoiceIds = new Set([
-  'rec-voice-female',
-  'rec-voice-male',
-  'rec-voice-narration',
-  'rec-voice-bright-young-female',
-])
+  "rec-voice-female",
+  "rec-voice-male",
+  "rec-voice-narration",
+  "rec-voice-bright-young-female",
+]);
 
 const smartClipCutConfigs: Record<SmartClipCutMode, SmartClipCutConfig> = {
   light: {
@@ -118,288 +134,408 @@ const smartClipCutConfigs: Record<SmartClipCutMode, SmartClipCutConfig> = {
     minSilenceDuration: 0.25,
     keepPause: 0.08,
   },
-}
+};
 
 const smartClipCutModeOptions: Array<{
-  value: SmartClipCutMode
-  label: string
-  desc: string
+  value: SmartClipCutMode;
+  label: string;
+  desc: string;
 }> = [
-  { value: 'light', label: '轻度', desc: '保留自然停顿，适合知识讲解' },
-  { value: 'standard', label: '标准', desc: '压缩明显空白，适合短视频口播' },
-  { value: 'strong', label: '强力', desc: '节奏更快，适合带货和营销视频' },
-]
+  { value: "light", label: "轻度", desc: "保留自然停顿，适合知识讲解" },
+  { value: "standard", label: "标准", desc: "压缩明显空白，适合短视频口播" },
+  { value: "strong", label: "强力", desc: "节奏更快，适合带货和营销视频" },
+];
 
 const voiceLanguageOptions = [
-  { label: '汉语-简体', value: 'zh-CN' },
-  { label: '汉语-粤语', value: 'zh-HK' },
-  { label: '英文', value: 'en-US' },
-]
+  { label: "汉语-简体", value: "zh-CN" },
+  { label: "汉语-粤语", value: "zh-HK" },
+  { label: "英文", value: "en-US" },
+];
 
 const voiceEmotionOptions = [
-  { label: '自然', value: '自然' },
-  { label: '轻快', value: '轻快' },
-  { label: '讲解', value: '讲解' },
-  { label: '激励', value: '激励' },
-]
+  { label: "自然", value: "自然" },
+  { label: "轻快", value: "轻快" },
+  { label: "讲解", value: "讲解" },
+  { label: "激励", value: "激励" },
+];
 
 type OralScriptPolishState = {
-  hook3s: string
-  hook10s: string
-  optimizedScript: string
-  strategyId: string
-  strategyLabel: string
-  llmUsed: boolean
-}
+  hook3s: string;
+  hook10s: string;
+  optimizedScript: string;
+  strategyId: string;
+  strategyLabel: string;
+  llmUsed: boolean;
+};
 
 const steps: CreationStep[] = [
-  { no: 1, title: '搞定文案', desc: '抓链接、转文案、手动润稿' },
-  { no: 2, title: '配音 & 数字人', desc: '挑选音色与出镜视频' },
-  { no: 3, title: '一键成片', desc: '整段生成对口型视频' },
-  { no: 4, title: '自动发布', desc: '预留发布账号与计划' },
-]
+  { no: 1, title: "搞定文案", desc: "抓链接、转文案、手动润稿" },
+  { no: 2, title: "配音 & 数字人", desc: "挑选音色与出镜视频" },
+  { no: 3, title: "一键成片", desc: "整段生成对口型视频" },
+  { no: 4, title: "自动发布", desc: "预留发布账号与计划" },
+];
 
 const publishPlatforms = [
-  { name: '抖音', icon: '抖', account: '0 个账号' },
-  { name: '视频号', icon: '视', account: '0 个账号' },
-  { name: '小红书', icon: '红', account: '0 个账号' },
-  { name: '快手', icon: '快', account: '0 个账号' },
-]
+  { name: "抖音", icon: "抖", account: "0 个账号" },
+  { name: "视频号", icon: "视", account: "0 个账号" },
+  { name: "小红书", icon: "红", account: "0 个账号" },
+  { name: "快手", icon: "快", account: "0 个账号" },
+];
 
 const apiBasePath = (() => {
   const raw =
-    typeof import.meta.env.VITE_API_BASE_URL === 'string' &&
+    typeof import.meta.env.VITE_API_BASE_URL === "string" &&
     import.meta.env.VITE_API_BASE_URL.length > 0
       ? import.meta.env.VITE_API_BASE_URL
-      : '/api'
-  return raw.endsWith('/') ? raw.slice(0, -1) : raw
-})()
+      : "/api";
+  return raw.endsWith("/") ? raw.slice(0, -1) : raw;
+})();
 
-const message = useMessage()
-const route = useRoute()
-const router = useRouter()
-const draft = useTaskDraftStore()
-const { playingId: audioPlayingId, toggle: toggleAudioPlayback } = useSingleAudioPlayer()
+const message = useMessage();
+const route = useRoute();
+const router = useRouter();
+const draft = useTaskDraftStore();
+const user = useUserStore();
+const { playingId: audioPlayingId, toggle: toggleAudioPlayback } =
+  useSingleAudioPlayer();
 const {
   applyTranscriptToEditableScript,
   cancelStream,
   interruptStreamWithFullText,
   isStreamingToScript,
-} = useTranscriptDraftStream()
+} = useTranscriptDraftStream();
 
-const activeStep = ref(1)
-const sourceMode = ref<StudioSourceMode>('homepage')
-const publishCopy = ref('')
-const publishCopyTouched = ref(false)
-const benchmarkHomepageUrl = ref('')
-const benchmarkLearning = ref(false)
-const benchmarkLearningHint = ref('')
-const benchmarkProfile = ref<DouyinHomepageLearnedProfile | null>(null)
-const benchmarkSamples = ref<DouyinHomepageLearnedPost[]>([])
-const benchmarkIdeaSuggestions = ref<string[]>([])
+const activeStep = ref(1);
+const sourceMode = ref<StudioSourceMode>("homepage");
+const publishCopy = ref("");
+const publishCopyTouched = ref(false);
+const benchmarkHomepageUrl = ref("");
+const benchmarkLearning = ref(false);
+const benchmarkLearningHint = ref("");
+const benchmarkProfile = ref<DouyinHomepageLearnedProfile | null>(null);
+const benchmarkSamples = ref<DouyinHomepageLearnedPost[]>([]);
+const benchmarkIdeaSuggestions = ref<string[]>([]);
 
-const loadingMeta = ref(false)
-const recentExtractionRecords = ref<RecentExtractionRecord[]>([])
-const douyinPipeline = ref(false)
-const pipelinePhase = ref<'idle' | 'download' | 'transcribe'>('idle')
-const pipelineProgress = ref(0)
-const pipelineBarProcessing = ref(false)
-const transcribeUrlLoading = ref(false)
-const retranscribingLocal = ref(false)
-const optimizingOralScript = ref(false)
-const oralScriptPolish = ref<OralScriptPolishState | null>(null)
-const lastSavedVideoBasename = ref<string | null>(null)
-const dyCookieConfigured = ref<boolean | null>(null)
-const pipelineHealthError = ref('')
+const loadingMeta = ref(false);
+const recentExtractionRecords = ref<RecentExtractionRecord[]>([]);
+const recentExtractionLoading = ref(false);
+const douyinPipeline = ref(false);
+const pipelinePhase = ref<"idle" | "download" | "transcribe">("idle");
+const pipelineProgress = ref(0);
+const pipelineBarProcessing = ref(false);
+const transcribeUrlLoading = ref(false);
+const retranscribingLocal = ref(false);
+const optimizingOralScript = ref(false);
+const oralScriptPolish = ref<OralScriptPolishState | null>(null);
+const lastSavedVideoBasename = ref<string | null>(null);
+const dyCookieConfigured = ref<boolean | null>(null);
+const pipelineHealthError = ref("");
 
-const renderResourceLoading = ref(false)
-const createAvatarOpen = ref(false)
-const creatingAvatar = ref(false)
-const cloneVoiceOpen = ref(false)
-const cloningVoice = ref(false)
-const avatarResourceItems = ref<AvatarResource[]>([])
-const voiceResourceItems = ref<VoiceResource[]>([])
-const avatarOptions = ref<SelectOption[]>([])
-const voiceOptions = ref<SelectOption[]>([])
-const subtitleTemplateOptions = ref<SelectOption[]>([])
-const subtitleTemplateItems = ref<SubtitleTemplateResource[]>([])
-const selectedAvatarId = ref('')
-const selectedAvatarIds = ref<string[]>([])
-const selectedVoiceId = ref('')
-const selectedSubtitleTemplateId = ref('')
-const voiceSourceMode = ref<VoiceSourceMode>('tts')
-const selectedVoiceLanguage = ref('zh-CN')
-const selectedVoiceEmotion = ref('自然')
-const selectedVoicePower = ref(1.03)
-const selectedVoiceRate = ref(1.13)
-const selectedVoiceVolume = ref(1)
-const renderModelChoice = ref<RenderModelChoice>('new')
-const renderResolutionChoice = ref<RenderResolutionChoice>('1080p')
-const voicePreviewLoading = ref(false)
-const voicePreviewUrl = ref<string | null>(null)
-const voicePreviewHint = ref('')
-const voicePreviewMode = ref<'provider' | 'mock' | ''>('')
-const voicePreviewDurationSeconds = ref(0)
-const voicePreviewProgress = ref(0)
-const voicePreviewProgressLabel = ref('准备生成音频')
-let voicePreviewProgressTimer: number | null = null
-const voiceShellRef = ref<HTMLElement | null>(null)
-const requestedAvatarUnavailable = ref(false)
-const consumedRouteAvatarId = ref('')
-const generatedPreviewObjectUrls = ref<string[]>([])
-const subtitleWorkflowPreviewLoading = ref(false)
-const subtitleWorkflowFinalizeLoading = ref(false)
-const subtitleWorkflowDraftId = ref('')
-const subtitleWorkflowPreviewUrl = ref<string | null>(null)
-const subtitleWorkflowFinalUrl = ref<string | null>(null)
-const subtitleWorkflowHint = ref('')
-const subtitleWorkflowTimelineSource = ref<'asr-fallback' | 'local-estimate' | ''>('')
+const renderResourceLoading = ref(false);
+const createAvatarOpen = ref(false);
+const creatingAvatar = ref(false);
+const cloneVoiceOpen = ref(false);
+const cloningVoice = ref(false);
+const avatarResourceItems = ref<AvatarResource[]>([]);
+const voiceResourceItems = ref<VoiceResource[]>([]);
+const avatarOptions = ref<SelectOption[]>([]);
+const voiceOptions = ref<SelectOption[]>([]);
+const subtitleTemplateOptions = ref<SelectOption[]>([]);
+const subtitleTemplateItems = ref<SubtitleTemplateResource[]>([]);
+const selectedAvatarId = ref("");
+const selectedAvatarIds = ref<string[]>([]);
+const selectedVoiceId = ref("");
+const selectedSubtitleTemplateId = ref("");
+const voiceSourceMode = ref<VoiceSourceMode>("tts");
+const selectedVoiceLanguage = ref("zh-CN");
+const selectedVoiceEmotion = ref("自然");
+const selectedVoicePower = ref(1.03);
+const selectedVoiceRate = ref(1);
+const selectedVoiceVolume = ref(1);
+const renderModelChoice = ref<RenderModelChoice>("new");
+const renderResolutionChoice = ref<RenderResolutionChoice>("1080p");
+const voicePreviewLoading = ref(false);
+const voicePreviewUrl = ref<string | null>(null);
+const voicePreviewHint = ref("");
+const voicePreviewMode = ref<"provider" | "mock" | "">("");
+const voicePreviewDurationSeconds = ref(0);
+const voicePreviewProgress = ref(0);
+const voicePreviewProgressLabel = ref("准备生成音频");
+const voicePreviewTaskId = ref("");
+const voicePreviewTaskStatus = ref<
+  | "idle"
+  | "submitted"
+  | "queued"
+  | "running"
+  | "saving"
+  | "ready"
+  | "failed"
+  | "timeout"
+>("idle");
+const voicePreviewError = ref("");
+let voicePreviewProgressTimer: number | null = null;
+let voicePreviewPollTimer: number | null = null;
+let voicePreviewRequestSeq = 0;
+const voiceShellRef = ref<HTMLElement | null>(null);
+const requestedAvatarUnavailable = ref(false);
+const consumedRouteAvatarId = ref("");
+const generatedPreviewObjectUrls = ref<string[]>([]);
+const subtitleWorkflowPreviewLoading = ref(false);
+const subtitleWorkflowFinalizeLoading = ref(false);
+const subtitleWorkflowDraftId = ref("");
+const subtitleWorkflowPreviewUrl = ref<string | null>(null);
+const subtitleWorkflowFinalUrl = ref<string | null>(null);
+const subtitleWorkflowHint = ref("");
+const subtitleWorkflowTimelineSource = ref<
+  "asr-fallback" | "local-estimate" | ""
+>("");
 const subtitleWorkflowJson = ref<{
-  version: 1
-  language: string
-  durationMs: number
-  generatedAt: string
+  version: 1;
+  language: string;
+  durationMs: number;
+  generatedAt: string;
   source: {
-    script: string
-    avatarResourceId: string
-    voiceResourceId: string
-    subtitleTemplateId: string
-  }
+    script: string;
+    avatarResourceId: string;
+    voiceResourceId: string;
+    subtitleTemplateId: string;
+  };
   template: {
-    id: string
-    name: string
-    styleJson: Record<string, unknown>
-  }
+    id: string;
+    name: string;
+    styleJson: Record<string, unknown>;
+  };
   cues: Array<{
-    id: string
-    startMs: number
-    endMs: number
-    text: string
-    lines: string[]
-  }>
-} | null>(null)
-const smartClipCutBreathEnabled = ref(true)
-const smartClipCutMode = ref<SmartClipCutMode>('standard')
-const smartClipCutDetecting = ref(false)
-const smartClipCutApplied = ref(false)
-const smartClipCutPoints = ref<SmartClipCutPoint[]>([])
+    id: string;
+    startMs: number;
+    endMs: number;
+    text: string;
+    lines: string[];
+  }>;
+} | null>(null);
+const smartClipCutBreathEnabled = ref(true);
+const smartClipCutMode = ref<SmartClipCutMode>("standard");
+const smartClipCutDetecting = ref(false);
+const smartClipCutApplied = ref(false);
+const smartClipCutPoints = ref<SmartClipCutPoint[]>([]);
 const smartClipCutSummary = ref<SmartClipCutSummary>({
   totalCount: 0,
   totalCutDuration: 0,
   originalDuration: 0,
   estimatedDuration: 0,
-})
-const smartClipSubtitles = ref<SmartClipSubtitle[]>([])
-const smartClipBackgroundMusicEnabled = ref(false)
-const smartClipBackgroundMusicId = ref('cozy_vibes')
-const smartClipBackgroundMusicVolume = ref(0.1)
-const smartClipPipEnabled = ref(false)
-const smartClipTextSubtitlesEnabled = ref(true)
-const smartClipRenderTask = ref<SmartClipRenderTask | null>(null)
-const smartClipRendering = ref(false)
-const smartClipTitleLines = ref(['7步让AI写出爆款', '直播话术!'])
-const smartClipSubtitleSourceText = ref('')
-let smartClipPollTimer: number | null = null
-const avatarCoverVideoUrls = ref<Record<string, string>>({})
-const pendingAvatarCoverIds = new Set<string>()
+});
+const smartClipSubtitles = ref<SmartClipSubtitle[]>([]);
+const smartClipBackgroundMusicEnabled = ref(false);
+const smartClipBackgroundMusicId = ref("cozy_vibes");
+const smartClipBackgroundMusicVolume = ref(0.1);
+const smartClipPipEnabled = ref(false);
+const smartClipTextSubtitlesEnabled = ref(true);
+const smartClipRenderTask = ref<SmartClipRenderTask | null>(null);
+const smartClipRendering = ref(false);
+const smartClipTitleLines = ref(["7步让AI写出爆款", "直播话术!"]);
+const smartClipSubtitleSourceText = ref("");
+let smartClipPollTimer: number | null = null;
+const avatarCoverVideoUrls = ref<Record<string, string>>({});
+const pendingAvatarCoverIds = new Set<string>();
 
 const urlInvalid = computed(() => {
-  if (!draft.videoUrl?.trim()) return false
-  return !validateSourceVideoInput(draft.videoUrl).ok
-})
+  if (!draft.videoUrl?.trim()) return false;
+  return !validateSourceVideoInput(draft.videoUrl).ok;
+});
 
-const linkReady = computed(() => validateSourceVideoInput(draft.videoUrl).ok)
+const linkReady = computed(() => validateSourceVideoInput(draft.videoUrl).ok);
 const canTranscribeNonDouyinUrl = computed(
   () => linkReady.value && !isDouyinNormalizedUrl(draft.videoUrl),
-)
-const hasAvatarOptions = computed(() => avatarOptions.value.length > 0)
-const hasVoiceOptions = computed(() => voiceOptions.value.length > 0)
-const hasLearnedBenchmark = computed(() => Boolean(benchmarkProfile.value))
-const selectedVoiceResource = computed(() =>
-  voiceResourceItems.value.find((item) => item.id === selectedVoiceId.value) ?? null,
-)
-const selectedAvatarResource = computed(() =>
-  avatarResourceItems.value.find((item) => item.id === selectedAvatarId.value) ?? null,
-)
-const voiceReadyForPreview = computed(
+);
+const hasAvatarOptions = computed(() => avatarOptions.value.length > 0);
+const hasVoiceOptions = computed(() => voiceOptions.value.length > 0);
+const hasLearnedBenchmark = computed(() => Boolean(benchmarkProfile.value));
+const selectedVoiceResource = computed(
   () =>
-    Boolean(currentWorkflowScript.value) &&
-    Boolean(selectedVoiceId.value) &&
-    selectedVoiceResource.value?.cloneStatus === 'ready',
-)
+    voiceResourceItems.value.find(
+      (item) => item.id === selectedVoiceId.value,
+    ) ?? null,
+);
+const selectedAvatarResource = computed(
+  () =>
+    avatarResourceItems.value.find(
+      (item) => item.id === selectedAvatarId.value,
+    ) ?? null,
+);
+const selectedVoiceGenerationState = computed(() =>
+  buildVoiceGenerationState(selectedVoiceId.value, selectedVoiceResource.value),
+);
 const selectedAvatarCardItems = computed(() =>
   selectedAvatarIds.value
     .map((id) => avatarResourceItems.value.find((item) => item.id === id))
     .filter((item): item is AvatarResource => Boolean(item))
     .slice(0, 7),
-)
-const hasSelectedAvatarCards = computed(() => selectedAvatarCardItems.value.length > 0)
-const progressText = computed(() => `${activeStep.value}/4`)
-const progressPercent = computed(() => activeStep.value * 25)
+);
+const hasSelectedAvatarCards = computed(
+  () => selectedAvatarCardItems.value.length > 0,
+);
+const progressText = computed(() => `${activeStep.value}/4`);
+const progressPercent = computed(() => activeStep.value * 25);
 const pipelineStatusLabel = computed(() => {
-  if (!douyinPipeline.value) return ''
-  if (pipelinePhase.value === 'download') return '1/2 正在下载并保存抖音源视频'
-  if (pipelinePhase.value === 'transcribe') return '2/2 正在抽取音轨并转写文案'
-  return ''
-})
+  if (!douyinPipeline.value) return "";
+  if (pipelinePhase.value === "download") return "1/2 正在下载并保存抖音源视频";
+  if (pipelinePhase.value === "transcribe") return "2/2 正在抽取音轨并转写文案";
+  return "";
+});
 const scriptBlockHint = computed(() =>
   isDouyinNormalizedUrl(draft.videoUrl)
-    ? '抖音链接会先落到服务端目录，再用 FFmpeg + ASR 回填这份文案。'
-    : '支持直接从上传音视频或当前链接中转写口播文案。',
-)
+    ? "抖音链接会先落到服务端目录，再用 FFmpeg + ASR 回填这份文案。"
+    : "支持直接从上传音视频或当前链接中转写口播文案。",
+);
 const selectedAvatarLabel = computed(
-  () => avatarOptions.value.find((item) => item.value === selectedAvatarId.value)?.label ?? '未选择',
-)
+  () =>
+    avatarOptions.value.find((item) => item.value === selectedAvatarId.value)
+      ?.label ?? "未选择",
+);
 const selectedVoiceLabel = computed(
-  () => voiceOptions.value.find((item) => item.value === selectedVoiceId.value)?.label ?? '未选择',
-)
+  () =>
+    voiceOptions.value.find((item) => item.value === selectedVoiceId.value)
+      ?.label ?? "未选择",
+);
+const voicePreviewBlockReason = computed(() => {
+  if (!currentWorkflowScript.value)
+    return "未生成脚本：请先在第一步生成或填写口播脚本。";
+  return selectedVoiceGenerationState.value.reason;
+});
+const hasVoicePreviewOutput = computed(
+  () =>
+    Boolean(voicePreviewUrl.value) ||
+    voicePreviewLoading.value ||
+    voicePreviewTaskStatus.value !== "idle" ||
+    Boolean(voicePreviewError.value),
+);
+const voicePreviewStateTitle = computed(() => {
+  switch (voicePreviewTaskStatus.value) {
+    case "submitted":
+      return "已提交生成请求";
+    case "queued":
+      return "配音任务排队中";
+    case "running":
+      return "配音生成中";
+    case "saving":
+      return "正在保存试听音频";
+    case "ready":
+      return "试听音频已生成";
+    case "failed":
+      return "生成失败";
+    case "timeout":
+      return "生成超时";
+    default:
+      return voicePreviewLoading.value ? "配音生成中" : "试听音频";
+  }
+});
+const voicePreviewStateHint = computed(() => {
+  if (voicePreviewError.value) return voicePreviewError.value;
+  if (voicePreviewHint.value) return voicePreviewHint.value;
+  switch (voicePreviewTaskStatus.value) {
+    case "submitted":
+      return "请求已提交，正在准备生成配音。";
+    case "queued":
+      return "任务已进入队列，请稍候。";
+    case "running":
+      return "正在调用语音模型生成试听音频。";
+    case "saving":
+      return "音频已生成，正在保存并回写可试听地址。";
+    case "ready":
+      return voicePreviewMode.value === "mock"
+        ? "当前返回的是联调用预览音频。"
+        : "可以先试听这段配音，确认声音后再进入对口型。";
+    case "failed":
+      return "请调整文案或音色后重新生成。";
+    case "timeout":
+      return "生成等待超时，请重试。";
+    default:
+      return "";
+  }
+});
+const stepTwoGenerateBlockReason = computed(() => {
+  if (!currentWorkflowScript.value)
+    return "未生成脚本：请先在第一步生成或填写口播脚本。";
+  if (!selectedAvatarId.value)
+    return "未选择数字人：请先添加或选择一个数字人视频。";
+  if (!selectedAvatarResource.value)
+    return "资源未匹配：当前选中的数字人不在资源列表中，请刷新资源或重新选择。";
+  return selectedVoiceGenerationState.value.reason;
+});
+const smartClipRenderBlockReason = computed(() => {
+  if (!currentWorkflowScript.value)
+    return "未生成脚本：请先在第一步生成或填写口播脚本。";
+  if (!selectedAvatarId.value)
+    return "未选择数字人：请先添加或选择一个数字人视频。";
+  if (!selectedAvatarResource.value)
+    return "资源未匹配：当前选中的数字人不在资源列表中，请刷新资源或重新选择。";
+  if (selectedVoiceGenerationState.value.reason)
+    return selectedVoiceGenerationState.value.reason;
+  if (!selectedSubtitleTemplateId.value)
+    return "未选择字幕模板：请先选择一个字幕样式。";
+  return "";
+});
 const selectedSubtitleTemplateItem = computed(
-  () => subtitleTemplateItems.value.find((item) => item.id === selectedSubtitleTemplateId.value) ?? null,
-)
+  () =>
+    subtitleTemplateItems.value.find(
+      (item) => item.id === selectedSubtitleTemplateId.value,
+    ) ?? null,
+);
 const selectedSubtitleTemplateLabel = computed(
-  () => selectedSubtitleTemplateItem.value?.name ?? '未选择模板',
-)
+  () => selectedSubtitleTemplateItem.value?.name ?? "未选择模板",
+);
 const selectedSubtitleTemplateCover = computed(() => {
-  const item = selectedSubtitleTemplateItem.value
-  return item?.previewCoverUrl || item?.coverUrl || selectedAvatarResource.value?.coverUrl || ''
-})
-const selectedAvatarCoverUrl = computed(() =>
-  selectedAvatarResource.value?.coverUrl ? resolveProtectedMediaUrl(selectedAvatarResource.value.coverUrl) : '',
-)
-const selectedSubtitleTemplateCoverUrl = computed(() =>
-  selectedSubtitleTemplateCover.value ? resolveProtectedMediaUrl(selectedSubtitleTemplateCover.value) : '',
-)
-const extractedScriptLines = computed(() => {
-  const raw = sanitizeWorkflowScriptText(draft.manualScriptDraft.trim())
-  if (raw) return splitScriptIntoSemanticSegments(raw)
-
-  const fromSegments = draft.transcriptSegments
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-  return splitScriptIntoSemanticSegments(fromSegments.join('\n'))
-})
-const oralScriptSourceText = computed(() => {
-  const raw = sanitizeWorkflowScriptText(draft.manualScriptDraft.trim())
-  if (raw) return raw
-
-  const fromSegments = draft.transcriptSegments
-    .map((segment) => segment.text.trim())
-    .filter(Boolean)
-    .join('\n')
-    .trim()
-  if (fromSegments) return fromSegments
-  return draft.manualScriptDraft.trim()
-})
-function isInternalPipelineScriptLine(line: string) {
-  const normalized = line.replace(/\s+/g, ' ').trim()
-  if (!normalized) return false
+  const item = selectedSubtitleTemplateItem.value;
   return (
-    normalized.includes('模拟口播原文稿') ||
-    normalized.includes('原视频链接占位') ||
-    normalized.includes('真实链路') ||
-    (normalized.includes('FFmpeg') && normalized.includes('ASR') && normalized.includes('回填')) ||
+    item?.previewCoverUrl ||
+    item?.coverUrl ||
+    selectedAvatarResource.value?.coverUrl ||
+    ""
+  );
+});
+const selectedAvatarCoverUrl = computed(() =>
+  selectedAvatarResource.value?.coverUrl
+    ? resolveProtectedMediaUrl(selectedAvatarResource.value.coverUrl)
+    : "",
+);
+const selectedSubtitleTemplateCoverUrl = computed(() =>
+  selectedSubtitleTemplateCover.value
+    ? resolveProtectedMediaUrl(selectedSubtitleTemplateCover.value)
+    : "",
+);
+const extractedScriptLines = computed(() => {
+  const raw = sanitizeWorkflowScriptText(draft.manualScriptDraft.trim());
+  if (raw) return splitScriptIntoSemanticSegments(raw);
+
+  const fromSegments = draft.transcriptSegments
+    .map((segment) => segment.text.trim())
+    .filter(Boolean);
+  return splitScriptIntoSemanticSegments(fromSegments.join("\n"));
+});
+const oralScriptSourceText = computed(() => {
+  const raw = sanitizeWorkflowScriptText(draft.manualScriptDraft.trim());
+  if (raw) return raw;
+
+  const fromSegments = draft.transcriptSegments
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+  if (fromSegments) return fromSegments;
+  return draft.manualScriptDraft.trim();
+});
+function isInternalPipelineScriptLine(line: string) {
+  const normalized = line.replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  return (
+    normalized.includes("模拟口播原文稿") ||
+    normalized.includes("原视频链接占位") ||
+    normalized.includes("真实链路") ||
+    (normalized.includes("FFmpeg") &&
+      normalized.includes("ASR") &&
+      normalized.includes("回填")) ||
     /^https?:\/\/\S+$/i.test(normalized)
-  )
+  );
 }
 
 function sanitizeWorkflowScriptText(value: string) {
@@ -407,646 +543,847 @@ function sanitizeWorkflowScriptText(value: string) {
     .split(/\r\n|\n|\r/)
     .map((line) => line.trim())
     .filter((line) => line && !isInternalPipelineScriptLine(line))
-    .join('\n')
-    .trim()
+    .join("\n")
+    .trim();
 }
 
 function splitLongTextByLength(text: string, maxChars: number) {
-  const result: string[] = []
+  const result: string[] = [];
   for (let i = 0; i < text.length; i += maxChars) {
-    const chunk = text.slice(i, i + maxChars).trim()
-    if (chunk) result.push(chunk)
+    const chunk = text.slice(i, i + maxChars).trim();
+    if (chunk) result.push(chunk);
   }
-  return result
+  return result;
 }
 
 function splitSemanticSentence(sentence: string, maxChars: number) {
-  const trimmed = sentence.trim()
-  if (!trimmed) return []
+  const trimmed = sentence.trim();
+  if (!trimmed) return [];
 
-  const hardSplitPieces =
-    trimmed.match(/[^\uFF0C,\u3001\uFF1A:]+[\uFF0C,\u3001\uFF1A:]*/g)?.map((item) => item.trim()).filter(Boolean) ?? [
-      trimmed,
-    ]
+  const hardSplitPieces = trimmed
+    .match(/[^\uFF0C,\u3001\uFF1A:]+[\uFF0C,\u3001\uFF1A:]*/g)
+    ?.map((item) => item.trim())
+    .filter(Boolean) ?? [trimmed];
   return hardSplitPieces.flatMap((piece) =>
     piece.length > maxChars ? splitLongTextByLength(piece, maxChars) : [piece],
-  )
+  );
 }
 
 function splitScriptIntoSemanticSegments(text: string, maxChars = 32) {
-  const source = sanitizeWorkflowScriptText(text)
-  if (!source) return []
+  const source = sanitizeWorkflowScriptText(text);
+  if (!source) return [];
 
   return source
     .split(/\r\n|\n|\r/)
     .flatMap((line) =>
-      (line
-        .replace(/\s+/g, ' ')
-        .match(/[^\u3002\uFF01\uFF1F!?\uFF1B;]+[\u3002\uFF01\uFF1F!?\uFF1B;]*/g) ?? [line]
+      (
+        line
+          .replace(/\s+/g, " ")
+          .match(
+            /[^\u3002\uFF01\uFF1F!?\uFF1B;]+[\u3002\uFF01\uFF1F!?\uFF1B;]*/g,
+          ) ?? [line]
       ).flatMap((sentence) => splitSemanticSentence(sentence, maxChars)),
     )
     .map((segment) => segment.trim())
-    .filter(Boolean)
-}
-
-function safeJsonParse<T>(value: string | null, fallback: T): T {
-  if (!value) return fallback
-  try {
-    return JSON.parse(value) as T
-  } catch {
-    return fallback
-  }
+    .filter(Boolean);
 }
 
 function trimRecordText(value: string, maxLength: number) {
-  const normalized = value.replace(/\s+/g, ' ').trim()
-  if (normalized.length <= maxLength) return normalized
-  return `${normalized.slice(0, maxLength)}...`
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength)}...`;
 }
 
-function loadRecentExtractionRecords() {
-  const rows = safeJsonParse<RecentExtractionRecord[]>(
-    window.localStorage.getItem(RECENT_EXTRACTION_STORAGE_KEY),
-    [],
-  )
-  recentExtractionRecords.value = rows
-    .filter((item) => item?.sourceUrl && item?.title)
-    .slice(0, 6)
+async function loadRecentExtractionRecords() {
+  if (!user.isLoggedIn) {
+    recentExtractionRecords.value = [];
+    return;
+  }
+  recentExtractionLoading.value = true;
+  try {
+    const rows = await listRecentExtractions(6);
+    recentExtractionRecords.value = rows
+      .filter((item) => item?.sourceUrl && item?.title)
+      .slice(0, 6);
+  } catch (e: unknown) {
+    recentExtractionRecords.value = [];
+    if (axios.isAxiosError(e) && e.response?.status === 404) {
+      return;
+    }
+    message.warning(describeHttpOrNetworkError(e));
+  } finally {
+    recentExtractionLoading.value = false;
+  }
 }
 
-function persistRecentExtractionRecords() {
-  window.localStorage.setItem(
-    RECENT_EXTRACTION_STORAGE_KEY,
-    JSON.stringify(recentExtractionRecords.value.slice(0, 6)),
-  )
-}
-
-function rememberRecentExtraction(meta: VideoMetaPreview, sourceUrl: string) {
-  const summary = meta.content || meta.description || meta.title || '这条视频暂时没有解析到正文内容'
-  const record: RecentExtractionRecord = {
-    id: `${sourceUrl}-${Date.now()}`,
+async function rememberRecentExtraction(
+  meta: VideoMetaPreview,
+  sourceUrl: string,
+) {
+  const summary =
+    meta.content ||
+    meta.description ||
+    meta.title ||
+    "这条视频暂时没有解析到正文内容";
+  const record = {
     sourceUrl,
-    platform: meta.platform === 'douyin' ? '抖音' : '视频',
+    platform: meta.platform === "douyin" ? "抖音" : "视频",
     title: trimRecordText(meta.title || summary, 72),
     summary: trimRecordText(summary, 120),
-    coverUrl: meta.coverImageUrl || '',
-    videoUrl: meta.videoUrl || '',
+    coverUrl: meta.coverImageUrl || "",
+    videoUrl: meta.videoUrl || "",
     extractedAt: new Date().toISOString(),
-  }
+  };
 
-  recentExtractionRecords.value = [
-    record,
-    ...recentExtractionRecords.value.filter((item) => item.sourceUrl !== sourceUrl),
-  ].slice(0, 6)
-  persistRecentExtractionRecords()
+  try {
+    const saved = await saveRecentExtraction(record);
+    recentExtractionRecords.value = [
+      saved,
+      ...recentExtractionRecords.value.filter(
+        (item) => item.sourceUrl !== saved.sourceUrl,
+      ),
+    ].slice(0, 6);
+  } catch (e: unknown) {
+    message.warning(describeHttpOrNetworkError(e));
+  }
 }
 
 function formatRecentExtractionTime(value: string) {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '刚刚'
-  const now = new Date()
-  const sameDay = date.toDateString() === now.toDateString()
-  const yesterday = new Date(now)
-  yesterday.setDate(now.getDate() - 1)
-  const clock = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
-  if (sameDay) return `今天 ${clock}`
-  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${clock}`
-  return `${date.getMonth() + 1}/${date.getDate()} ${clock}`
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "刚刚";
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (sameDay) return `今天 ${clock}`;
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${clock}`;
+  return `${date.getMonth() + 1}/${date.getDate()} ${clock}`;
 }
 
 async function copyRecentExtractionLink(record: RecentExtractionRecord) {
   try {
-    await navigator.clipboard.writeText(record.sourceUrl)
-    message.success('已复制该短视频链接。')
+    await navigator.clipboard.writeText(record.sourceUrl);
+    message.success("已复制该短视频链接。");
   } catch {
-    const textarea = document.createElement('textarea')
-    textarea.value = record.sourceUrl
-    textarea.style.position = 'fixed'
-    textarea.style.opacity = '0'
-    document.body.appendChild(textarea)
-    textarea.select()
-    document.execCommand('copy')
-    textarea.remove()
-    message.success('已复制该短视频链接。')
+    const textarea = document.createElement("textarea");
+    textarea.value = record.sourceUrl;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+    message.success("已复制该短视频链接。");
   }
 }
 
 function applySafeTranscriptToEditableScript(payload: {
-  fullText: string
-  segments: Parameters<typeof applyTranscriptToEditableScript>[0]['segments']
-  transcriptId?: string
-  rewriteSuggestion?: string
+  fullText: string;
+  segments: Parameters<typeof applyTranscriptToEditableScript>[0]["segments"];
+  transcriptId?: string;
+  rewriteSuggestion?: string;
 }) {
-  const fullText = sanitizeWorkflowScriptText(payload.fullText)
+  const fullText = sanitizeWorkflowScriptText(payload.fullText);
   if (!fullText) {
-    message.warning('转写没有返回有效口播文案，请检查 ASR 配置或重新转写。')
-    return false
+    message.warning("转写没有返回有效口播文案，请检查 ASR 配置或重新转写。");
+    return false;
   }
   applyTranscriptToEditableScript({
     ...payload,
     fullText,
-    segments: payload.segments.filter((segment) => !isInternalPipelineScriptLine(segment.text)),
-  })
-  return true
+    segments: payload.segments.filter(
+      (segment) => !isInternalPipelineScriptLine(segment.text),
+    ),
+  });
+  return true;
 }
 
 function clearInternalPipelineScriptDraft() {
-  const raw = draft.manualScriptDraft.trim()
-  if (!raw) return
-  const clean = sanitizeWorkflowScriptText(raw)
-  if (clean === raw) return
-  draft.manualScriptDraft = clean
+  const raw = draft.manualScriptDraft.trim();
+  if (!raw) return;
+  const clean = sanitizeWorkflowScriptText(raw);
+  if (clean === raw) return;
+  draft.manualScriptDraft = clean;
   if (!clean) {
-    draft.setTranscriptFromApi('', [], {})
+    draft.setTranscriptFromApi("", [], {});
   }
 }
 
 const rawWorkflowScript = computed(() => {
-  const manual = draft.manualScriptDraft.trim()
-  if (manual) return manual
-  const committed = draft.transcriptDraft.trim()
-  if (committed) return committed
+  const manual = draft.manualScriptDraft.trim();
+  if (manual) return manual;
+  const committed = draft.transcriptDraft.trim();
+  if (committed) return committed;
   return draft.transcriptSegments
     .map((segment) => segment.text.trim())
     .filter(Boolean)
-    .join('\n')
-})
-const currentWorkflowScript = computed(() => sanitizeWorkflowScriptText(rawWorkflowScript.value))
+    .join("\n");
+});
+const currentWorkflowScript = computed(() =>
+  sanitizeWorkflowScriptText(rawWorkflowScript.value),
+);
 
 function ensureStreamingScriptComplete() {
   if (isStreamingToScript.value) {
-    interruptStreamWithFullText()
+    interruptStreamWithFullText();
   }
 }
 
 const workflowProgressState = computed(() => {
   const prerequisitesReady = Boolean(
     currentWorkflowScript.value &&
-      selectedAvatarId.value &&
-      selectedVoiceId.value &&
-      selectedSubtitleTemplateId.value,
-  )
+    selectedAvatarId.value &&
+    selectedVoiceId.value &&
+    selectedSubtitleTemplateId.value,
+  );
 
   if (subtitleWorkflowFinalUrl.value) {
     return {
       percent: 100,
       doneCount: 5,
       activeIndex: 4,
-      status: '完整视频已生成',
-      hint: '无字幕成片已经输出，可以直接预览结果。',
-    }
+      status: "完整视频已生成",
+      hint: "无字幕成片已经输出，可以直接预览结果。",
+    };
   }
-  if (smartClipRenderTask.value?.status === 'failed') {
+  if (smartClipRenderTask.value?.status === "failed") {
     return {
       percent: 100,
       doneCount: 0,
       activeIndex: 0,
-      status: '生成失败',
-      hint: smartClipRenderTask.value.error || '生成失败，请检查素材后重新生成。',
-    }
+      status: "生成失败",
+      hint:
+        smartClipRenderTask.value.error || "生成失败，请检查素材后重新生成。",
+    };
   }
-  if (smartClipRendering.value || smartClipRenderTask.value?.status === 'processing' || smartClipRenderTask.value?.status === 'pending') {
+  if (
+    smartClipRendering.value ||
+    smartClipRenderTask.value?.status === "processing" ||
+    smartClipRenderTask.value?.status === "pending"
+  ) {
     return {
       percent: smartClipRenderTask.value?.progress ?? 88,
       doneCount: 3,
       activeIndex: 3,
-      status: '正在输出最终视频',
-      hint: '正在把数字人口型和声音合成完整成片。',
-    }
+      status: "正在输出最终视频",
+      hint: "正在把数字人口型和声音合成完整成片。",
+    };
   }
   if (false) {
     return {
       percent: 72,
       doneCount: 3,
       activeIndex: 3,
-      status: '5 秒预览已生成',
-      hint: '请检查声音和口型同步效果，确认后输出完整视频。',
-    }
+      status: "5 秒预览已生成",
+      hint: "请检查声音和口型同步效果，确认后输出完整视频。",
+    };
   }
   if (smartClipCutDetecting.value) {
     return {
       percent: 42,
       doneCount: 1,
       activeIndex: 1,
-      status: '正在合成预览',
-      hint: '系统正在生成音轨，并制作可检查的 5 秒无字幕预览。',
-    }
+      status: "正在合成预览",
+      hint: "系统正在生成音轨，并制作可检查的 5 秒无字幕预览。",
+    };
   }
   if (prerequisitesReady) {
     return {
       percent: 12,
       doneCount: 0,
       activeIndex: 0,
-      status: '素材已就绪',
-      hint: '点击生成 5 秒预览，先看效果再输出完整视频。',
-    }
+      status: "素材已就绪",
+      hint: "点击生成 5 秒预览，先看效果再输出完整视频。",
+    };
   }
   return {
     percent: 0,
     doneCount: 0,
     activeIndex: 0,
-    status: '等待补齐素材',
-    hint: '先确认文案、数字人和音色。',
-  }
-})
+    status: "等待补齐素材",
+    hint: "先确认文案、数字人和音色。",
+  };
+});
 const workflowProgressSteps = computed(() => {
   const smartSteps = [
-    { label: '生成音轨' },
-    { label: '整理字幕' },
-    { label: '剪辑气口' },
-    { label: '对齐口型' },
-    { label: '输出成片' },
-  ]
+    { label: "生成音轨" },
+    { label: "整理字幕" },
+    { label: "剪辑气口" },
+    { label: "对齐口型" },
+    { label: "输出成片" },
+  ];
   return smartSteps.map((step, index) => ({
     ...step,
     status:
       index < workflowProgressState.value.doneCount
-        ? 'done'
-        : workflowProgressState.value.percent > 0 && index === workflowProgressState.value.activeIndex
-          ? 'active'
-          : 'idle',
-  }))
+        ? "done"
+        : workflowProgressState.value.percent > 0 &&
+            index === workflowProgressState.value.activeIndex
+          ? "active"
+          : "idle",
+  }));
   const steps = [
-    { label: '生成音轨' },
-    { label: '合成预览' },
-    { label: '对齐口型' },
-    { label: '输出成片' },
-  ]
+    { label: "生成音轨" },
+    { label: "合成预览" },
+    { label: "对齐口型" },
+    { label: "输出成片" },
+  ];
   return steps.map((step, index) => ({
     ...step,
     status:
       index < workflowProgressState.value.doneCount
-        ? 'done'
-        : workflowProgressState.value.percent > 0 && index === workflowProgressState.value.activeIndex
-          ? 'active'
-          : 'idle',
-  }))
-})
+        ? "done"
+        : workflowProgressState.value.percent > 0 &&
+            index === workflowProgressState.value.activeIndex
+          ? "active"
+          : "idle",
+  }));
+});
 const workflowSimpleSteps = computed(() => {
-  return ['生成音轨', '整理字幕', '剪辑气口', '对齐口型', '输出成片'].map((label, index) => ({
-    label,
-    status: workflowProgressSteps.value[index]?.status ?? 'idle',
-  }))
-  const labels = ['生成音轨', '合成预览', '对齐口型', '输出成片']
+  return ["生成音轨", "整理字幕", "剪辑气口", "对齐口型", "输出成片"].map(
+    (label, index) => ({
+      label,
+      status: workflowProgressSteps.value[index]?.status ?? "idle",
+    }),
+  );
+  const labels = ["生成音轨", "合成预览", "对齐口型", "输出成片"];
   return labels.map((label, index) => ({
     label,
-    status: workflowProgressSteps.value[index]?.status ?? 'idle',
-  }))
-})
+    status: workflowProgressSteps.value[index]?.status ?? "idle",
+  }));
+});
 
 const firstReadyVideoUrl = computed(() => {
-  if (subtitleWorkflowFinalUrl.value) return subtitleWorkflowFinalUrl.value
-  return null
-})
+  if (subtitleWorkflowFinalUrl.value) return subtitleWorkflowFinalUrl.value;
+  return null;
+});
 const generatedVideoCount = computed(() => {
-  if (subtitleWorkflowFinalUrl.value) return 1
-  return 0
-})
+  if (subtitleWorkflowFinalUrl.value) return 1;
+  return 0;
+});
 const publishReadyItems = computed(() => {
   if (subtitleWorkflowFinalUrl.value) {
     return [
       {
         index: 1,
         videoUrl: subtitleWorkflowFinalUrl.value,
-        text: currentWorkflowScript.value || '已生成最终视频',
+        text: currentWorkflowScript.value || "已生成最终视频",
       },
-    ]
+    ];
   }
-  return []
-})
+  return [];
+});
 const footerNextLabel = computed(() => {
-  if (activeStep.value === 1) return '下一步：配音 & 数字人'
-  if (activeStep.value === 2) return '下一步：一键成片'
-  if (activeStep.value === 3) return '下一步：自动发布'
-  return '四步已完成'
-})
+  if (activeStep.value === 1) return "下一步：配音 & 数字人";
+  if (activeStep.value === 2) return "下一步：一键成片";
+  if (activeStep.value === 3) return "下一步：自动发布";
+  return "四步已完成";
+});
 
 function revokeGeneratedPreviewObjectUrls() {
   for (const url of generatedPreviewObjectUrls.value) {
-    URL.revokeObjectURL(url)
+    URL.revokeObjectURL(url);
   }
-  generatedPreviewObjectUrls.value = []
+  generatedPreviewObjectUrls.value = [];
 }
 
 function resolveProtectedMediaUrl(url: string) {
-  const trimmed = url.trim()
-  if (!trimmed) return ''
-  if (/^(https?:|data:|blob:)/i.test(trimmed)) return trimmed
-  if (trimmed.startsWith('/')) return trimmed
-  return `${apiBasePath}/${trimmed.replace(/^\/+/, '')}`
+  const trimmed = url.trim();
+  if (!trimmed) return "";
+  if (/^(https?:|data:|blob:)/i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith("/")) return trimmed;
+  return `${apiBasePath}/${trimmed.replace(/^\/+/, "")}`;
 }
 
 function isAvatarPlaceholderCover(url: string | null | undefined) {
-  const trimmed = url?.trim()
-  if (!trimmed) return true
+  const trimmed = url?.trim();
+  if (!trimmed) return true;
   const normalized = (() => {
     try {
-      return decodeURIComponent(trimmed).toLowerCase()
+      return decodeURIComponent(trimmed).toLowerCase();
     } catch {
-      return trimmed.toLowerCase()
+      return trimmed.toLowerCase();
     }
-  })()
-  return normalized.includes('placehold.co') && normalized.includes('text=avatar')
+  })();
+  return (
+    normalized.includes("placehold.co") && normalized.includes("text=avatar")
+  );
 }
 
 function resolveAvatarCoverImageUrl(item: AvatarResource) {
-  if (isAvatarPlaceholderCover(item.coverUrl)) return ''
-  return resolveProtectedMediaUrl(item.coverUrl)
+  if (isAvatarPlaceholderCover(item.coverUrl)) return "";
+  return resolveProtectedMediaUrl(item.coverUrl);
 }
 
 function resolveAvatarCoverVideoUrl(item: AvatarResource) {
-  return avatarCoverVideoUrls.value[item.id] ?? ''
+  return avatarCoverVideoUrls.value[item.id] ?? "";
 }
 
 function revokeAvatarCoverVideoUrl(id: string) {
-  const url = avatarCoverVideoUrls.value[id]
-  if (url?.startsWith('blob:')) URL.revokeObjectURL(url)
-  const next = { ...avatarCoverVideoUrls.value }
-  delete next[id]
-  avatarCoverVideoUrls.value = next
+  const url = avatarCoverVideoUrls.value[id];
+  if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
+  const next = { ...avatarCoverVideoUrls.value };
+  delete next[id];
+  avatarCoverVideoUrls.value = next;
 }
 
 function clearAvatarCoverVideoUrls() {
   for (const id of Object.keys(avatarCoverVideoUrls.value)) {
-    revokeAvatarCoverVideoUrl(id)
+    revokeAvatarCoverVideoUrl(id);
   }
 }
 
 async function ensureAvatarVideoCover(item: AvatarResource) {
-  if (!isAvatarPlaceholderCover(item.coverUrl)) return
-  const source = item.originalVideoUrl?.trim()
-  if (!source || avatarCoverVideoUrls.value[item.id] || pendingAvatarCoverIds.has(item.id)) return
+  if (!isAvatarPlaceholderCover(item.coverUrl)) return;
+  const source = item.originalVideoUrl?.trim();
+  if (
+    !source ||
+    avatarCoverVideoUrls.value[item.id] ||
+    pendingAvatarCoverIds.has(item.id)
+  )
+    return;
 
-  pendingAvatarCoverIds.add(item.id)
+  pendingAvatarCoverIds.add(item.id);
   try {
     const nextUrl = /^(https?:|data:|blob:)/i.test(source)
       ? source
-      : URL.createObjectURL(await fetchSavedVideoBlob(source))
+      : avatarVideoStreamUrl(source);
 
     if (!selectedAvatarIds.value.includes(item.id)) {
-      if (nextUrl.startsWith('blob:')) URL.revokeObjectURL(nextUrl)
-      return
+      return;
     }
 
     avatarCoverVideoUrls.value = {
       ...avatarCoverVideoUrls.value,
       [item.id]: nextUrl,
-    }
+    };
   } catch {
     // 封面兜底失败不阻断创作流程，卡片会继续显示文字占位。
   } finally {
-    pendingAvatarCoverIds.delete(item.id)
+    pendingAvatarCoverIds.delete(item.id);
   }
 }
 
 function syncAvatarVideoCovers(items: AvatarResource[]) {
-  const visibleIds = new Set(items.map((item) => item.id))
+  const visibleIds = new Set(items.map((item) => item.id));
   for (const id of Object.keys(avatarCoverVideoUrls.value)) {
-    if (!visibleIds.has(id)) revokeAvatarCoverVideoUrl(id)
+    if (!visibleIds.has(id)) revokeAvatarCoverVideoUrl(id);
   }
   for (const item of items) {
-    void ensureAvatarVideoCover(item)
+    void ensureAvatarVideoCover(item);
   }
 }
 
 async function resolveGeneratedPreviewVideoUrl(url: string | null) {
-  const source = url?.trim()
-  if (!source) return null
-  if (/^(https?:|data:|blob:)/i.test(source)) return source
+  const source = url?.trim();
+  if (!source) return null;
+  if (/^(https?:|data:|blob:)/i.test(source)) return source;
 
-  const token = localStorage.getItem('kb_token')
+  const token = localStorage.getItem("kb_token");
   const response = await fetch(resolveProtectedMediaUrl(source), {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  })
+  });
   if (!response.ok) {
-    throw new Error(`预览视频加载失败（${response.status}）`)
+    throw new Error(`预览视频加载失败（${response.status}）`);
   }
-  const blob = await response.blob()
-  const objectUrl = URL.createObjectURL(blob)
-  generatedPreviewObjectUrls.value = [...generatedPreviewObjectUrls.value, objectUrl]
-  return objectUrl
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  generatedPreviewObjectUrls.value = [
+    ...generatedPreviewObjectUrls.value,
+    objectUrl,
+  ];
+  return objectUrl;
 }
 
 function syncPublishCopyFromScript(force = false) {
-  if (publishCopyTouched.value && !force) return
-  const next = draft.manualScriptDraft.trim().slice(0, 140)
+  if (publishCopyTouched.value && !force) return;
+  const next = draft.manualScriptDraft.trim().slice(0, 140);
   if (next) {
-    publishCopy.value = next
+    publishCopy.value = next;
   }
 }
 
-function addAvatarToCurrentCreation(id: string, options: { silent?: boolean } = {}) {
-  const nextId = id.trim()
-  if (!nextId) return false
-  if (!avatarResourceItems.value.some((item) => item.id === nextId)) return false
+function addAvatarToCurrentCreation(
+  id: string,
+  options: { silent?: boolean } = {},
+) {
+  const nextId = id.trim();
+  if (!nextId) return false;
+  if (!avatarResourceItems.value.some((item) => item.id === nextId))
+    return false;
 
-  if (!selectedAvatarIds.value.includes(nextId) && selectedAvatarIds.value.length >= 7) {
+  if (
+    !selectedAvatarIds.value.includes(nextId) &&
+    selectedAvatarIds.value.length >= 7
+  ) {
     if (!options.silent) {
-      message.warning('最多添加 7 位数字人，请先移除一个再添加。')
+      message.warning("最多添加 7 位数字人，请先移除一个再添加。");
     }
-    return false
+    return false;
   }
 
   selectedAvatarIds.value = [
     nextId,
     ...selectedAvatarIds.value.filter((itemId) => itemId !== nextId),
-  ].slice(0, 7)
-  selectedAvatarId.value = nextId
-  return true
+  ].slice(0, 7);
+  selectedAvatarId.value = nextId;
+  return true;
 }
 
 function selectAvatarForCurrentCreation(id: string) {
-  if (!selectedAvatarIds.value.includes(id)) return
-  selectedAvatarId.value = id
+  if (!selectedAvatarIds.value.includes(id)) return;
+  selectedAvatarId.value = id;
 }
 
 function removeAvatarFromCurrentCreation(id: string) {
-  selectedAvatarIds.value = selectedAvatarIds.value.filter((itemId) => itemId !== id)
+  selectedAvatarIds.value = selectedAvatarIds.value.filter(
+    (itemId) => itemId !== id,
+  );
   if (selectedAvatarId.value === id) {
-    selectedAvatarId.value = selectedAvatarIds.value[0] ?? ''
+    selectedAvatarId.value = selectedAvatarIds.value[0] ?? "";
   }
-  message.success('已从当前创作移除该数字人。')
+  message.success("已从当前创作移除该数字人。");
 }
 
-async function loadRenderResources() {
-  renderResourceLoading.value = true
+type RenderResourcesLoadState = {
+  avatars: boolean;
+  voices: boolean;
+  subtitleTemplates: boolean;
+};
+
+async function loadRenderResources(): Promise<RenderResourcesLoadState> {
+  renderResourceLoading.value = true;
+  const loadState: RenderResourcesLoadState = {
+    avatars: false,
+    voices: false,
+    subtitleTemplates: false,
+  };
   try {
-    const [avatars, voices, subtitleTemplates] = await Promise.all([
-      listAvatarResources({ scope: 'all', limit: 40 }),
-      listVoiceResources({ scope: 'all', limit: 40 }),
-      listSubtitleTemplateResources({ scope: 'all', limit: 40 }),
-    ])
-    avatarResourceItems.value = avatars.items.filter((item) => Boolean(item.originalVideoUrl))
-    voiceResourceItems.value = voices.items.filter((item) => !hiddenRecommendedVoiceIds.has(item.id))
-    avatarOptions.value = avatarResourceItems.value
-      .map((item) => ({ label: item.name, value: item.id }))
-    voiceOptions.value = voiceResourceItems.value.map((item) => ({
-      label: item.name,
-      value: item.id,
-    }))
-    subtitleTemplateItems.value = subtitleTemplates.items
-    subtitleTemplateOptions.value = subtitleTemplates.items.map((item) => ({
-      label: item.name,
-      value: item.id,
-    }))
-    const avatarIds = new Set(avatarOptions.value.map((item) => item.value))
-    const voiceIds = new Set(voiceOptions.value.map((item) => item.value))
-    const subtitleTemplateIds = new Set(subtitleTemplateOptions.value.map((item) => item.value))
+    const [avatarsResult, voicesResult, subtitleTemplatesResult] =
+      await Promise.allSettled([
+        listAvatarResources({ scope: "all", limit: 40 }),
+        listVoiceResources({ scope: "all", limit: 40 }),
+        listSubtitleTemplateResources({ scope: "all", limit: 40 }),
+      ]);
 
-    const routeAvatarId =
-      typeof route.query.avatarId === 'string' ? route.query.avatarId.trim() : ''
-    requestedAvatarUnavailable.value = false
-    selectedAvatarIds.value = selectedAvatarIds.value
-      .filter((id) => avatarIds.has(id))
-      .slice(0, 7)
-    if (routeAvatarId && avatarIds.has(routeAvatarId)) {
-      if (consumedRouteAvatarId.value !== routeAvatarId) {
-        addAvatarToCurrentCreation(routeAvatarId, { silent: true })
-        consumedRouteAvatarId.value = routeAvatarId
+    if (avatarsResult.status === "fulfilled") {
+      loadState.avatars = true;
+      avatarResourceItems.value = avatarsResult.value.items.filter((item) =>
+        Boolean(item.originalVideoUrl),
+      );
+      avatarOptions.value = avatarResourceItems.value.map((item) => ({
+        label: item.name,
+        value: item.id,
+      }));
+
+      const avatarIds = new Set(avatarOptions.value.map((item) => item.value));
+      const routeAvatarId =
+        typeof route.query.avatarId === "string"
+          ? route.query.avatarId.trim()
+          : "";
+      requestedAvatarUnavailable.value = false;
+      selectedAvatarIds.value = selectedAvatarIds.value
+        .filter((id) => avatarIds.has(id))
+        .slice(0, 7);
+      if (routeAvatarId && avatarIds.has(routeAvatarId)) {
+        if (consumedRouteAvatarId.value !== routeAvatarId) {
+          addAvatarToCurrentCreation(routeAvatarId, { silent: true });
+          consumedRouteAvatarId.value = routeAvatarId;
+        }
+      } else if (routeAvatarId) {
+        requestedAvatarUnavailable.value = true;
       }
-    } else if (routeAvatarId) {
-      requestedAvatarUnavailable.value = true
-    }
-    if (!selectedAvatarIds.value.includes(selectedAvatarId.value)) {
-      selectedAvatarId.value = selectedAvatarIds.value[0] ?? ''
+      if (!selectedAvatarIds.value.includes(selectedAvatarId.value)) {
+        selectedAvatarId.value = selectedAvatarIds.value[0] ?? "";
+      }
     }
 
-    if (!voiceIds.has(selectedVoiceId.value)) {
-      selectedVoiceId.value = voiceOptions.value[0]?.value ?? ''
+    if (voicesResult.status === "fulfilled") {
+      loadState.voices = true;
+      voiceResourceItems.value = voicesResult.value.items.filter(
+        (item) => !hiddenRecommendedVoiceIds.has(item.id),
+      );
+      voiceOptions.value = voiceResourceItems.value.map((item) => ({
+        label: item.name,
+        value: item.id,
+      }));
+      const voiceIds = new Set(voiceOptions.value.map((item) => item.value));
+      if (!voiceIds.has(selectedVoiceId.value)) {
+        selectedVoiceId.value = voiceOptions.value[0]?.value ?? "";
+      }
     }
-    if (!subtitleTemplateIds.has(selectedSubtitleTemplateId.value)) {
-      selectedSubtitleTemplateId.value = subtitleTemplateOptions.value[0]?.value ?? ''
+
+    if (subtitleTemplatesResult.status === "fulfilled") {
+      loadState.subtitleTemplates = true;
+      subtitleTemplateItems.value = subtitleTemplatesResult.value.items;
+      subtitleTemplateOptions.value = subtitleTemplatesResult.value.items.map(
+        (item) => ({
+          label: item.name,
+          value: item.id,
+        }),
+      );
+      const subtitleTemplateIds = new Set(
+        subtitleTemplateOptions.value.map((item) => item.value),
+      );
+      if (!subtitleTemplateIds.has(selectedSubtitleTemplateId.value)) {
+        selectedSubtitleTemplateId.value =
+          subtitleTemplateOptions.value[0]?.value ?? "";
+      }
     }
-  } catch {
-    avatarResourceItems.value = []
-    voiceResourceItems.value = []
-    avatarOptions.value = []
-    voiceOptions.value = []
-    subtitleTemplateItems.value = []
-    subtitleTemplateOptions.value = []
-    selectedAvatarId.value = ''
-    selectedAvatarIds.value = []
-    selectedVoiceId.value = ''
-    selectedSubtitleTemplateId.value = ''
   } finally {
-    renderResourceLoading.value = false
+    renderResourceLoading.value = false;
   }
+  return loadState;
 }
 
 async function createAvatarFromStudio(body: CreateAvatarResourceDraft) {
-  creatingAvatar.value = true
+  creatingAvatar.value = true;
   try {
     const item = body.uploadFile
       ? await uploadAvatarResource(body)
-      : await createAvatarResource(body)
-    await loadRenderResources()
-    if (!avatarResourceItems.value.some((resource) => resource.id === item.id)) {
-      avatarResourceItems.value = [item, ...avatarResourceItems.value].slice(0, 40)
+      : await createAvatarResource(body);
+    await loadRenderResources();
+    if (
+      !avatarResourceItems.value.some((resource) => resource.id === item.id)
+    ) {
+      avatarResourceItems.value = [item, ...avatarResourceItems.value].slice(
+        0,
+        40,
+      );
       avatarOptions.value = [
         { label: item.name, value: item.id },
         ...avatarOptions.value.filter((option) => option.value !== item.id),
-      ]
+      ];
     }
-    addAvatarToCurrentCreation(item.id)
-    createAvatarOpen.value = false
-    message.success('数字人视频已加入当前创作，并自动选中。')
+    addAvatarToCurrentCreation(item.id);
+    createAvatarOpen.value = false;
+    message.success("数字人视频已加入当前创作，并自动选中。");
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
+    message.error(describeHttpOrNetworkError(e));
   } finally {
-    creatingAvatar.value = false
+    creatingAvatar.value = false;
   }
 }
 
 async function cloneVoiceFromStudio(body: CreateVoiceResourceDraft) {
-  cloningVoice.value = true
+  cloningVoice.value = true;
   try {
     const item = body.sampleFile
       ? await cloneVoiceResourceUpload(body)
-      : await cloneVoiceResource(body)
-    await loadRenderResources()
-    selectedVoiceId.value = item.id
-    cloneVoiceOpen.value = false
-    if (item.provider === 'local-upload') {
-      voiceSourceMode.value = 'local'
-      const reason = item.cloneError ? `原因：${item.cloneError.slice(0, 160)}` : '可先作为本地音频样本使用'
-      message.warning(`音频已加入当前创作；模型克隆未通过，已保存为本地样本。${reason}`)
-      return
+      : await cloneVoiceResource(body);
+    const loadState = await loadRenderResources();
+    if (!voiceResourceItems.value.some((resource) => resource.id === item.id)) {
+      voiceResourceItems.value = [item, ...voiceResourceItems.value].slice(
+        0,
+        40,
+      );
     }
-    message.success('克隆音频已加入当前创作，并自动选中。')
+    if (!voiceOptions.value.some((option) => option.value === item.id)) {
+      voiceOptions.value = [
+        { label: item.name, value: item.id },
+        ...voiceOptions.value.filter((option) => option.value !== item.id),
+      ];
+    }
+    selectedVoiceId.value = item.id;
+    cloneVoiceOpen.value = false;
+    if (!loadState.voices) {
+      message.warning("克隆音频已创建，但音色列表刷新失败，已先加入当前创作。");
+    }
+    if (item.provider === "local-upload") {
+      voiceSourceMode.value = "local";
+      const reason = item.cloneError
+        ? `原因：${item.cloneError.slice(0, 160)}`
+        : "可先作为本地音频样本使用";
+      message.warning(
+        `音频已加入当前创作；模型克隆未通过，已保存为本地样本。${reason}`,
+      );
+      return;
+    }
+    message.success("克隆音频已加入当前创作，并自动选中。");
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
+    message.error(describeHttpOrNetworkError(e));
   } finally {
-    cloningVoice.value = false
+    cloningVoice.value = false;
   }
 }
 
 function resetVoicePreviewState() {
-  clearVoicePreviewProgress()
-  voicePreviewUrl.value = null
-  voicePreviewHint.value = ''
-  voicePreviewMode.value = ''
-  voicePreviewDurationSeconds.value = 0
-  voicePreviewProgress.value = 0
-  voicePreviewProgressLabel.value = '准备生成音频'
+  clearVoicePreviewProgress();
+  clearVoicePreviewPolling();
+  voicePreviewUrl.value = null;
+  voicePreviewHint.value = "";
+  voicePreviewMode.value = "";
+  voicePreviewDurationSeconds.value = 0;
+  voicePreviewProgress.value = 0;
+  voicePreviewProgressLabel.value = "准备生成音频";
+  voicePreviewTaskId.value = "";
+  voicePreviewTaskStatus.value = "idle";
+  voicePreviewError.value = "";
 }
 
 function clearVoicePreviewProgress() {
   if (voicePreviewProgressTimer !== null) {
-    window.clearInterval(voicePreviewProgressTimer)
-    voicePreviewProgressTimer = null
+    window.clearInterval(voicePreviewProgressTimer);
+    voicePreviewProgressTimer = null;
+  }
+}
+
+function clearVoicePreviewPolling() {
+  if (voicePreviewPollTimer !== null) {
+    window.clearTimeout(voicePreviewPollTimer);
+    voicePreviewPollTimer = null;
   }
 }
 
 function scrollVoiceShellToOutput() {
   void nextTick(() => {
-    const shell = voiceShellRef.value
-    if (!shell) return
+    const shell = voiceShellRef.value;
+    if (!shell) return;
     shell.scrollTo({
       top: shell.scrollHeight,
-      behavior: 'smooth',
-    })
-  })
+      behavior: "smooth",
+    });
+  });
 }
 
 function startVoicePreviewProgress() {
-  clearVoicePreviewProgress()
-  voicePreviewProgress.value = 8
-  voicePreviewProgressLabel.value = '正在整理文案和音色参数'
-  scrollVoiceShellToOutput()
+  clearVoicePreviewProgress();
+  voicePreviewProgress.value = 8;
+  voicePreviewProgressLabel.value = "正在整理文案和音色参数";
+  scrollVoiceShellToOutput();
   voicePreviewProgressTimer = window.setInterval(() => {
-    const current = voicePreviewProgress.value
+    const current = voicePreviewProgress.value;
     if (current < 36) {
-      voicePreviewProgress.value = Math.min(36, current + 7)
-      voicePreviewProgressLabel.value = '正在整理文案和音色参数'
-      return
+      voicePreviewProgress.value = Math.min(36, current + 7);
+      voicePreviewProgressLabel.value = "正在整理文案和音色参数";
+      return;
     }
     if (current < 72) {
-      voicePreviewProgress.value = Math.min(72, current + 5)
-      voicePreviewProgressLabel.value = '正在请求语音生成接口'
-      return
+      voicePreviewProgress.value = Math.min(72, current + 5);
+      voicePreviewProgressLabel.value = "正在请求语音生成接口";
+      return;
     }
-    voicePreviewProgress.value = Math.min(92, current + 2)
-    voicePreviewProgressLabel.value = '正在保存试听音频'
-  }, 420)
+    voicePreviewProgress.value = Math.min(92, current + 2);
+    voicePreviewProgressLabel.value = "正在保存试听音频";
+  }, 420);
 }
 
 function finishVoicePreviewProgress(ok: boolean) {
-  clearVoicePreviewProgress()
-  voicePreviewProgress.value = ok ? 100 : 0
-  voicePreviewProgressLabel.value = ok ? '音频已生成，可以先试听效果' : '生成失败，请调整后重试'
-  scrollVoiceShellToOutput()
+  clearVoicePreviewProgress();
+  voicePreviewProgress.value = ok ? 100 : 0;
+  voicePreviewProgressLabel.value = ok
+    ? "音频已生成，可以先试听效果"
+    : "生成失败，请调整后重试";
+  scrollVoiceShellToOutput();
+}
+
+function patchVoicePreviewProgressByTaskStatus(
+  status: "queued" | "running" | "saving",
+) {
+  if (status === "queued") {
+    voicePreviewProgress.value = Math.max(voicePreviewProgress.value, 22);
+    voicePreviewProgressLabel.value = "任务已提交，正在排队生成";
+    return;
+  }
+  if (status === "running") {
+    voicePreviewProgress.value = Math.max(voicePreviewProgress.value, 62);
+    voicePreviewProgressLabel.value = "任务生成中，正在等待语音结果";
+    return;
+  }
+  voicePreviewProgress.value = Math.max(voicePreviewProgress.value, 86);
+  voicePreviewProgressLabel.value = "语音已生成，正在保存试听音频";
+}
+
+function applyVoicePreviewResult(data: {
+  audioUrl?: string;
+  hint?: string;
+  ttsMode?: "provider" | "mock";
+  durationSeconds?: number;
+}) {
+  const nextUrl = data.audioUrl?.trim();
+  if (!nextUrl) return false;
+  voicePreviewUrl.value = nextUrl;
+  voicePreviewHint.value = data.hint ?? "";
+  voicePreviewMode.value = data.ttsMode ?? "";
+  voicePreviewDurationSeconds.value = Number.isFinite(data.durationSeconds)
+    ? Math.max(0, Number(data.durationSeconds))
+    : 0;
+  voicePreviewTaskStatus.value = "ready";
+  finishVoicePreviewProgress(true);
+  return true;
+}
+
+async function pollVoicePreviewUntilReady(
+  previewTaskId: string,
+  statusUrl: string | undefined,
+  requestSeq: number,
+) {
+  const startedAt = Date.now();
+  const timeoutMs = 180_000;
+
+  while (requestSeq === voicePreviewRequestSeq) {
+    if (Date.now() - startedAt > timeoutMs) {
+      voicePreviewTaskStatus.value = "timeout";
+      voicePreviewError.value = "等待配音结果超时，请重试。";
+      finishVoicePreviewProgress(false);
+      message.error("等待配音结果超时，请重试。");
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      clearVoicePreviewPolling();
+      voicePreviewPollTimer = window.setTimeout(() => {
+        voicePreviewPollTimer = null;
+        resolve();
+      }, 1500);
+    });
+    if (requestSeq !== voicePreviewRequestSeq) return;
+
+    try {
+      const task = await getVoicePreviewTaskStatus(previewTaskId, statusUrl);
+      if (requestSeq !== voicePreviewRequestSeq) return;
+
+      if (task.status === "failed") {
+        voicePreviewTaskStatus.value = "failed";
+        voicePreviewError.value =
+          task.error?.trim() || "配音任务失败，请重试。";
+        finishVoicePreviewProgress(false);
+        message.error(voicePreviewError.value);
+        return;
+      }
+
+      if (task.status === "succeeded") {
+        if (applyVoicePreviewResult(task)) return;
+        voicePreviewTaskStatus.value = "saving";
+        patchVoicePreviewProgressByTaskStatus("saving");
+        continue;
+      }
+
+      voicePreviewTaskStatus.value = task.status;
+      voicePreviewHint.value = task.hint ?? voicePreviewHint.value;
+      patchVoicePreviewProgressByTaskStatus(task.status);
+    } catch (e: unknown) {
+      if (requestSeq !== voicePreviewRequestSeq) return;
+      voicePreviewTaskStatus.value = "failed";
+      voicePreviewError.value = describeHttpOrNetworkError(e);
+      finishVoicePreviewProgress(false);
+      message.error(voicePreviewError.value);
+      return;
+    }
+  }
 }
 
 function formatSecondsClock(value: number) {
-  const total = Math.max(0, Math.round(value))
-  const minutes = Math.floor(total / 60)
-  const seconds = total % 60
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  const total = Math.max(0, Math.round(value));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
 }
 
 function nudgeVoicePower(delta: number) {
-  const next = Number((selectedVoicePower.value + delta).toFixed(2))
-  selectedVoicePower.value = Math.min(1.5, Math.max(0.6, next))
+  const next = Number((selectedVoicePower.value + delta).toFixed(2));
+  selectedVoicePower.value = Math.min(1.5, Math.max(0.6, next));
 }
 
 function buildVoiceTuningPayload() {
@@ -1056,461 +1393,550 @@ function buildVoiceTuningPayload() {
     voiceEmotionIntensity: selectedVoicePower.value,
     voiceRate: selectedVoiceRate.value,
     voiceVolume: selectedVoiceVolume.value,
+  };
+}
+
+function buildVoiceGenerationState(
+  selectedId: string,
+  resource: VoiceResource | null,
+): VoiceGenerationState {
+  if (!selectedId) {
+    return { ready: false, reason: "未选音色：请先选择一个配音音色。" };
   }
+  if (!resource) {
+    return {
+      ready: false,
+      reason:
+        "资源未匹配：当前选中的音色不在资源列表中，请刷新资源或重新选择。",
+    };
+  }
+  if (resource.cloneStatus === "processing") {
+    return {
+      ready: false,
+      reason: "音色未 ready：当前音色仍在克隆处理中，请稍后刷新后再生成。",
+    };
+  }
+  if (resource.cloneStatus === "failed") {
+    const error = resource.cloneError
+      ? `原因：${resource.cloneError.slice(0, 120)}`
+      : "请重新上传样本或选择其他音色。";
+    return { ready: false, reason: `音色未 ready：克隆失败。${error}` };
+  }
+  if (resource.cloneStatus !== "ready") {
+    return {
+      ready: false,
+      reason: "音色未 ready：接口未返回 ready 状态，请刷新资源列表后再试。",
+    };
+  }
+  if (resource.provider === "local-upload") {
+    return {
+      ready: false,
+      reason:
+        "所选音色不支持生成：本地上传音频只能作为样本留档，请选择支持 TTS 的克隆音色或推荐音色。",
+    };
+  }
+  if (!resource.providerVoice) {
+    return {
+      ready: false,
+      reason:
+        "所选音色不支持生成：接口缺少 providerVoice，无法提交到 TTS/成片链路。",
+    };
+  }
+  return { ready: true, reason: "" };
 }
 
 async function onGenerateVoicePreview() {
-  ensureStreamingScriptComplete()
-  const script = currentWorkflowScript.value
-  if (!script) {
-    message.warning('请先回到第一步锁定口播文案。')
-    return
-  }
-  if (!selectedVoiceId.value) {
-    message.warning('请先选择一个克隆音色。')
-    return
-  }
-  if (selectedVoiceResource.value?.cloneStatus !== 'ready') {
-    message.warning('当前音色还没准备好，暂时不能生成试听音频。')
-    return
+  await onGenerateVoicePreviewV2();
+}
+
+async function onGenerateVoicePreviewV2() {
+  ensureStreamingScriptComplete();
+  const blockReason = voicePreviewBlockReason.value;
+  if (blockReason) {
+    message.warning(blockReason);
+    return;
   }
 
-  voicePreviewLoading.value = true
-  resetVoicePreviewState()
-  startVoicePreviewProgress()
+  const script = currentWorkflowScript.value;
+  const requestSeq = ++voicePreviewRequestSeq;
+
+  resetVoicePreviewState();
+  voicePreviewLoading.value = true;
+  voicePreviewTaskStatus.value = "submitted";
+  startVoicePreviewProgress();
+
   try {
     const data = await createVoicePreview({
       script,
       voiceResourceId: selectedVoiceId.value,
       ...buildVoiceTuningPayload(),
-    })
-    voicePreviewUrl.value = data.audioUrl
-    voicePreviewHint.value = data.hint
-    voicePreviewMode.value = data.ttsMode
-    voicePreviewDurationSeconds.value = data.durationSeconds
-    finishVoicePreviewProgress(true)
-    message.success(
-      data.ttsMode === 'provider'
-        ? `已生成「${data.voiceLabel}」的可试听配音。`
-        : '真实 TTS 暂未走通，已生成占位试听音频供流程验收。',
-    )
+    });
+    if (requestSeq !== voicePreviewRequestSeq) return;
+
+    voicePreviewHint.value = data.hint ?? "";
+
+    if (applyVoicePreviewResult(data)) {
+      message.success("Preview audio is ready.");
+      return;
+    }
+
+    const previewTaskId = data.previewTaskId?.trim();
+    if (previewTaskId) {
+      voicePreviewTaskId.value = previewTaskId;
+      if (data.status === "running") {
+        voicePreviewTaskStatus.value = "running";
+        patchVoicePreviewProgressByTaskStatus("running");
+      } else {
+        voicePreviewTaskStatus.value = "queued";
+        patchVoicePreviewProgressByTaskStatus("queued");
+      }
+      await pollVoicePreviewUntilReady(
+        previewTaskId,
+        data.statusUrl,
+        requestSeq,
+      );
+      if (requestSeq !== voicePreviewRequestSeq) return;
+      if (voicePreviewUrl.value) {
+        message.success("Preview audio is ready.");
+      }
+      return;
+    }
+
+    voicePreviewTaskStatus.value = "failed";
+    voicePreviewError.value =
+      data.error?.trim() || "Preview request finished without an audio URL.";
+    finishVoicePreviewProgress(false);
+    message.error(voicePreviewError.value);
   } catch (e: unknown) {
-    finishVoicePreviewProgress(false)
-    message.error(describeHttpOrNetworkError(e))
+    if (requestSeq !== voicePreviewRequestSeq) return;
+    voicePreviewTaskStatus.value = "failed";
+    voicePreviewError.value = describeHttpOrNetworkError(e);
+    finishVoicePreviewProgress(false);
+    message.error(voicePreviewError.value);
   } finally {
-    voicePreviewLoading.value = false
+    if (requestSeq === voicePreviewRequestSeq) {
+      voicePreviewLoading.value = false;
+    }
   }
 }
 
 async function downloadProtectedFile(url: string, fallbackName: string) {
-  const token = localStorage.getItem('kb_token')
+  const token = localStorage.getItem("kb_token");
   const response = await fetch(url, {
     headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  })
+  });
   if (!response.ok) {
-    throw new Error(`下载失败（${response.status}）`)
+    throw new Error(`下载失败（${response.status}）`);
   }
-  const blob = await response.blob()
-  const objectUrl = URL.createObjectURL(blob)
-  const anchor = document.createElement('a')
-  anchor.href = objectUrl
-  anchor.download = fallbackName
-  document.body.appendChild(anchor)
-  anchor.click()
-  anchor.remove()
-  URL.revokeObjectURL(objectUrl)
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = fallbackName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 async function onDownloadVoicePreview() {
-  if (!voicePreviewUrl.value) return
+  if (!voicePreviewUrl.value) return;
   try {
-    const extension = voicePreviewMode.value === 'mock' ? 'wav' : 'mp3'
+    const extension = voicePreviewMode.value === "mock" ? "wav" : "mp3";
     await downloadProtectedFile(
       voicePreviewUrl.value,
       `voice-preview-${Date.now()}.${extension}`,
-    )
+    );
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
+    message.error(describeHttpOrNetworkError(e));
   }
 }
 
 function onProceedFromStepTwo() {
-  if (!selectedAvatarId.value) {
-    message.warning('请先选择一个数字人视频。')
-    return
+  const blockReason = stepTwoGenerateBlockReason.value;
+  if (blockReason) {
+    message.warning(blockReason);
+    return;
   }
-  if (!selectedVoiceId.value) {
-    message.warning('请先选择一个克隆声音。')
-    return
-  }
-  syncSmartClipSubtitlesFromFirstStep(true)
-  activeStep.value = 3
-  message.success('已带着当前数字人与声音配置进入一键成片。')
+  syncSmartClipSubtitlesFromFirstStep(true);
+  activeStep.value = 3;
+  message.success("已带着当前数字人与声音配置进入一键成片。");
 }
 
-function goToResourceLibrary(tab: 'avatars' | 'voices' | 'subtitle-templates') {
-  void router.push({ name: 'resource-library', query: { tab } })
+function goToResourceLibrary(tab: "avatars" | "voices" | "subtitle-templates") {
+  void router.push({ name: "resource-library", query: { tab } });
 }
 
 async function refreshDyCookieStatus() {
   try {
-    const { configured } = await getDyDownloaderCookieConfigured()
-    dyCookieConfigured.value = configured
+    const { configured } = await getDyDownloaderCookieConfigured();
+    dyCookieConfigured.value = configured;
   } catch {
-    dyCookieConfigured.value = null
+    dyCookieConfigured.value = null;
   }
 }
 
 async function refreshPipelineHealth() {
-  pipelineHealthError.value = ''
+  pipelineHealthError.value = "";
   try {
-    await getTranscribePipelineHealth()
+    await getTranscribePipelineHealth();
   } catch (e) {
-    pipelineHealthError.value = describeHttpOrNetworkError(e)
+    pipelineHealthError.value = describeHttpOrNetworkError(e);
   }
 }
 
-function buildBenchmarkIdeaDraft(mode: 'ai' | 'custom') {
-  const profile = benchmarkProfile.value
-  if (!profile) return ''
+function buildBenchmarkIdeaDraft(mode: "ai" | "custom") {
+  const profile = benchmarkProfile.value;
+  if (!profile) return "";
 
   const sampleLines = benchmarkSamples.value
     .slice(0, 3)
-    .map((item, index) => `${index + 1}. ${item.title}`)
+    .map((item, index) => `${index + 1}. ${item.title}`);
 
-  if (mode === 'ai') {
+  if (mode === "ai") {
     const suggestions = benchmarkIdeaSuggestions.value.length
       ? benchmarkIdeaSuggestions.value
-      : ['围绕这个账号的高互动表达方式，整理 5 条你的口播选题']
+      : ["围绕这个账号的高互动表达方式，整理 5 条你的口播选题"];
 
     return [
       `对标账号：${profile.nickname}`,
       `账号定位：${profile.signature}`,
       `近期作品参考：`,
       ...sampleLines,
-      '',
-      '建议选题：',
+      "",
+      "建议选题：",
       ...suggestions.map((item, index) => `${index + 1}. ${item}`),
-    ].join('\n')
+    ].join("\n");
   }
 
   return [
     `对标账号：${profile.nickname}`,
     `你准备模仿的内容方向：${profile.signature}`,
-    '',
-    '请在下面手动整理你的口播文案：',
-    '1. 开场钩子：',
-    '2. 核心观点：',
-    '3. 案例或步骤：',
-    '4. 收尾行动：',
-    '',
-    '参考作品：',
+    "",
+    "请在下面手动整理你的口播文案：",
+    "1. 开场钩子：",
+    "2. 核心观点：",
+    "3. 案例或步骤：",
+    "4. 收尾行动：",
+    "",
+    "参考作品：",
     ...sampleLines,
-  ].join('\n')
+  ].join("\n");
 }
 
 async function focusOutlineEditor() {
-  await nextTick()
-  const editor = document.querySelector<HTMLTextAreaElement>('.outline-editor textarea')
-  editor?.focus()
+  await nextTick();
+  const editor = document.querySelector<HTMLTextAreaElement>(
+    ".outline-editor textarea",
+  );
+  editor?.focus();
 }
 
 function resetOralScriptPolish() {
-  oralScriptPolish.value = null
+  oralScriptPolish.value = null;
 }
 
-async function applyBenchmarkIdeaDraft(mode: 'ai' | 'custom') {
+async function applyBenchmarkIdeaDraft(mode: "ai" | "custom") {
   if (!benchmarkProfile.value) {
-    message.warning('请先学习一个抖音主页，再生成选题。')
-    return
+    message.warning("请先学习一个抖音主页，再生成选题。");
+    return;
   }
-  resetOralScriptPolish()
-  draft.manualScriptDraft = buildBenchmarkIdeaDraft(mode)
-  syncPublishCopyFromScript(true)
-  await focusOutlineEditor()
-  message.success(mode === 'ai' ? '已生成对标选题草稿。' : '已切到自定义选题草稿。')
+  resetOralScriptPolish();
+  draft.manualScriptDraft = buildBenchmarkIdeaDraft(mode);
+  syncPublishCopyFromScript(true);
+  await focusOutlineEditor();
+  message.success(
+    mode === "ai" ? "已生成对标选题草稿。" : "已切到自定义选题草稿。",
+  );
 }
 
 async function onLearnDouyinHomepage() {
-  const homepageUrl = benchmarkHomepageUrl.value.trim()
+  const homepageUrl = benchmarkHomepageUrl.value.trim();
   if (!homepageUrl) {
-    message.warning('请先粘贴抖音主页链接。')
-    return
+    message.warning("请先粘贴抖音主页链接。");
+    return;
   }
 
-  benchmarkLearning.value = true
-  benchmarkLearningHint.value = ''
+  benchmarkLearning.value = true;
+  benchmarkLearningHint.value = "";
   try {
-    const data = await learnDouyinHomepage({ homepageUrl })
-    benchmarkProfile.value = data.profile
-    benchmarkSamples.value = data.samples
-    benchmarkIdeaSuggestions.value = data.ideaSuggestions
-    benchmarkLearningHint.value = data.hint
-    message.success(`已学习 ${data.profile.nickname} 的主页内容。`)
+    const data = await learnDouyinHomepage({ homepageUrl });
+    benchmarkProfile.value = data.profile;
+    benchmarkSamples.value = data.samples;
+    benchmarkIdeaSuggestions.value = data.ideaSuggestions;
+    benchmarkLearningHint.value = data.hint;
+    message.success(`已学习 ${data.profile.nickname} 的主页内容。`);
   } catch (e: unknown) {
-    benchmarkLearningHint.value = describeHttpOrNetworkError(e)
-    message.error(benchmarkLearningHint.value)
+    benchmarkLearningHint.value = describeHttpOrNetworkError(e);
+    message.error(benchmarkLearningHint.value);
   } finally {
-    benchmarkLearning.value = false
+    benchmarkLearning.value = false;
   }
 }
 
 async function onOptimizeOralScript() {
-  const sourceText = oralScriptSourceText.value.trim()
+  const sourceText = oralScriptSourceText.value.trim();
   if (!sourceText) {
-    message.warning('请先完成转写，或先在文案框里准备好原始内容。')
-    return
+    message.warning("请先完成转写，或先在文案框里准备好原始内容。");
+    return;
   }
 
-  optimizingOralScript.value = true
-  cancelStream()
+  optimizingOralScript.value = true;
+  cancelStream();
   try {
     const result = await optimizeOralScript({
       sourceText,
       sourceVideoUrl: draft.videoUrl.trim() || undefined,
-    })
-    oralScriptPolish.value = result
-    draft.manualScriptDraft = result.optimizedScript.trim()
-    syncPublishCopyFromScript(true)
-    await focusOutlineEditor()
+    });
+    oralScriptPolish.value = result;
+    draft.manualScriptDraft = result.optimizedScript.trim();
+    syncPublishCopyFromScript(true);
+    await focusOutlineEditor();
     message.success(
       `已生成带 3 秒钩子和 10 秒钩子的口播文案（方案：${result.strategyLabel}）${
-        result.llmUsed ? '' : '，当前为回退结果'
+        result.llmUsed ? "" : "，当前为回退结果"
       }。`,
-    )
+    );
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
+    message.error(describeHttpOrNetworkError(e));
   } finally {
-    optimizingOralScript.value = false
+    optimizingOralScript.value = false;
   }
 }
 
 function goPrev() {
-  activeStep.value = Math.max(1, activeStep.value - 1)
+  activeStep.value = Math.max(1, activeStep.value - 1);
 }
 
 function goNext() {
   if (activeStep.value === 1) {
-    ensureStreamingScriptComplete()
+    ensureStreamingScriptComplete();
   }
   if (activeStep.value === 2) {
-    if (!selectedAvatarId.value) {
-      message.warning('请先选择一个数字人视频。')
-      return
-    }
-    if (!selectedVoiceId.value) {
-      message.warning('请先选择一个配音音色。')
-      return
+    const blockReason = stepTwoGenerateBlockReason.value;
+    if (blockReason) {
+      message.warning(blockReason);
+      return;
     }
   }
   if (activeStep.value === 2) {
-    syncSmartClipSubtitlesFromFirstStep(true)
+    syncSmartClipSubtitlesFromFirstStep(true);
   }
   if (activeStep.value === 3 && generatedVideoCount.value <= 0) {
-    message.warning('请先生成整段对口型视频，再进入自动发布。')
-    return
+    message.warning("请先生成整段对口型视频，再进入自动发布。");
+    return;
   }
-  activeStep.value = Math.min(4, activeStep.value + 1)
+  activeStep.value = Math.min(4, activeStep.value + 1);
 }
 
 function jumpToStep(stepNo: number) {
   if (stepNo <= activeStep.value) {
-    activeStep.value = stepNo
-    return
+    activeStep.value = stepNo;
+    return;
   }
   while (activeStep.value < stepNo) {
-    const before = activeStep.value
-    goNext()
-    if (activeStep.value === before) return
+    const before = activeStep.value;
+    goNext();
+    if (activeStep.value === before) return;
   }
 }
 
 async function onFetchVideoMeta() {
-  const link = validateSourceVideoInput(draft.videoUrl)
+  const link = validateSourceVideoInput(draft.videoUrl);
   if (!link.ok || !link.normalizedUrl) {
-    message.error(link.message ?? '请先填写可识别的视频链接。')
-    return
+    message.error(link.message ?? "请先填写可识别的视频链接。");
+    return;
   }
-  draft.videoUrl = link.normalizedUrl
+  draft.videoUrl = link.normalizedUrl;
 
-  loadingMeta.value = true
+  loadingMeta.value = true;
   try {
-    const meta = await fetchVideoMeta({ sourceVideoUrl: link.normalizedUrl })
-    draft.setVideoMeta(meta)
-    rememberRecentExtraction(meta, link.normalizedUrl)
+    const meta = await fetchVideoMeta({ sourceVideoUrl: link.normalizedUrl });
+    draft.setVideoMeta(meta);
+    await rememberRecentExtraction(meta, link.normalizedUrl);
     if (!isDouyinNormalizedUrl(link.normalizedUrl)) {
-      resetOralScriptPolish()
-      draft.prefillManualScriptFromMeta(meta)
+      resetOralScriptPolish();
+      draft.prefillManualScriptFromMeta(meta);
     }
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
-    return
+    message.error(describeHttpOrNetworkError(e));
+    return;
   } finally {
-    loadingMeta.value = false
+    loadingMeta.value = false;
   }
 
-  await nextTick()
+  await nextTick();
   if (!isDouyinNormalizedUrl(link.normalizedUrl)) {
-    message.success('已获取视频信息。')
-    return
+    message.success("已获取视频信息。");
+    return;
   }
 
-  douyinPipeline.value = true
-  pipelinePhase.value = 'download'
-  pipelineProgress.value = 8
-  pipelineBarProcessing.value = true
+  douyinPipeline.value = true;
+  pipelinePhase.value = "download";
+  pipelineProgress.value = 8;
+  pipelineBarProcessing.value = true;
   try {
     const saved = await downloadSourceVideoFile({
       sourceVideoUrl: link.normalizedUrl,
       transcribe: false,
-    })
-    const basename = saved.savedPath.split(/[/\\]/).pop()?.trim() || null
+    });
+    const basename = saved.savedPath.split(/[/\\]/).pop()?.trim() || null;
     if (!basename) {
-      message.error('未能识别服务端保存的视频文件名。')
-      return
+      message.error("未能识别服务端保存的视频文件名。");
+      return;
     }
-    lastSavedVideoBasename.value = basename
+    lastSavedVideoBasename.value = basename;
 
-    pipelinePhase.value = 'transcribe'
-    pipelineProgress.value = 50
-    const result = await transcribeSavedVideo({ fileName: basename })
-    pipelineProgress.value = 100
-    pipelineBarProcessing.value = false
+    pipelinePhase.value = "transcribe";
+    pipelineProgress.value = 50;
+    const result = await transcribeSavedVideo({ fileName: basename });
+    pipelineProgress.value = 100;
+    pipelineBarProcessing.value = false;
 
     if (result.transcript) {
-      resetOralScriptPolish()
+      resetOralScriptPolish();
       const applied = applySafeTranscriptToEditableScript({
         fullText: result.transcript.fullText,
         segments: result.transcript.segments,
         transcriptId: result.transcript.transcriptId,
-      })
-      if (applied) message.success('抖音视频已下载并完成文案转写。')
+      });
+      if (applied) message.success("抖音视频已下载并完成文案转写。");
     }
     if (result.transcriptionError) {
-      message.warning(result.transcriptionError)
+      message.warning(result.transcriptionError);
     }
   } catch (e: unknown) {
-    lastSavedVideoBasename.value = null
+    lastSavedVideoBasename.value = null;
     message.warning(
       `视频下载或转写失败：${await describeHttpOrNetworkErrorMaybeBlob(e)}`,
-    )
+    );
   } finally {
-    douyinPipeline.value = false
-    pipelinePhase.value = 'idle'
-    pipelineProgress.value = 0
-    pipelineBarProcessing.value = false
-    void refreshDyCookieStatus()
-    void refreshPipelineHealth()
+    douyinPipeline.value = false;
+    pipelinePhase.value = "idle";
+    pipelineProgress.value = 0;
+    pipelineBarProcessing.value = false;
+    void refreshDyCookieStatus();
+    void refreshPipelineHealth();
   }
 }
 
 function onUseScriptAndNext() {
-  ensureStreamingScriptComplete()
+  ensureStreamingScriptComplete();
   if (draft.manualScriptDraft.trim()) {
-    draft.commitManualScriptToPipeline()
-    syncPublishCopyFromScript()
+    draft.commitManualScriptToPipeline();
+    syncPublishCopyFromScript();
   }
-  syncSmartClipSubtitlesFromFirstStep(true)
-  activeStep.value = 2
+  syncSmartClipSubtitlesFromFirstStep(true);
+  activeStep.value = 2;
 }
 
 async function onRetranscribeFromLocal() {
-  const name = lastSavedVideoBasename.value?.trim()
+  const name = lastSavedVideoBasename.value?.trim();
   if (!name) {
-    message.warning('还没有可重转写的本地视频，请先完成一次抖音抓取。')
-    return
+    message.warning("还没有可重转写的本地视频，请先完成一次抖音抓取。");
+    return;
   }
-  retranscribingLocal.value = true
+  retranscribingLocal.value = true;
   try {
-    const result = await transcribeSavedVideo({ fileName: name })
+    const result = await transcribeSavedVideo({ fileName: name });
     if (result.transcript) {
-      resetOralScriptPolish()
+      resetOralScriptPolish();
       const applied = applySafeTranscriptToEditableScript({
         fullText: result.transcript.fullText,
         segments: result.transcript.segments,
         transcriptId: result.transcript.transcriptId,
-      })
-      if (applied) message.success('已从本地保存视频重新生成文案。')
+      });
+      if (applied) message.success("已从本地保存视频重新生成文案。");
     }
     if (result.transcriptionError) {
-      message.warning(result.transcriptionError)
+      message.warning(result.transcriptionError);
     }
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
+    message.error(describeHttpOrNetworkError(e));
   } finally {
-    retranscribingLocal.value = false
+    retranscribingLocal.value = false;
   }
 }
 
 async function onTranscribeNonDouyinFromUrl() {
-  const link = validateSourceVideoInput(draft.videoUrl)
+  const link = validateSourceVideoInput(draft.videoUrl);
   if (!link.ok || !link.normalizedUrl) {
-    message.error(link.message ?? '请先填写可解析的视频链接。')
-    return
+    message.error(link.message ?? "请先填写可解析的视频链接。");
+    return;
   }
-  transcribeUrlLoading.value = true
+  transcribeUrlLoading.value = true;
   try {
-    const data = await transcribeFromUrl({ sourceVideoUrl: link.normalizedUrl })
-    resetOralScriptPolish()
+    const data = await transcribeFromUrl({
+      sourceVideoUrl: link.normalizedUrl,
+    });
+    resetOralScriptPolish();
     const applied = applySafeTranscriptToEditableScript({
       fullText: data.fullText,
       segments: data.segments,
       transcriptId: data.transcriptId,
-    })
-    if (applied) message.success('当前链接内容已完成转写。')
+    });
+    if (applied) message.success("当前链接内容已完成转写。");
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
+    message.error(describeHttpOrNetworkError(e));
   } finally {
-    transcribeUrlLoading.value = false
+    transcribeUrlLoading.value = false;
   }
 }
 
 function formatBenchmarkSampleDate(value: string) {
-  const trimmed = value.trim()
-  if (!trimmed) return '近期发布'
+  const trimmed = value.trim();
+  if (!trimmed) return "近期发布";
   if (/^\d{10,13}$/.test(trimmed)) {
-    const ms = trimmed.length === 13 ? Number(trimmed) : Number(trimmed) * 1000
-    const date = new Date(ms)
+    const ms = trimmed.length === 13 ? Number(trimmed) : Number(trimmed) * 1000;
+    const date = new Date(ms);
     if (!Number.isNaN(date.getTime())) {
-      return `${date.getMonth() + 1}/${date.getDate()}`
+      return `${date.getMonth() + 1}/${date.getDate()}`;
     }
   }
-  return trimmed
+  return trimmed;
 }
 
 function formatSmartClipSeconds(value: number | null | undefined) {
-  const seconds = typeof value === 'number' && Number.isFinite(value) ? Math.max(0, value) : 0
-  return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`
+  const seconds =
+    typeof value === "number" && Number.isFinite(value)
+      ? Math.max(0, value)
+      : 0;
+  return `${seconds.toFixed(seconds >= 10 ? 1 : 2)}s`;
 }
 
 function resetSmartClipResultState() {
-  clearSmartClipPollTimer()
-  smartClipRenderTask.value = null
-  smartClipRendering.value = false
-  subtitleWorkflowFinalUrl.value = null
-  subtitleWorkflowHint.value = ''
+  clearSmartClipPollTimer();
+  smartClipRenderTask.value = null;
+  smartClipRendering.value = false;
+  subtitleWorkflowFinalUrl.value = null;
+  subtitleWorkflowHint.value = "";
 }
 
 function buildSmartClipSubtitles(force = false) {
-  const script = currentWorkflowScript.value
-  if (!force && smartClipSubtitles.value.length > 0 && smartClipSubtitleSourceText.value === script) return
+  const script = currentWorkflowScript.value;
+  if (
+    !force &&
+    smartClipSubtitles.value.length > 0 &&
+    smartClipSubtitleSourceText.value === script
+  )
+    return;
   if (!script) {
-    smartClipSubtitles.value = []
-    smartClipSubtitleSourceText.value = ''
-    return
+    smartClipSubtitles.value = [];
+    smartClipSubtitleSourceText.value = "";
+    return;
   }
 
   const segments = extractedScriptLines.value.length
     ? extractedScriptLines.value
-    : splitScriptIntoSemanticSegments(script, 44)
-  let cursor = 0
+    : splitScriptIntoSemanticSegments(script, 44);
+  let cursor = 0;
   smartClipSubtitles.value = segments.map((text, index) => {
-    const duration = Math.max(1.2, Math.min(6, text.length * 0.18))
-    const startTime = Number(cursor.toFixed(2))
-    cursor += duration
-    const endTime = Number(cursor.toFixed(2))
+    const duration = Math.max(1.2, Math.min(6, text.length * 0.18));
+    const startTime = Number(cursor.toFixed(2));
+    cursor += duration;
+    const endTime = Number(cursor.toFixed(2));
     return {
-      id: `sub_${String(index + 1).padStart(3, '0')}_${script.length}`,
+      id: `sub_${String(index + 1).padStart(3, "0")}_${script.length}`,
       startTime,
       endTime,
       text,
@@ -1519,25 +1945,27 @@ function buildSmartClipSubtitles(force = false) {
             {
               start: 0,
               end: Math.min(4, text.length),
-              color: '#FFD94A',
+              color: "#FFD94A",
               fontWeight: 900,
             },
           ]
         : [],
-    }
-  })
-  smartClipSubtitleSourceText.value = script
+    };
+  });
+  smartClipSubtitleSourceText.value = script;
 }
 
 function syncSmartClipSubtitlesFromFirstStep(force = false) {
-  ensureStreamingScriptComplete()
-  buildSmartClipSubtitles(force)
+  ensureStreamingScriptComplete();
+  buildSmartClipSubtitles(force);
 }
 
 function toggleSmartClipSubtitleHighlight(subtitle: SmartClipSubtitle) {
-  const index = smartClipSubtitles.value.findIndex((item) => item.id === subtitle.id)
-  if (index < 0) return
-  const hasHighlight = Boolean(subtitle.highlightRanges?.length)
+  const index = smartClipSubtitles.value.findIndex(
+    (item) => item.id === subtitle.id,
+  );
+  if (index < 0) return;
+  const hasHighlight = Boolean(subtitle.highlightRanges?.length);
   smartClipSubtitles.value[index] = {
     ...subtitle,
     highlightRanges: hasHighlight
@@ -1546,156 +1974,171 @@ function toggleSmartClipSubtitleHighlight(subtitle: SmartClipSubtitle) {
           {
             start: 0,
             end: Math.min(4, subtitle.text.length),
-            color: '#FFD94A',
+            color: "#FFD94A",
             fontWeight: 900,
           },
         ],
-  }
+  };
 }
 
 function shuffleSmartClipTitle() {
   const candidates = [
-    ['7步让AI写出爆款', '直播话术!'],
-    ['别硬扛了', 'AI帮你拆话术'],
-    ['一套结构化内容', '让口播更抓人'],
-    ['直播开场不会说?', '先套这个脚本'],
-  ]
-  const current = smartClipTitleLines.value.join('')
-  const next = candidates.find((item) => item.join('') !== current) ?? candidates[0]
-  smartClipTitleLines.value = [...next]
+    ["7步让AI写出爆款", "直播话术!"],
+    ["别硬扛了", "AI帮你拆话术"],
+    ["一套结构化内容", "让口播更抓人"],
+    ["直播开场不会说?", "先套这个脚本"],
+  ];
+  const current = smartClipTitleLines.value.join("");
+  const next =
+    candidates.find((item) => item.join("") !== current) ?? candidates[0];
+  smartClipTitleLines.value = [...next];
 }
 
 function clearSmartClipSubtitles() {
-  smartClipSubtitles.value = []
+  smartClipSubtitles.value = [];
 }
 
 function confirmSmartClipSubtitles() {
-  message.success('字幕已确认，点击立即剪辑即可生成最终成片。')
+  message.success("字幕已确认，点击立即剪辑即可生成最终成片。");
 }
 
 async function onDetectSmartClipCutPoints(options: { silent?: boolean } = {}) {
   if (!selectedAvatarId.value) {
-    message.warning('请先选择数字人视频')
-    return false
+    message.warning("请先选择数字人视频");
+    return false;
   }
-  smartClipCutDetecting.value = true
+  smartClipCutDetecting.value = true;
   try {
-    const data = await detectSmartClipCutPoints('studio-current', {
+    const data = await detectSmartClipCutPoints("studio-current", {
       mode: smartClipCutMode.value,
       config: smartClipCutConfigs[smartClipCutMode.value],
       avatarResourceId: selectedAvatarId.value,
-    })
-    smartClipCutPoints.value = data.cutPoints
-    smartClipCutSummary.value = data.summary
-    smartClipCutApplied.value = false
+    });
+    smartClipCutPoints.value = data.cutPoints;
+    smartClipCutSummary.value = data.summary;
+    smartClipCutApplied.value = false;
     if (!options.silent) {
-      message.success(`已检测到 ${data.summary.totalCount} 个气口，预计压缩 ${formatSmartClipSeconds(data.summary.totalCutDuration)}。`)
+      message.success(
+        `已检测到 ${data.summary.totalCount} 个气口，预计压缩 ${formatSmartClipSeconds(data.summary.totalCutDuration)}。`,
+      );
     }
-    return true
+    return true;
   } catch (e: unknown) {
-    message.error(describeHttpOrNetworkError(e))
-    return false
+    message.error(describeHttpOrNetworkError(e));
+    return false;
   } finally {
-    smartClipCutDetecting.value = false
+    smartClipCutDetecting.value = false;
   }
 }
 
 function onApplySmartClipCutSuggestions() {
   if (!smartClipCutPoints.value.length) {
-    message.warning('请先检测气口')
-    return
+    message.warning("请先检测气口");
+    return;
   }
   smartClipCutPoints.value = smartClipCutPoints.value.map((item) => ({
     ...item,
     enabled: true,
-  }))
+  }));
   const totalCutDuration = Number(
-    smartClipCutPoints.value.reduce((sum, item) => sum + item.cutDuration, 0).toFixed(2),
-  )
+    smartClipCutPoints.value
+      .reduce((sum, item) => sum + item.cutDuration, 0)
+      .toFixed(2),
+  );
   smartClipCutSummary.value = {
     ...smartClipCutSummary.value,
     totalCount: smartClipCutPoints.value.length,
     totalCutDuration,
     estimatedDuration: Number(
-      Math.max(0, smartClipCutSummary.value.originalDuration - totalCutDuration).toFixed(2),
+      Math.max(
+        0,
+        smartClipCutSummary.value.originalDuration - totalCutDuration,
+      ).toFixed(2),
     ),
-  }
-  smartClipCutApplied.value = true
-  message.success('已应用剪辑建议，最终成片会自动压缩这些气口。')
+  };
+  smartClipCutApplied.value = true;
+  message.success("已应用剪辑建议，最终成片会自动压缩这些气口。");
 }
 
 function clearSmartClipPollTimer() {
   if (smartClipPollTimer !== null) {
-    window.clearInterval(smartClipPollTimer)
-    smartClipPollTimer = null
+    window.clearInterval(smartClipPollTimer);
+    smartClipPollTimer = null;
   }
 }
 
 async function refreshSmartClipRenderTask(taskId: string) {
-  const task = await getSmartClipRenderTask(taskId)
-  smartClipRenderTask.value = task
-  if (task.status === 'completed' && task.outputUrl) {
-    clearSmartClipPollTimer()
-    smartClipRendering.value = false
-    subtitleWorkflowFinalUrl.value = await resolveGeneratedPreviewVideoUrl(task.outputUrl)
-    subtitleWorkflowHint.value = '成片已生成，可以下载使用'
-    message.success('成片已生成，可以下载使用。')
-  } else if (task.status === 'failed') {
-    clearSmartClipPollTimer()
-    smartClipRendering.value = false
-    subtitleWorkflowHint.value = task.error || '生成失败，请重新生成'
-    message.error(subtitleWorkflowHint.value)
+  const task = await getSmartClipRenderTask(taskId);
+  smartClipRenderTask.value = task;
+  if (task.status === "completed" && task.outputUrl) {
+    clearSmartClipPollTimer();
+    smartClipRendering.value = false;
+    subtitleWorkflowFinalUrl.value = await resolveGeneratedPreviewVideoUrl(
+      task.outputUrl,
+    );
+    subtitleWorkflowHint.value = "成片已生成，可以下载使用";
+    message.success("成片已生成，可以下载使用。");
+  } else if (task.status === "failed") {
+    clearSmartClipPollTimer();
+    smartClipRendering.value = false;
+    subtitleWorkflowHint.value = task.error || "生成失败，请重新生成";
+    message.error(subtitleWorkflowHint.value);
   }
 }
 
 function startSmartClipTaskPolling(taskId: string) {
-  clearSmartClipPollTimer()
+  clearSmartClipPollTimer();
   smartClipPollTimer = window.setInterval(() => {
     void refreshSmartClipRenderTask(taskId).catch((e: unknown) => {
-      subtitleWorkflowHint.value = describeHttpOrNetworkError(e)
-    })
-  }, 2500)
+      subtitleWorkflowHint.value = describeHttpOrNetworkError(e);
+    });
+  }, 2500);
 }
 
 async function onRenderSmartClipFinal() {
-  ensureStreamingScriptComplete()
-  buildSmartClipSubtitles(true)
-  const script = currentWorkflowScript.value
+  ensureStreamingScriptComplete();
+  buildSmartClipSubtitles(true);
+  const setupBlockReason = smartClipRenderBlockReason.value;
+  if (setupBlockReason) {
+    message.warning(setupBlockReason);
+    return;
+  }
+  const script = currentWorkflowScript.value;
   if (!script) {
-    message.warning('请先在第一步整理好口播文案')
-    return
+    message.warning("请先在第一步整理好口播文案");
+    return;
   }
   if (!selectedAvatarId.value) {
-    message.warning('请先选择数字人视频')
-    return
+    message.warning("请先选择数字人视频");
+    return;
   }
   if (!selectedVoiceId.value) {
-    message.warning('请先选择配音音色')
-    return
+    message.warning("请先选择配音音色");
+    return;
   }
   if (!selectedSubtitleTemplateId.value) {
-    message.warning('请先选择字幕模板')
-    return
+    message.warning("请先选择字幕模板");
+    return;
   }
   if (!smartClipSubtitles.value.length) {
-    message.warning('字幕列表为空，请先确认文案')
-    return
+    message.warning("字幕列表为空，请先确认文案");
+    return;
   }
 
   if (smartClipCutBreathEnabled.value && !smartClipCutPoints.value.length) {
-    const detected = await onDetectSmartClipCutPoints({ silent: true })
+    const detected = await onDetectSmartClipCutPoints({ silent: true });
     if (!detected) {
-      message.warning('气口检测暂时不可用，将直接进入成片生成。')
+      message.warning("气口检测暂时不可用，将直接进入成片生成。");
     }
   }
 
-  resetSmartClipResultState()
-  smartClipRendering.value = true
-  subtitleWorkflowHint.value = '正在生成成片，请勿关闭页面'
-  revokeGeneratedPreviewObjectUrls()
+  resetSmartClipResultState();
+  smartClipRendering.value = true;
+  subtitleWorkflowHint.value = "正在生成成片，请勿关闭页面";
+  revokeGeneratedPreviewObjectUrls();
 
   try {
-    const task = await renderSmartClipFinal('studio-current', {
+    const task = await renderSmartClipFinal("studio-current", {
       script,
       avatarResourceId: selectedAvatarId.value,
       voiceResourceId: selectedVoiceId.value,
@@ -1717,52 +2160,53 @@ async function onRenderSmartClipFinal() {
         items: [],
       },
       renderOptions: {
-        resolution: renderResolutionChoice.value === '2k' ? '1440x2560' : '1080x1920',
-        format: 'mp4',
+        resolution:
+          renderResolutionChoice.value === "2k" ? "1440x2560" : "1080x1920",
+        format: "mp4",
         burnSubtitles: smartClipTextSubtitlesEnabled.value,
       },
       ...buildVoiceTuningPayload(),
-    })
-    smartClipRenderTask.value = task
-    startSmartClipTaskPolling(task.taskId)
-    await refreshSmartClipRenderTask(task.taskId)
+    });
+    smartClipRenderTask.value = task;
+    startSmartClipTaskPolling(task.taskId);
+    await refreshSmartClipRenderTask(task.taskId);
   } catch (e: unknown) {
-    smartClipRendering.value = false
-    subtitleWorkflowHint.value = describeHttpOrNetworkError(e)
-    message.error(subtitleWorkflowHint.value)
+    smartClipRendering.value = false;
+    subtitleWorkflowHint.value = describeHttpOrNetworkError(e);
+    message.error(subtitleWorkflowHint.value);
   }
 }
 
 async function onGenerateSubtitlePreview() {
-  await onDetectSmartClipCutPoints()
-  return
-  ensureStreamingScriptComplete()
-  const script = currentWorkflowScript.value
+  await onDetectSmartClipCutPoints();
+  return;
+  ensureStreamingScriptComplete();
+  const script = currentWorkflowScript.value;
   if (!script) {
     message.warning(
       rawWorkflowScript.value
-        ? '当前内容是系统占位提示，请先转写或填写真实口播文案。'
-        : '请先在第一步整理好口播文案',
-    )
-    return
+        ? "当前内容是系统占位提示，请先转写或填写真实口播文案。"
+        : "请先在第一步整理好口播文案",
+    );
+    return;
   }
   if (!selectedAvatarId.value) {
-    message.warning('请先选择一个数字人视频')
-    return
+    message.warning("请先选择一个数字人视频");
+    return;
   }
   if (!selectedVoiceId.value) {
-    message.warning('请先选择一个配音音色')
-    return
+    message.warning("请先选择一个配音音色");
+    return;
   }
 
-  subtitleWorkflowPreviewLoading.value = true
-  subtitleWorkflowHint.value = ''
-  subtitleWorkflowDraftId.value = ''
-  subtitleWorkflowPreviewUrl.value = null
-  subtitleWorkflowFinalUrl.value = null
-  subtitleWorkflowJson.value = null
-  subtitleWorkflowTimelineSource.value = ''
-  revokeGeneratedPreviewObjectUrls()
+  subtitleWorkflowPreviewLoading.value = true;
+  subtitleWorkflowHint.value = "";
+  subtitleWorkflowDraftId.value = "";
+  subtitleWorkflowPreviewUrl.value = null;
+  subtitleWorkflowFinalUrl.value = null;
+  subtitleWorkflowJson.value = null;
+  subtitleWorkflowTimelineSource.value = "";
+  revokeGeneratedPreviewObjectUrls();
 
   try {
     const data = await createSubtitleWorkflowPreview({
@@ -1773,93 +2217,103 @@ async function onGenerateSubtitlePreview() {
       subtitlesEnabled: false,
       previewSeconds: 5,
       ...buildVoiceTuningPayload(),
-    })
-    subtitleWorkflowDraftId.value = data.draftId
-    subtitleWorkflowJson.value = data.subtitleJson
-    subtitleWorkflowTimelineSource.value = data.timelineSource
-    subtitleWorkflowHint.value = data.hint
-    subtitleWorkflowPreviewUrl.value = await resolveGeneratedPreviewVideoUrl(data.previewUrl)
-    message.success('5 秒无字幕预览已经生成，可以先确认后再出最终成片')
+    });
+    subtitleWorkflowDraftId.value = data.draftId;
+    subtitleWorkflowJson.value = data.subtitleJson;
+    subtitleWorkflowTimelineSource.value = data.timelineSource;
+    subtitleWorkflowHint.value = data.hint;
+    subtitleWorkflowPreviewUrl.value = await resolveGeneratedPreviewVideoUrl(
+      data.previewUrl,
+    );
+    message.success("5 秒无字幕预览已经生成，可以先确认后再出最终成片");
   } catch (e: unknown) {
-    subtitleWorkflowHint.value = describeHttpOrNetworkError(e)
-    message.error(subtitleWorkflowHint.value)
+    subtitleWorkflowHint.value = describeHttpOrNetworkError(e);
+    message.error(subtitleWorkflowHint.value);
   } finally {
-    subtitleWorkflowPreviewLoading.value = false
+    subtitleWorkflowPreviewLoading.value = false;
   }
 }
 
 async function onFinalizeSubtitleWorkflow() {
-  await onRenderSmartClipFinal()
-  return
+  await onRenderSmartClipFinal();
+  return;
   if (!subtitleWorkflowDraftId.value) {
-    message.warning('请先生成 5 秒预览，再确认输出最终视频')
-    return
+    message.warning("请先生成 5 秒预览，再确认输出最终视频");
+    return;
   }
 
-  subtitleWorkflowFinalizeLoading.value = true
+  subtitleWorkflowFinalizeLoading.value = true;
   try {
-    const data = await finalizeSubtitleWorkflow({ draftId: subtitleWorkflowDraftId.value })
-    subtitleWorkflowJson.value = data.subtitleJson
-    subtitleWorkflowHint.value = data.hint
-    subtitleWorkflowFinalUrl.value = await resolveGeneratedPreviewVideoUrl(data.videoUrl)
-    message.success(data.fallback ? '已输出可预览成片（当前走了回退链路）' : '最终视频已输出')
+    const data = await finalizeSubtitleWorkflow({
+      draftId: subtitleWorkflowDraftId.value,
+    });
+    subtitleWorkflowJson.value = data.subtitleJson;
+    subtitleWorkflowHint.value = data.hint;
+    subtitleWorkflowFinalUrl.value = await resolveGeneratedPreviewVideoUrl(
+      data.videoUrl,
+    );
+    message.success(
+      data.fallback ? "已输出可预览成片（当前走了回退链路）" : "最终视频已输出",
+    );
   } catch (e: unknown) {
-    subtitleWorkflowHint.value = describeHttpOrNetworkError(e)
-    message.error(subtitleWorkflowHint.value)
+    subtitleWorkflowHint.value = describeHttpOrNetworkError(e);
+    message.error(subtitleWorkflowHint.value);
   } finally {
-    subtitleWorkflowFinalizeLoading.value = false
+    subtitleWorkflowFinalizeLoading.value = false;
   }
 }
 
 watch(
   () => route.query.avatarId,
   (value) => {
-    const next = typeof value === 'string' ? value.trim() : ''
+    const next = typeof value === "string" ? value.trim() : "";
     if (next && avatarOptions.value.some((item) => item.value === next)) {
-      addAvatarToCurrentCreation(next, { silent: true })
-      consumedRouteAvatarId.value = next
-      if (activeStep.value < 2) activeStep.value = 2
+      addAvatarToCurrentCreation(next, { silent: true });
+      consumedRouteAvatarId.value = next;
+      if (activeStep.value < 2) activeStep.value = 2;
     }
   },
-)
+);
 
-watch(selectedAvatarCardItems, (items) => syncAvatarVideoCovers(items), { immediate: true })
+watch(selectedAvatarCardItems, (items) => syncAvatarVideoCovers(items), {
+  immediate: true,
+});
 
 watch(
   () => draft.manualScriptDraft,
   () => syncPublishCopyFromScript(),
-)
+);
 
 watch(
   () => currentWorkflowScript.value,
   () => {
-    buildSmartClipSubtitles(true)
-    resetSmartClipResultState()
+    buildSmartClipSubtitles(true);
+    resetSmartClipResultState();
   },
-)
+);
 
 watch(
   () => activeStep.value,
   (step) => {
     if (step === 3) {
-      syncSmartClipSubtitlesFromFirstStep()
+      syncSmartClipSubtitlesFromFirstStep();
     }
   },
-)
+);
 
 watch(
   () => smartClipCutMode.value,
   () => {
-    smartClipCutPoints.value = []
-    smartClipCutApplied.value = false
+    smartClipCutPoints.value = [];
+    smartClipCutApplied.value = false;
     smartClipCutSummary.value = {
       totalCount: 0,
       totalCutDuration: 0,
       originalDuration: 0,
       estimatedDuration: 0,
-    }
+    };
   },
-)
+);
 
 watch(
   [
@@ -1873,36 +2327,50 @@ watch(
     () => selectedVoiceVolume.value,
   ],
   () => resetVoicePreviewState(),
-)
+);
+
+watch(
+  [() => user.token, () => user.profile?.id, () => user.profile?.email],
+  () => {
+    void loadRecentExtractionRecords();
+  },
+);
 
 onMounted(() => {
-  loadRecentExtractionRecords()
-  clearInternalPipelineScriptDraft()
-  void loadRenderResources()
-  void refreshDyCookieStatus()
-  void refreshPipelineHealth()
-  syncPublishCopyFromScript(true)
-  buildSmartClipSubtitles(true)
-})
+  void loadRecentExtractionRecords();
+  clearInternalPipelineScriptDraft();
+  void loadRenderResources();
+  void refreshDyCookieStatus();
+  void refreshPipelineHealth();
+  syncPublishCopyFromScript(true);
+  buildSmartClipSubtitles(true);
+});
 
 onUnmounted(() => {
-  clearSmartClipPollTimer()
-  clearVoicePreviewProgress()
-  cancelStream()
-  revokeGeneratedPreviewObjectUrls()
-  clearAvatarCoverVideoUrls()
-})
+  clearSmartClipPollTimer();
+  clearVoicePreviewProgress();
+  clearVoicePreviewPolling();
+  voicePreviewRequestSeq += 1;
+  cancelStream();
+  revokeGeneratedPreviewObjectUrls();
+  clearAvatarCoverVideoUrls();
+});
 </script>
 
 <template>
   <main class="video-create">
     <header class="create-topbar">
-      <RouterLink :to="{ name: 'landing' }" class="back-link">‹ 返回首页</RouterLink>
+      <RouterLink :to="{ name: 'landing' }" class="back-link"
+        >‹ 返回首页</RouterLink
+      >
       <ol class="stepper" aria-label="视频创作步骤">
         <li
           v-for="step in steps"
           :key="step.no"
-          :class="['stepper__item', { 'stepper__item--active': step.no === activeStep }]"
+          :class="[
+            'stepper__item',
+            { 'stepper__item--active': step.no === activeStep },
+          ]"
           @click="jumpToStep(step.no)"
         >
           <span>{{ step.no }}</span>
@@ -1925,7 +2393,9 @@ onUnmounted(() => {
                 <button
                   type="button"
                   class="source-switch__item"
-                  :class="{ 'source-switch__item--active': sourceMode === 'homepage' }"
+                  :class="{
+                    'source-switch__item--active': sourceMode === 'homepage',
+                  }"
                   @click="sourceMode = 'homepage'"
                 >
                   <span class="source-switch__icon">主</span>
@@ -1934,7 +2404,9 @@ onUnmounted(() => {
                 <button
                   type="button"
                   class="source-switch__item"
-                  :class="{ 'source-switch__item--active': sourceMode === 'hotlink' }"
+                  :class="{
+                    'source-switch__item--active': sourceMode === 'hotlink',
+                  }"
                   @click="sourceMode = 'hotlink'"
                 >
                   <span class="source-switch__icon">链</span>
@@ -1991,7 +2463,10 @@ onUnmounted(() => {
                   {{ benchmarkLearningHint }}
                 </n-alert>
 
-                <div v-if="hasLearnedBenchmark && benchmarkProfile" class="benchmark-result">
+                <div
+                  v-if="hasLearnedBenchmark && benchmarkProfile"
+                  class="benchmark-result"
+                >
                   <div class="benchmark-result__label">
                     <span class="benchmark-result__dot"></span>
                     <strong>已学习的对标对象 (1)</strong>
@@ -2004,19 +2479,39 @@ onUnmounted(() => {
                       :alt="benchmarkProfile.nickname"
                       class="benchmark-card__avatar"
                     />
-                    <div v-else class="benchmark-card__avatar benchmark-card__avatar--fallback">
+                    <div
+                      v-else
+                      class="benchmark-card__avatar benchmark-card__avatar--fallback"
+                    >
                       {{ benchmarkProfile.nickname.slice(0, 1) }}
                     </div>
 
                     <div class="benchmark-card__body">
                       <div class="benchmark-card__title">
-                        <n-tag size="small" :bordered="false" type="primary">抖音</n-tag>
+                        <n-tag size="small" :bordered="false" type="primary"
+                          >抖音</n-tag
+                        >
                         <strong>{{ benchmarkProfile.nickname }}</strong>
                       </div>
                       <div class="benchmark-card__stats">
-                        <span>{{ formatStatCount(benchmarkProfile.awemeCount) }} 作品</span>
-                        <span>{{ formatStatCount(benchmarkProfile.followerCount) }} 粉丝</span>
-                        <span>{{ formatStatCount(benchmarkProfile.totalFavorited) }} 获赞</span>
+                        <span
+                          >{{
+                            formatStatCount(benchmarkProfile.awemeCount)
+                          }}
+                          作品</span
+                        >
+                        <span
+                          >{{
+                            formatStatCount(benchmarkProfile.followerCount)
+                          }}
+                          粉丝</span
+                        >
+                        <span
+                          >{{
+                            formatStatCount(benchmarkProfile.totalFavorited)
+                          }}
+                          获赞</span
+                        >
                       </div>
                       <p>{{ benchmarkProfile.signature }}</p>
                     </div>
@@ -2024,15 +2519,24 @@ onUnmounted(() => {
                     <div class="benchmark-card__check">✓</div>
                   </button>
 
-                  <div v-if="benchmarkSamples.length" class="benchmark-post-grid">
+                  <div
+                    v-if="benchmarkSamples.length"
+                    class="benchmark-post-grid"
+                  >
                     <article
                       v-for="sample in benchmarkSamples.slice(0, 3)"
                       :key="sample.awemeId"
                       class="benchmark-post"
                     >
                       <div class="benchmark-post__meta">
-                        <strong>{{ sample.diggCount > 0 ? `${formatStatCount(sample.diggCount)} 点赞` : '近期作品' }}</strong>
-                        <span>{{ formatBenchmarkSampleDate(sample.createdAt) }}</span>
+                        <strong>{{
+                          sample.diggCount > 0
+                            ? `${formatStatCount(sample.diggCount)} 点赞`
+                            : "近期作品"
+                        }}</strong>
+                        <span>{{
+                          formatBenchmarkSampleDate(sample.createdAt)
+                        }}</span>
                       </div>
                       <p>{{ sample.title }}</p>
                     </article>
@@ -2065,12 +2569,21 @@ onUnmounted(() => {
               <div v-else class="hotlink-pane">
                 <div class="panel-head panel-head--subtle">
                   <span>爆款链接输入</span>
-                  <n-tag size="small" :bordered="false" type="info">保留原链路</n-tag>
+                  <n-tag size="small" :bordered="false" type="info"
+                    >保留原链路</n-tag
+                  >
                 </div>
 
-                <VideoLinkInput v-model="draft.videoUrl" :invalid="urlInvalid" />
+                <VideoLinkInput
+                  v-model="draft.videoUrl"
+                  :invalid="urlInvalid"
+                />
 
-                <n-space align="center" :size="12" style="flex-wrap: wrap; margin-top: 14px">
+                <n-space
+                  align="center"
+                  :size="12"
+                  style="flex-wrap: wrap; margin-top: 14px"
+                >
                   <n-button
                     :disabled="!linkReady"
                     :loading="loadingMeta || douyinPipeline"
@@ -2105,11 +2618,18 @@ onUnmounted(() => {
                       <strong>点击左侧视频预览复制链接</strong>
                     </div>
                     <n-tag size="small" :bordered="false" type="info">
-                      {{ recentExtractionRecords.length ? `${recentExtractionRecords.length} 条` : '暂无记录' }}
+                      {{
+                        recentExtractionRecords.length
+                          ? `${recentExtractionRecords.length} 条`
+                          : "暂无记录"
+                      }}
                     </n-tag>
                   </div>
 
-                  <div v-if="recentExtractionRecords.length" class="recent-extract__list">
+                  <div
+                    v-if="recentExtractionRecords.length"
+                    class="recent-extract__list"
+                  >
                     <article
                       v-for="record in recentExtractionRecords"
                       :key="record.id"
@@ -2135,19 +2655,28 @@ onUnmounted(() => {
                           :alt="record.title"
                           loading="lazy"
                         />
-                        <span v-else class="recent-extract-card__fallback">视频</span>
+                        <span v-else class="recent-extract-card__fallback"
+                          >视频</span
+                        >
                         <i>复制</i>
                       </button>
 
                       <div class="recent-extract-card__body">
                         <div class="recent-extract-card__title">
-                          <n-tag size="small" round :bordered="false" type="default">
+                          <n-tag
+                            size="small"
+                            round
+                            :bordered="false"
+                            type="default"
+                          >
                             {{ record.platform }}
                           </n-tag>
                           <strong>{{ record.title }}</strong>
                         </div>
                         <p>{{ record.summary }}</p>
-                        <small>{{ formatRecentExtractionTime(record.extractedAt) }}</small>
+                        <small>{{
+                          formatRecentExtractionTime(record.extractedAt)
+                        }}</small>
                       </div>
                     </article>
                   </div>
@@ -2157,7 +2686,11 @@ onUnmounted(() => {
                   </div>
                 </section>
 
-                <n-text v-if="pipelineHealthError" depth="3" class="helper-text">
+                <n-text
+                  v-if="pipelineHealthError"
+                  depth="3"
+                  class="helper-text"
+                >
                   {{ pipelineHealthError }}
                 </n-text>
 
@@ -2190,7 +2723,9 @@ onUnmounted(() => {
                     indicator-placement="inside"
                     style="margin-top: 18px"
                   />
-                  <n-text depth="3" class="helper-text">{{ pipelineStatusLabel }}</n-text>
+                  <n-text depth="3" class="helper-text">{{
+                    pipelineStatusLabel
+                  }}</n-text>
                 </template>
 
                 <template v-if="draft.videoMeta">
@@ -2200,7 +2735,10 @@ onUnmounted(() => {
                     :show-icon="false"
                     style="margin-top: 18px"
                   >
-                    <div v-for="(warning, index) in draft.videoMeta.warnings" :key="index">
+                    <div
+                      v-for="(warning, index) in draft.videoMeta.warnings"
+                      :key="index"
+                    >
                       {{ warning }}
                     </div>
                   </n-alert>
@@ -2211,36 +2749,53 @@ onUnmounted(() => {
                         <span class="meta-board__eyebrow">获取信息</span>
                         <strong>视频基础内容</strong>
                       </div>
-                      <n-tag size="small" round :bordered="false" type="success">已解析</n-tag>
+                      <n-tag size="small" round :bordered="false" type="success"
+                        >已解析</n-tag
+                      >
                     </div>
 
                     <div class="meta-board__summary">
                       <div class="meta-chip meta-chip--title">
                         <span>标题</span>
-                        <strong>{{ draft.videoMeta.title || '暂无标题' }}</strong>
+                        <strong>{{
+                          draft.videoMeta.title || "暂无标题"
+                        }}</strong>
                       </div>
                       <div class="meta-chip">
                         <span>点赞</span>
-                        <strong>{{ formatStatCount(draft.videoMeta.likeCount) }}</strong>
+                        <strong>{{
+                          formatStatCount(draft.videoMeta.likeCount)
+                        }}</strong>
                       </div>
                     </div>
 
                     <div class="meta-section">
                       <span>内容</span>
-                      <p>{{ draft.videoMeta.content || draft.videoMeta.description || '暂无可解析内容' }}</p>
+                      <p>
+                        {{
+                          draft.videoMeta.content ||
+                          draft.videoMeta.description ||
+                          "暂无可解析内容"
+                        }}
+                      </p>
                     </div>
 
                     <div class="meta-section meta-section--tags">
                       <span>标签</span>
-                      <div v-if="draft.videoMeta.tags?.length" class="meta-tag-list">
+                      <div
+                        v-if="draft.videoMeta.tags?.length"
+                        class="meta-tag-list"
+                      >
                         <n-tag
-                          v-for="(tag, index) in (draft.videoMeta.tags ?? []).slice(0, 8)"
+                          v-for="(tag, index) in (
+                            draft.videoMeta.tags ?? []
+                          ).slice(0, 8)"
                           :key="`${tag}-${index}`"
                           size="small"
                           round
                           :bordered="false"
                         >
-                          #{{ tag.replace(/^#/, '') }}
+                          #{{ tag.replace(/^#/, "") }}
                         </n-tag>
                       </div>
                       <p v-else class="meta-empty">暂无标签</p>
@@ -2256,7 +2811,9 @@ onUnmounted(() => {
                   <span class="script-extract-title__icon">▤</span>
                   <strong>提取的文案</strong>
                 </div>
-                <span class="script-extract-count">字数: {{ draft.manualScriptDraft.length }}</span>
+                <span class="script-extract-count"
+                  >字数: {{ draft.manualScriptDraft.length }}</span
+                >
               </div>
 
               <div class="script-extract-tip">
@@ -2300,7 +2857,11 @@ onUnmounted(() => {
               </div>
 
               <div class="script-extract-actions">
-                <n-button class="script-extract-action script-extract-action--primary" type="primary" @click="onUseScriptAndNext">
+                <n-button
+                  class="script-extract-action script-extract-action--primary"
+                  type="primary"
+                  @click="onUseScriptAndNext"
+                >
                   <span class="script-extract-action__icon">▦</span>
                   <span>
                     <strong>一键成片</strong>
@@ -2333,13 +2894,20 @@ onUnmounted(() => {
             </div>
             <n-space size="small">
               <n-tag size="small" :bordered="false" type="info">
-                {{ extractedScriptLines.length ? `${extractedScriptLines.length} 段` : '等待转写' }}
+                {{
+                  extractedScriptLines.length
+                    ? `${extractedScriptLines.length} 段`
+                    : "等待转写"
+                }}
               </n-tag>
             </n-space>
           </div>
 
           <ol v-if="extractedScriptLines.length" class="script-list">
-            <li v-for="(line, idx) in extractedScriptLines" :key="`${idx}-${line}`">
+            <li
+              v-for="(line, idx) in extractedScriptLines"
+              :key="`${idx}-${line}`"
+            >
               <span>{{ idx + 1 }}</span>
               <p>{{ line }}</p>
             </li>
@@ -2352,8 +2920,14 @@ onUnmounted(() => {
             <div class="hook-side-card__head">
               <strong>口播优化结果</strong>
               <n-space size="small">
-                <n-tag size="small" :bordered="false" type="success">已生成</n-tag>
-                <n-tag size="small" :bordered="false" :type="oralScriptPolish.llmUsed ? 'info' : 'warning'">
+                <n-tag size="small" :bordered="false" type="success"
+                  >已生成</n-tag
+                >
+                <n-tag
+                  size="small"
+                  :bordered="false"
+                  :type="oralScriptPolish.llmUsed ? 'info' : 'warning'"
+                >
                   {{ oralScriptPolish.strategyLabel }}
                 </n-tag>
               </n-space>
@@ -2370,7 +2944,11 @@ onUnmounted(() => {
         </aside>
       </section>
 
-      <section v-else-if="activeStep === 2" key="step-2" class="step-two-layout">
+      <section
+        v-else-if="activeStep === 2"
+        key="step-2"
+        class="step-two-layout"
+      >
         <div class="step-two-head">
           <h1>第二步：数字人对口型</h1>
           <p>把文案、克隆声音、数字人视频放在同一屏确认，先试听再进入成片。</p>
@@ -2387,7 +2965,11 @@ onUnmounted(() => {
                 </div>
               </div>
               <n-tag size="small" :bordered="false" type="info">
-                {{ extractedScriptLines.length ? `${extractedScriptLines.length} 段` : '等待文案' }}
+                {{
+                  extractedScriptLines.length
+                    ? `${extractedScriptLines.length} 段`
+                    : "等待文案"
+                }}
               </n-tag>
             </div>
 
@@ -2396,24 +2978,30 @@ onUnmounted(() => {
               <strong>{{ currentWorkflowScript.length }} / 50000</strong>
             </div>
 
-            <div v-if="extractedScriptLines.length" class="step-two-script-frame">
+            <div
+              v-if="extractedScriptLines.length"
+              class="step-two-script-frame"
+            >
               <div class="step-two-script-scroll">
                 <ol class="step-two-script-list">
-                <li
-                  v-for="(line, idx) in extractedScriptLines"
-                  :key="`${idx}-${line}`"
-                  class="step-two-script-line"
-                >
-                  <span>{{ String(idx + 1).padStart(2, '0') }}</span>
-                  <p>{{ line }}</p>
-                </li>
+                  <li
+                    v-for="(line, idx) in extractedScriptLines"
+                    :key="`${idx}-${line}`"
+                    class="step-two-script-line"
+                  >
+                    <span>{{ String(idx + 1).padStart(2, "0") }}</span>
+                    <p>{{ line }}</p>
+                  </li>
                 </ol>
               </div>
             </div>
-            <div v-else class="step-two-script-frame step-two-script-frame--empty">
+            <div
+              v-else
+              class="step-two-script-frame step-two-script-frame--empty"
+            >
               <div class="empty-block empty-block--embedded">
-              <strong>还没有可承接的文案</strong>
-              <p>先回到第一步抓取或整理一份口播文案。</p>
+                <strong>还没有可承接的文案</strong>
+                <p>先回到第一步抓取或整理一份口播文案。</p>
               </div>
             </div>
 
@@ -2430,24 +3018,42 @@ onUnmounted(() => {
 
             <div class="step-two-footnote">
               <span>当前文案会直接用于生成音轨和对口型，暂不叠加字幕。</span>
-              <n-button class="step-two-footnote__action" text type="primary" @click="jumpToStep(1)">返回第一步修改</n-button>
+              <n-button
+                class="step-two-footnote__action"
+                text
+                type="primary"
+                @click="jumpToStep(1)"
+                >返回第一步修改</n-button
+              >
             </div>
           </section>
 
           <section class="panel step-two-voice-panel">
             <div class="step-two-block-head">
               <div class="step-two-block-head__main">
-                <span class="step-two-block-icon step-two-block-icon--voice">声</span>
+                <span class="step-two-block-icon step-two-block-icon--voice"
+                  >声</span
+                >
                 <div>
                   <strong>配音设置</strong>
                   <p>选择声音来源</p>
                 </div>
               </div>
               <n-space size="small">
-                <n-button secondary type="primary" size="small" @click="cloneVoiceOpen = true">
+                <n-button
+                  secondary
+                  type="primary"
+                  size="small"
+                  @click="cloneVoiceOpen = true"
+                >
                   + 声音克隆
                 </n-button>
-                <n-button quaternary type="primary" size="small" @click="goToResourceLibrary('voices')">
+                <n-button
+                  quaternary
+                  type="primary"
+                  size="small"
+                  @click="goToResourceLibrary('voices')"
+                >
                   音色库
                 </n-button>
               </n-space>
@@ -2457,7 +3063,10 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="voice-source-switch__item"
-                :class="{ 'voice-source-switch__item--active': voiceSourceMode === 'tts' }"
+                :class="{
+                  'voice-source-switch__item--active':
+                    voiceSourceMode === 'tts',
+                }"
                 @click="voiceSourceMode = 'tts'"
               >
                 文本转语音
@@ -2465,7 +3074,10 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="voice-source-switch__item"
-                :class="{ 'voice-source-switch__item--active': voiceSourceMode === 'local' }"
+                :class="{
+                  'voice-source-switch__item--active':
+                    voiceSourceMode === 'local',
+                }"
                 @click="voiceSourceMode = 'local'"
               >
                 本地语音
@@ -2475,172 +3087,216 @@ onUnmounted(() => {
             <template v-if="voiceSourceMode === 'tts'">
               <div ref="voiceShellRef" class="step-two-voice-shell">
                 <div class="step-two-control-grid">
-                <article class="step-two-control-card">
-                  <span>选择音色</span>
-                  <div class="step-two-control-card__main">
+                  <article class="step-two-control-card">
+                    <span>选择音色</span>
+                    <div class="step-two-control-card__main">
+                      <button
+                        v-if="selectedVoiceResource?.audioUrl"
+                        type="button"
+                        class="voice-sample-play"
+                        @click="
+                          toggleAudioPlayback(
+                            `voice-sample:${selectedVoiceResource?.id ?? ''}`,
+                            resolveProtectedMediaUrl(
+                              selectedVoiceResource?.audioUrl ?? '',
+                            ),
+                          )
+                        "
+                      >
+                        {{
+                          audioPlayingId ===
+                          `voice-sample:${selectedVoiceResource?.id ?? ""}`
+                            ? "停"
+                            : "播"
+                        }}
+                      </button>
+                      <n-select
+                        v-model:value="selectedVoiceId"
+                        :options="voiceOptions"
+                        :loading="renderResourceLoading"
+                        placeholder="选择一个克隆音色"
+                      />
+                    </div>
+                    <small>{{
+                      selectedVoiceResource?.owner === "mine"
+                        ? "我的克隆音色"
+                        : "推荐音色"
+                    }}</small>
+                  </article>
+
+                  <article class="step-two-control-card">
+                    <span>选择语言</span>
+                    <div class="step-two-control-card__main">
+                      <n-select
+                        v-model:value="selectedVoiceLanguage"
+                        :options="voiceLanguageOptions"
+                        placeholder="选择语言"
+                      />
+                    </div>
+                    <small>当前只影响配音配置，不会改动原文案。</small>
+                  </article>
+
+                  <article class="step-two-control-card">
+                    <span>情绪</span>
+                    <div class="step-two-control-card__main">
+                      <n-select
+                        v-model:value="selectedVoiceEmotion"
+                        :options="voiceEmotionOptions"
+                        placeholder="选择情绪"
+                      />
+                    </div>
+                    <small>建议和数字人口型风格保持一致。</small>
+                  </article>
+
+                  <article class="step-two-control-card">
+                    <span>强度</span>
+                    <div class="voice-power-stepper">
+                      <button type="button" @click="nudgeVoicePower(-0.03)">
+                        -
+                      </button>
+                      <strong>{{ selectedVoicePower.toFixed(2) }}</strong>
+                      <button type="button" @click="nudgeVoicePower(0.03)">
+                        +
+                      </button>
+                    </div>
+                    <small>更高的强度会让播报更有存在感。</small>
+                  </article>
+                </div>
+
+                <div class="step-two-slider-grid">
+                  <article class="step-two-slider-card">
+                    <div class="step-two-slider-card__head">
+                      <span>语速调节</span>
+                      <strong>{{ selectedVoiceRate.toFixed(2) }}</strong>
+                    </div>
+                    <n-slider
+                      v-model:value="selectedVoiceRate"
+                      :min="0.5"
+                      :max="1.5"
+                      :step="0.01"
+                    />
+                  </article>
+                  <article class="step-two-slider-card">
+                    <div class="step-two-slider-card__head">
+                      <span>音量调节</span>
+                      <strong>{{ selectedVoiceVolume.toFixed(2) }}</strong>
+                    </div>
+                    <n-slider
+                      v-model:value="selectedVoiceVolume"
+                      :min="0.6"
+                      :max="1.4"
+                      :step="0.01"
+                    />
+                  </article>
+                </div>
+
+                <n-alert
+                  v-if="!hasVoiceOptions"
+                  class="step-two-inline-alert"
+                  type="warning"
+                  :show-icon="false"
+                >
+                  还没有可用的克隆音色，先上传一段样本音频，我会自动刷新当前列表。
+                </n-alert>
+
+                <n-alert
+                  v-else-if="voicePreviewBlockReason"
+                  class="step-two-inline-alert"
+                  type="warning"
+                  :show-icon="false"
+                >
+                  {{ voicePreviewBlockReason }}
+                </n-alert>
+
+                <button
+                  type="button"
+                  class="step-two-primary-btn"
+                  :disabled="
+                    Boolean(voicePreviewBlockReason) || voicePreviewLoading
+                  "
+                  :title="voicePreviewBlockReason || undefined"
+                  @click="onGenerateVoicePreview"
+                >
+                  {{ voicePreviewLoading ? "正在生成音频..." : "生成音频" }}
+                </button>
+
+                <Transition name="voice-progress">
+                  <article
+                    v-if="voicePreviewLoading || voicePreviewProgress > 0"
+                    class="voice-generate-progress"
+                    :class="{
+                      'voice-generate-progress--done':
+                        voicePreviewProgress >= 100,
+                    }"
+                  >
+                    <div class="voice-generate-progress__head">
+                      <span>生成进度</span>
+                      <strong>{{ Math.round(voicePreviewProgress) }}%</strong>
+                    </div>
+                    <div class="voice-generate-progress__bar">
+                      <i :style="{ width: `${voicePreviewProgress}%` }"></i>
+                    </div>
+                    <p>{{ voicePreviewProgressLabel }}</p>
+                  </article>
+                </Transition>
+
+                <article
+                  v-if="hasVoicePreviewOutput"
+                  class="voice-preview-card"
+                  :class="{
+                    'voice-preview-card--ready':
+                      voicePreviewTaskStatus === 'ready',
+                  }"
+                >
+                  <div class="voice-preview-card__head">
+                    <div>
+                      <strong>{{ voicePreviewStateTitle }}</strong>
+                      <p>{{ voicePreviewStateHint }}</p>
+                    </div>
+                    <n-tag
+                      v-if="voicePreviewMode"
+                      size="small"
+                      :bordered="false"
+                      :type="
+                        voicePreviewMode === 'provider' ? 'success' : 'warning'
+                      "
+                    >
+                      {{ voicePreviewMode === "provider" ? "RESULT" : "MOCK" }}
+                    </n-tag>
+                  </div>
+
+                  <div class="voice-preview-card__player">
                     <button
-                      v-if="selectedVoiceResource?.audioUrl"
                       type="button"
-                      class="voice-sample-play"
+                      class="voice-preview-card__play"
+                      :disabled="!voicePreviewUrl"
                       @click="
+                        voicePreviewUrl &&
                         toggleAudioPlayback(
-                          `voice-sample:${selectedVoiceResource?.id ?? ''}`,
-                          resolveProtectedMediaUrl(selectedVoiceResource?.audioUrl ?? ''),
+                          'voice-preview',
+                          resolveProtectedMediaUrl(voicePreviewUrl),
                         )
                       "
                     >
-                      {{ audioPlayingId === `voice-sample:${selectedVoiceResource?.id ?? ''}` ? '停' : '播' }}
+                      {{ audioPlayingId === "voice-preview" ? "暂停" : "试听" }}
                     </button>
-                    <n-select
-                      v-model:value="selectedVoiceId"
-                      :options="voiceOptions"
-                      :loading="renderResourceLoading"
-                      placeholder="选择一个克隆音色"
-                    />
+                    <div>
+                      <strong>{{ selectedVoiceLabel }}</strong>
+                      <p>
+                        {{ formatSecondsClock(voicePreviewDurationSeconds) }}
+                      </p>
+                    </div>
+                    <n-button
+                      quaternary
+                      size="small"
+                      type="primary"
+                      :disabled="!voicePreviewUrl"
+                      @click="onDownloadVoicePreview"
+                    >
+                      下载
+                    </n-button>
                   </div>
-                  <small>{{ selectedVoiceResource?.owner === 'mine' ? '我的克隆音色' : '推荐音色' }}</small>
                 </article>
-
-                <article class="step-two-control-card">
-                  <span>选择语言</span>
-                  <div class="step-two-control-card__main">
-                    <n-select
-                      v-model:value="selectedVoiceLanguage"
-                      :options="voiceLanguageOptions"
-                      placeholder="选择语言"
-                    />
-                  </div>
-                  <small>当前只影响配音配置，不会改动原文案。</small>
-                </article>
-
-                <article class="step-two-control-card">
-                  <span>情绪</span>
-                  <div class="step-two-control-card__main">
-                    <n-select
-                      v-model:value="selectedVoiceEmotion"
-                      :options="voiceEmotionOptions"
-                      placeholder="选择情绪"
-                    />
-                  </div>
-                  <small>建议和数字人口型风格保持一致。</small>
-                </article>
-
-                <article class="step-two-control-card">
-                  <span>强度</span>
-                  <div class="voice-power-stepper">
-                    <button type="button" @click="nudgeVoicePower(-0.03)">-</button>
-                    <strong>{{ selectedVoicePower.toFixed(2) }}</strong>
-                    <button type="button" @click="nudgeVoicePower(0.03)">+</button>
-                  </div>
-                  <small>更高的强度会让播报更有存在感。</small>
-                </article>
-              </div>
-
-              <div class="step-two-slider-grid">
-                <article class="step-two-slider-card">
-                  <div class="step-two-slider-card__head">
-                    <span>语速调节</span>
-                    <strong>{{ selectedVoiceRate.toFixed(2) }}</strong>
-                  </div>
-                  <n-slider v-model:value="selectedVoiceRate" :min="0.8" :max="1.4" :step="0.01" />
-                </article>
-                <article class="step-two-slider-card">
-                  <div class="step-two-slider-card__head">
-                    <span>音量调节</span>
-                    <strong>{{ selectedVoiceVolume.toFixed(2) }}</strong>
-                  </div>
-                  <n-slider v-model:value="selectedVoiceVolume" :min="0.6" :max="1.4" :step="0.01" />
-                </article>
-              </div>
-
-              <n-alert
-                v-if="!hasVoiceOptions"
-                class="step-two-inline-alert"
-                type="warning"
-                :show-icon="false"
-              >
-                还没有可用的克隆音色，先上传一段样本音频，我会自动刷新当前列表。
-              </n-alert>
-
-              <n-alert
-                v-else-if="selectedVoiceResource?.cloneStatus !== 'ready'"
-                class="step-two-inline-alert"
-                type="info"
-                :show-icon="false"
-              >
-                当前音色还在处理中，准备好之后就能直接试听和生成。
-              </n-alert>
-
-              <button
-                type="button"
-                class="step-two-primary-btn"
-                :disabled="!voiceReadyForPreview || voicePreviewLoading"
-                @click="onGenerateVoicePreview"
-              >
-                {{ voicePreviewLoading ? '正在生成音频...' : '生成音频' }}
-              </button>
-
-              <Transition name="voice-progress">
-                <article
-                  v-if="voicePreviewLoading || voicePreviewProgress > 0"
-                  class="voice-generate-progress"
-                  :class="{ 'voice-generate-progress--done': voicePreviewProgress >= 100 }"
-                >
-                  <div class="voice-generate-progress__head">
-                    <span>生成进度</span>
-                    <strong>{{ Math.round(voicePreviewProgress) }}%</strong>
-                  </div>
-                  <div class="voice-generate-progress__bar">
-                    <i :style="{ width: `${voicePreviewProgress}%` }"></i>
-                  </div>
-                  <p>{{ voicePreviewProgressLabel }}</p>
-                </article>
-              </Transition>
-
-              <article
-                v-if="voicePreviewUrl"
-                class="voice-preview-card"
-                :class="{ 'voice-preview-card--ready': Boolean(voicePreviewUrl) }"
-              >
-                <div class="voice-preview-card__head">
-                  <div>
-                    <strong>试听音频已生成</strong>
-                    <p>
-                      {{
-                        voicePreviewHint ||
-                        (voicePreviewMode === 'mock'
-                          ? '当前返回的是联调用预览音频。'
-                          : '可以先试听这段配音，确认声音后再进入对口型。')
-                      }}
-                    </p>
-                  </div>
-                  <n-tag
-                    v-if="voicePreviewMode"
-                    size="small"
-                    :bordered="false"
-                    :type="voicePreviewMode === 'provider' ? 'success' : 'warning'"
-                  >
-                    {{ voicePreviewMode === 'provider' ? 'RESULT' : 'MOCK' }}
-                  </n-tag>
-                </div>
-
-                <div class="voice-preview-card__player">
-                  <button
-                    type="button"
-                    class="voice-preview-card__play"
-                    @click="toggleAudioPlayback('voice-preview', resolveProtectedMediaUrl(voicePreviewUrl))"
-                  >
-                    {{ audioPlayingId === 'voice-preview' ? '暂停' : '试听' }}
-                  </button>
-                  <div>
-                    <strong>{{ selectedVoiceLabel }}</strong>
-                    <p>{{ formatSecondsClock(voicePreviewDurationSeconds) }}</p>
-                  </div>
-                  <n-button quaternary size="small" type="primary" @click="onDownloadVoicePreview">
-                    下载
-                  </n-button>
-                </div>
-              </article>
               </div>
             </template>
 
@@ -2664,7 +3320,9 @@ onUnmounted(() => {
               </div>
               <div class="step-two-footnote">
                 <span>如果样本还没上传，可以直接从这里继续补充。</span>
-                <n-button text type="primary" @click="cloneVoiceOpen = true">添加克隆样本</n-button>
+                <n-button text type="primary" @click="cloneVoiceOpen = true"
+                  >添加克隆样本</n-button
+                >
               </div>
             </div>
           </section>
@@ -2672,24 +3330,43 @@ onUnmounted(() => {
           <section class="panel step-two-avatar-panel">
             <div class="step-two-block-head">
               <div class="step-two-block-head__main">
-                <span class="step-two-block-icon step-two-block-icon--avatar">人</span>
+                <span class="step-two-block-icon step-two-block-icon--avatar"
+                  >人</span
+                >
                 <div>
                   <strong>选数字人</strong>
                   <p>最多选 7 位</p>
                 </div>
               </div>
               <n-space size="small">
-                <n-button secondary type="primary" size="small" @click="createAvatarOpen = true">
+                <n-button
+                  secondary
+                  type="primary"
+                  size="small"
+                  @click="createAvatarOpen = true"
+                >
                   + 新建数字人
                 </n-button>
-                <n-button quaternary type="primary" size="small" @click="onProceedFromStepTwo">
+                <n-button
+                  quaternary
+                  type="primary"
+                  size="small"
+                  @click="onProceedFromStepTwo"
+                >
                   口型绑定
                 </n-button>
               </n-space>
             </div>
 
-            <div v-if="hasSelectedAvatarCards" class="avatar-strip avatar-strip--filled">
-              <button type="button" class="avatar-add-card avatar-add-card--compact" @click="createAvatarOpen = true">
+            <div
+              v-if="hasSelectedAvatarCards"
+              class="avatar-strip avatar-strip--filled"
+            >
+              <button
+                type="button"
+                class="avatar-add-card avatar-add-card--compact"
+                @click="createAvatarOpen = true"
+              >
                 <strong>+</strong>
                 <span>添加</span>
               </button>
@@ -2698,7 +3375,9 @@ onUnmounted(() => {
                 v-for="item in selectedAvatarCardItems"
                 :key="item.id"
                 class="avatar-select-card"
-                :class="{ 'avatar-select-card--active': selectedAvatarId === item.id }"
+                :class="{
+                  'avatar-select-card--active': selectedAvatarId === item.id,
+                }"
                 role="button"
                 tabindex="0"
                 :aria-pressed="selectedAvatarId === item.id"
@@ -2728,12 +3407,20 @@ onUnmounted(() => {
                   playsinline
                   preload="metadata"
                 />
-                <div v-else class="avatar-select-card__placeholder">{{ item.name.slice(0, 1) }}</div>
-                <strong class="avatar-select-card__name">{{ item.name }}</strong>
+                <div v-else class="avatar-select-card__placeholder">
+                  {{ item.name.slice(0, 1) }}
+                </div>
+                <strong class="avatar-select-card__name">{{
+                  item.name
+                }}</strong>
               </div>
             </div>
             <div v-else class="avatar-empty-state">
-              <button type="button" class="avatar-add-card avatar-add-card--empty" @click="createAvatarOpen = true">
+              <button
+                type="button"
+                class="avatar-add-card avatar-add-card--empty"
+                @click="createAvatarOpen = true"
+              >
                 <strong>+</strong>
                 <span>添加</span>
               </button>
@@ -2765,7 +3452,10 @@ onUnmounted(() => {
                 <button
                   type="button"
                   class="lip-sync-setup-card__tab"
-                  :class="{ 'lip-sync-setup-card__tab--active': renderModelChoice === 'new' }"
+                  :class="{
+                    'lip-sync-setup-card__tab--active':
+                      renderModelChoice === 'new',
+                  }"
                   @click="renderModelChoice = 'new'"
                 >
                   <strong>新锐模型</strong>
@@ -2774,7 +3464,10 @@ onUnmounted(() => {
                 <button
                   type="button"
                   class="lip-sync-setup-card__tab"
-                  :class="{ 'lip-sync-setup-card__tab--active': renderModelChoice === 'classic' }"
+                  :class="{
+                    'lip-sync-setup-card__tab--active':
+                      renderModelChoice === 'classic',
+                  }"
                   @click="renderModelChoice = 'classic'"
                 >
                   <strong>经典模型</strong>
@@ -2788,7 +3481,10 @@ onUnmounted(() => {
                   <button
                     type="button"
                     class="resolution-chip"
-                    :class="{ 'resolution-chip--active': renderResolutionChoice === '1080p' }"
+                    :class="{
+                      'resolution-chip--active':
+                        renderResolutionChoice === '1080p',
+                    }"
                     @click="renderResolutionChoice = '1080p'"
                   >
                     1080P 极速·推荐
@@ -2796,7 +3492,10 @@ onUnmounted(() => {
                   <button
                     type="button"
                     class="resolution-chip"
-                    :class="{ 'resolution-chip--active': renderResolutionChoice === '2k' }"
+                    :class="{
+                      'resolution-chip--active':
+                        renderResolutionChoice === '2k',
+                    }"
                     @click="renderResolutionChoice = '2k'"
                   >
                     2k 超清
@@ -2815,16 +3514,30 @@ onUnmounted(() => {
                 </div>
               </div>
 
+              <n-alert
+                v-if="stepTwoGenerateBlockReason"
+                class="step-two-inline-alert"
+                type="warning"
+                :show-icon="false"
+              >
+                {{ stepTwoGenerateBlockReason }}
+              </n-alert>
+
               <button
                 type="button"
                 class="step-two-primary-btn step-two-primary-btn--video"
-                :disabled="!selectedAvatarId || !selectedVoiceId"
+                :disabled="Boolean(stepTwoGenerateBlockReason)"
+                :title="stepTwoGenerateBlockReason || undefined"
                 @click="onProceedFromStepTwo"
               >
                 立即生成口播视频
               </button>
 
-              <button type="button" class="step-two-ghost-btn" @click="jumpToStep(3)">
+              <button
+                type="button"
+                class="step-two-ghost-btn"
+                @click="jumpToStep(3)"
+              >
                 查看结果
               </button>
             </article>
@@ -2851,14 +3564,23 @@ onUnmounted(() => {
         :text-subtitles-enabled="smartClipTextSubtitlesEnabled"
         :rendering="smartClipRendering"
         :final-video-url="subtitleWorkflowFinalUrl"
-        :result-hint="subtitleWorkflowHint || workflowProgressState.hint"
+        :result-hint="
+          subtitleWorkflowHint ||
+          smartClipRenderBlockReason ||
+          workflowProgressState.hint
+        "
+        :render-disabled-reason="smartClipRenderBlockReason"
         @update:title-lines="smartClipTitleLines = $event"
         @update:cut-breath-enabled="smartClipCutBreathEnabled = $event"
         @update:cut-mode="smartClipCutMode = $event"
         @update:pip-enabled="smartClipPipEnabled = $event"
-        @update:background-music-enabled="smartClipBackgroundMusicEnabled = $event"
+        @update:background-music-enabled="
+          smartClipBackgroundMusicEnabled = $event
+        "
         @update:background-music-id="smartClipBackgroundMusicId = $event"
-        @update:background-music-volume="smartClipBackgroundMusicVolume = $event"
+        @update:background-music-volume="
+          smartClipBackgroundMusicVolume = $event
+        "
         @update:text-subtitles-enabled="smartClipTextSubtitlesEnabled = $event"
         @update:subtitles="smartClipSubtitles = $event"
         @toggle-highlight="toggleSmartClipSubtitleHighlight"
@@ -2874,12 +3596,19 @@ onUnmounted(() => {
         @next="goNext"
       />
 
-      <section v-else-if="false && activeStep === 3" key="step-3-legacy" class="edit-layout smart-clip-layout">
+      <section
+        v-else-if="false && activeStep === 3"
+        key="step-3-legacy"
+        class="edit-layout smart-clip-layout"
+      >
         <div class="smart-editor-shell">
           <div class="smart-editor-main">
             <header class="smart-editor-head">
               <h1>第三步：智能剪辑</h1>
-              <span>建议顺序：字幕模板 → 标题 → 剪气口 → 画中画 → 背景音乐 → 文字字幕</span>
+              <span
+                >建议顺序：字幕模板 → 标题 → 剪气口 → 画中画 → 背景音乐 →
+                文字字幕</span
+              >
             </header>
 
             <section class="smart-editor-left">
@@ -2895,7 +3624,9 @@ onUnmounted(() => {
                 <div class="smart-style-cover">
                   <img
                     v-if="selectedSubtitleTemplateCover"
-                    :src="resolveProtectedMediaUrl(selectedSubtitleTemplateCover)"
+                    :src="
+                      resolveProtectedMediaUrl(selectedSubtitleTemplateCover)
+                    "
                     alt="字幕模板封面"
                   />
                   <div v-else class="smart-style-cover__empty">字幕</div>
@@ -2909,9 +3640,15 @@ onUnmounted(() => {
                   <label>视频标题</label>
                   <div class="smart-title-row">
                     <input v-model="smartClipTitleLines[0]" type="text" />
-                    <button type="button" @click="shuffleSmartClipTitle">换一个</button>
+                    <button type="button" @click="shuffleSmartClipTitle">
+                      换一个
+                    </button>
                   </div>
-                  <input v-model="smartClipTitleLines[1]" class="smart-title-input" type="text" />
+                  <input
+                    v-model="smartClipTitleLines[1]"
+                    class="smart-title-input"
+                    type="text"
+                  />
                 </div>
                 <button type="button" class="smart-template-change">
                   更换模板
@@ -2928,7 +3665,9 @@ onUnmounted(() => {
                     type="button"
                     class="smart-switch"
                     :class="{ 'smart-switch--on': smartClipCutBreathEnabled }"
-                    @click="smartClipCutBreathEnabled = !smartClipCutBreathEnabled"
+                    @click="
+                      smartClipCutBreathEnabled = !smartClipCutBreathEnabled
+                    "
                   />
                 </div>
                 <div v-if="smartClipCutBreathEnabled" class="smart-cut-inline">
@@ -2942,7 +3681,12 @@ onUnmounted(() => {
                     {{ mode.label }}
                   </button>
                   <span>
-                    {{ smartClipCutSummary.totalCount }} 个气口 · 压缩 {{ formatSmartClipSeconds(smartClipCutSummary.totalCutDuration) }}
+                    {{ smartClipCutSummary.totalCount }} 个气口 · 压缩
+                    {{
+                      formatSmartClipSeconds(
+                        smartClipCutSummary.totalCutDuration,
+                      )
+                    }}
                   </span>
                 </div>
 
@@ -2982,8 +3726,13 @@ onUnmounted(() => {
                   <button
                     type="button"
                     class="smart-switch"
-                    :class="{ 'smart-switch--on': smartClipBackgroundMusicEnabled }"
-                    @click="smartClipBackgroundMusicEnabled = !smartClipBackgroundMusicEnabled"
+                    :class="{
+                      'smart-switch--on': smartClipBackgroundMusicEnabled,
+                    }"
+                    @click="
+                      smartClipBackgroundMusicEnabled =
+                        !smartClipBackgroundMusicEnabled
+                    "
                   />
                 </div>
                 <div class="smart-music-row">
@@ -3019,20 +3768,45 @@ onUnmounted(() => {
                     <button
                       type="button"
                       class="smart-mini-switch"
-                      :class="{ 'smart-mini-switch--on': smartClipTextSubtitlesEnabled }"
-                      @click="smartClipTextSubtitlesEnabled = !smartClipTextSubtitlesEnabled"
+                      :class="{
+                        'smart-mini-switch--on': smartClipTextSubtitlesEnabled,
+                      }"
+                      @click="
+                        smartClipTextSubtitlesEnabled =
+                          !smartClipTextSubtitlesEnabled
+                      "
                     />
                   </label>
-                  <button type="button" class="danger" @click="clearSmartClipSubtitles">清空</button>
-                  <button type="button" @click="buildSmartClipSubtitles(true)">拉取</button>
-                  <button type="button" @click="buildSmartClipSubtitles(true)">还原</button>
-                  <button type="button" class="success" @click="confirmSmartClipSubtitles">已确认</button>
+                  <button
+                    type="button"
+                    class="danger"
+                    @click="clearSmartClipSubtitles"
+                  >
+                    清空
+                  </button>
+                  <button type="button" @click="buildSmartClipSubtitles(true)">
+                    拉取
+                  </button>
+                  <button type="button" @click="buildSmartClipSubtitles(true)">
+                    还原
+                  </button>
+                  <button
+                    type="button"
+                    class="success"
+                    @click="confirmSmartClipSubtitles"
+                  >
+                    已确认
+                  </button>
                 </div>
               </div>
 
               <div class="smart-line-editor">
-                <div v-for="(subtitle, index) in smartClipSubtitles" :key="subtitle.id" class="smart-line-row">
-                  <span>{{ String(index + 1).padStart(2, '0') }}</span>
+                <div
+                  v-for="(subtitle, index) in smartClipSubtitles"
+                  :key="subtitle.id"
+                  class="smart-line-row"
+                >
+                  <span>{{ String(index + 1).padStart(2, "0") }}</span>
                   <textarea v-model="subtitle.text" rows="1" />
                   <button
                     type="button"
@@ -3053,7 +3827,13 @@ onUnmounted(() => {
                 :disabled="smartClipRendering"
                 @click="onRenderSmartClipFinal"
               >
-                {{ subtitleWorkflowFinalUrl ? '重新剪辑' : smartClipRendering ? `正在生成成片 ${workflowProgressState.percent}%` : '立即剪辑' }}
+                {{
+                  subtitleWorkflowFinalUrl
+                    ? "重新剪辑"
+                    : smartClipRendering
+                      ? `正在生成成片 ${workflowProgressState.percent}%`
+                      : "立即剪辑"
+                }}
                 <span>↻</span>
               </button>
             </section>
@@ -3066,8 +3846,16 @@ onUnmounted(() => {
                 <strong>生成结果</strong>
               </div>
               <div class="smart-result-actions">
-                <button type="button" class="danger" @click="subtitleWorkflowFinalUrl = null">删除视频</button>
-                <button type="button" @click="onRenderSmartClipFinal">更换视频</button>
+                <button
+                  type="button"
+                  class="danger"
+                  @click="subtitleWorkflowFinalUrl = null"
+                >
+                  删除视频
+                </button>
+                <button type="button" @click="onRenderSmartClipFinal">
+                  更换视频
+                </button>
                 <a
                   :class="{ disabled: !subtitleWorkflowFinalUrl }"
                   :href="subtitleWorkflowFinalUrl || undefined"
@@ -3104,7 +3892,9 @@ onUnmounted(() => {
               <div class="workflow-progress-track smart-result-track">
                 <i :style="{ width: `${workflowProgressState.percent}%` }"></i>
               </div>
-              <span>{{ subtitleWorkflowHint || workflowProgressState.hint }}</span>
+              <span>{{
+                subtitleWorkflowHint || workflowProgressState.hint
+              }}</span>
             </div>
           </aside>
         </div>
@@ -3114,7 +3904,10 @@ onUnmounted(() => {
             <div>
               <span class="smart-clip-kicker">SMART EDIT</span>
               <h1>第三步：智能剪辑</h1>
-              <p>字幕模板 → 标题 → 剪辑气口 → 画中画 → 背景音乐 → 文字字幕 → 立即剪辑</p>
+              <p>
+                字幕模板 → 标题 → 剪辑气口 → 画中画 → 背景音乐 → 文字字幕 →
+                立即剪辑
+              </p>
             </div>
             <div class="smart-clip-status-pill">
               <span>{{ workflowProgressState.status }}</span>
@@ -3133,7 +3926,7 @@ onUnmounted(() => {
                   </div>
                 </div>
                 <n-tag size="small" :bordered="false">
-                  {{ selectedSubtitleTemplateId ? '已选择' : '待选择' }}
+                  {{ selectedSubtitleTemplateId ? "已选择" : "待选择" }}
                 </n-tag>
               </div>
               <div class="smart-template-list">
@@ -3142,13 +3935,21 @@ onUnmounted(() => {
                   :key="template.id"
                   type="button"
                   class="smart-template-option"
-                  :class="{ 'smart-template-option--active': selectedSubtitleTemplateId === template.id }"
+                  :class="{
+                    'smart-template-option--active':
+                      selectedSubtitleTemplateId === template.id,
+                  }"
                   @click="selectedSubtitleTemplateId = template.id"
                 >
                   <strong>{{ template.name }}</strong>
-                  <span>{{ template.recommended ? '推荐模板' : '我的模板' }}</span>
+                  <span>{{
+                    template.recommended ? "推荐模板" : "我的模板"
+                  }}</span>
                 </button>
-                <div v-if="!subtitleTemplateItems.length" class="smart-empty-note">
+                <div
+                  v-if="!subtitleTemplateItems.length"
+                  class="smart-empty-note"
+                >
                   暂无字幕模板，请先在素材库确认模板。
                 </div>
               </div>
@@ -3160,16 +3961,20 @@ onUnmounted(() => {
                   <span class="title-icon">剪</span>
                   <div>
                     <strong>剪辑气口</strong>
-                    <p>自动识别视频中的停顿、空白和喘气间隔，并在最终成片中压缩这些片段。</p>
+                    <p>
+                      自动识别视频中的停顿、空白和喘气间隔，并在最终成片中压缩这些片段。
+                    </p>
                   </div>
                 </div>
                 <button
                   type="button"
                   class="smart-toggle"
                   :class="{ 'smart-toggle--active': smartClipCutBreathEnabled }"
-                  @click="smartClipCutBreathEnabled = !smartClipCutBreathEnabled"
+                  @click="
+                    smartClipCutBreathEnabled = !smartClipCutBreathEnabled
+                  "
                 >
-                  {{ smartClipCutBreathEnabled ? '开启' : '关闭' }}
+                  {{ smartClipCutBreathEnabled ? "开启" : "关闭" }}
                 </button>
               </div>
 
@@ -3179,7 +3984,9 @@ onUnmounted(() => {
                   :key="mode.value"
                   type="button"
                   class="smart-mode-card"
-                  :class="{ 'smart-mode-card--active': smartClipCutMode === mode.value }"
+                  :class="{
+                    'smart-mode-card--active': smartClipCutMode === mode.value,
+                  }"
                   @click="smartClipCutMode = mode.value"
                 >
                   <strong>{{ mode.label }}</strong>
@@ -3194,15 +4001,23 @@ onUnmounted(() => {
                 </div>
                 <div>
                   <span>预计压缩</span>
-                  <strong>{{ formatSmartClipSeconds(smartClipCutSummary.totalCutDuration) }}</strong>
+                  <strong>{{
+                    formatSmartClipSeconds(smartClipCutSummary.totalCutDuration)
+                  }}</strong>
                 </div>
                 <div>
                   <span>原视频</span>
-                  <strong>{{ formatSmartClipSeconds(smartClipCutSummary.originalDuration) }}</strong>
+                  <strong>{{
+                    formatSmartClipSeconds(smartClipCutSummary.originalDuration)
+                  }}</strong>
                 </div>
                 <div>
                   <span>预计成片</span>
-                  <strong>{{ formatSmartClipSeconds(smartClipCutSummary.estimatedDuration) }}</strong>
+                  <strong>{{
+                    formatSmartClipSeconds(
+                      smartClipCutSummary.estimatedDuration,
+                    )
+                  }}</strong>
                 </div>
               </div>
 
@@ -3221,7 +4036,7 @@ onUnmounted(() => {
                   :disabled="!smartClipCutPoints.length"
                   @click="onApplySmartClipCutSuggestions"
                 >
-                  {{ smartClipCutApplied ? '已应用建议' : '应用剪辑建议' }}
+                  {{ smartClipCutApplied ? "已应用建议" : "应用剪辑建议" }}
                 </n-button>
               </div>
             </section>
@@ -3242,25 +4057,40 @@ onUnmounted(() => {
                   @click="smartClipPipEnabled = !smartClipPipEnabled"
                 >
                   <strong>画中画 / 分镜素材</strong>
-                  <span>{{ smartClipPipEnabled ? '已开启' : '未开启' }}</span>
+                  <span>{{ smartClipPipEnabled ? "已开启" : "未开启" }}</span>
                 </button>
                 <button
                   type="button"
                   class="smart-config-item"
-                  :class="{ 'smart-config-item--active': smartClipBackgroundMusicEnabled }"
-                  @click="smartClipBackgroundMusicEnabled = !smartClipBackgroundMusicEnabled"
+                  :class="{
+                    'smart-config-item--active':
+                      smartClipBackgroundMusicEnabled,
+                  }"
+                  @click="
+                    smartClipBackgroundMusicEnabled =
+                      !smartClipBackgroundMusicEnabled
+                  "
                 >
                   <strong>背景音乐</strong>
-                  <span>{{ smartClipBackgroundMusicEnabled ? '轻音乐 10%' : '未开启' }}</span>
+                  <span>{{
+                    smartClipBackgroundMusicEnabled ? "轻音乐 10%" : "未开启"
+                  }}</span>
                 </button>
                 <button
                   type="button"
                   class="smart-config-item"
-                  :class="{ 'smart-config-item--active': smartClipTextSubtitlesEnabled }"
-                  @click="smartClipTextSubtitlesEnabled = !smartClipTextSubtitlesEnabled"
+                  :class="{
+                    'smart-config-item--active': smartClipTextSubtitlesEnabled,
+                  }"
+                  @click="
+                    smartClipTextSubtitlesEnabled =
+                      !smartClipTextSubtitlesEnabled
+                  "
                 >
                   <strong>文字字幕</strong>
-                  <span>{{ smartClipTextSubtitlesEnabled ? '最终烧录' : '不烧录' }}</span>
+                  <span>{{
+                    smartClipTextSubtitlesEnabled ? "最终烧录" : "不烧录"
+                  }}</span>
                 </button>
               </div>
             </section>
@@ -3274,7 +4104,9 @@ onUnmounted(() => {
                     <p>这里只编辑最终成片的字幕时间轴，不再做实时视频预览。</p>
                   </div>
                 </div>
-                <n-tag size="small" :bordered="false">{{ smartClipSubtitles.length }} 段</n-tag>
+                <n-tag size="small" :bordered="false"
+                  >{{ smartClipSubtitles.length }} 段</n-tag
+                >
               </div>
 
               <div class="smart-subtitle-table">
@@ -3289,9 +4121,19 @@ onUnmounted(() => {
                   class="smart-subtitle-row"
                 >
                   <div class="smart-time-fields">
-                    <input v-model.number="subtitle.startTime" type="number" min="0" step="0.1" />
+                    <input
+                      v-model.number="subtitle.startTime"
+                      type="number"
+                      min="0"
+                      step="0.1"
+                    />
                     <b>-</b>
-                    <input v-model.number="subtitle.endTime" type="number" min="0" step="0.1" />
+                    <input
+                      v-model.number="subtitle.endTime"
+                      type="number"
+                      min="0"
+                      step="0.1"
+                    />
                   </div>
                   <n-input
                     v-model:value="subtitle.text"
@@ -3302,10 +4144,15 @@ onUnmounted(() => {
                   <button
                     type="button"
                     class="smart-highlight-btn"
-                    :class="{ 'smart-highlight-btn--active': subtitle.highlightRanges?.length }"
+                    :class="{
+                      'smart-highlight-btn--active':
+                        subtitle.highlightRanges?.length,
+                    }"
                     @click="toggleSmartClipSubtitleHighlight(subtitle)"
                   >
-                    {{ subtitle.highlightRanges?.length ? '已高亮' : '高亮前4字' }}
+                    {{
+                      subtitle.highlightRanges?.length ? "已高亮" : "高亮前4字"
+                    }}
                   </button>
                 </div>
                 <div v-if="!smartClipSubtitles.length" class="smart-empty-note">
@@ -3321,7 +4168,9 @@ onUnmounted(() => {
               <div class="workflow-progress-track smart-render-progress__track">
                 <i :style="{ width: `${workflowProgressState.percent}%` }"></i>
               </div>
-              <span>{{ subtitleWorkflowHint || workflowProgressState.hint }}</span>
+              <span>{{
+                subtitleWorkflowHint || workflowProgressState.hint
+              }}</span>
             </div>
             <n-button
               type="primary"
@@ -3330,7 +4179,13 @@ onUnmounted(() => {
               :disabled="smartClipRendering"
               @click="onRenderSmartClipFinal"
             >
-              {{ subtitleWorkflowFinalUrl ? '重新剪辑' : smartClipRendering ? `正在生成成片... ${workflowProgressState.percent}%` : '立即剪辑' }}
+              {{
+                subtitleWorkflowFinalUrl
+                  ? "重新剪辑"
+                  : smartClipRendering
+                    ? `正在生成成片... ${workflowProgressState.percent}%`
+                    : "立即剪辑"
+              }}
             </n-button>
             <a
               v-if="subtitleWorkflowFinalUrl"
@@ -3358,17 +4213,23 @@ onUnmounted(() => {
             <div class="summary-stack step-three-summary">
               <div class="summary-pill">
                 <span>数字人</span>
-                <strong class="compact-label" :title="selectedAvatarLabel">{{ selectedAvatarLabel }}</strong>
+                <strong class="compact-label" :title="selectedAvatarLabel">{{
+                  selectedAvatarLabel
+                }}</strong>
               </div>
               <div class="summary-pill">
                 <span>音色</span>
-                <strong class="compact-label" :title="selectedVoiceLabel">{{ selectedVoiceLabel }}</strong>
+                <strong class="compact-label" :title="selectedVoiceLabel">{{
+                  selectedVoiceLabel
+                }}</strong>
               </div>
             </div>
 
             <div class="workflow-action-card">
               <div class="input-actions input-actions--triple">
-                <n-button block secondary @click="jumpToStep(2)">返回检查素材</n-button>
+                <n-button block secondary @click="jumpToStep(2)"
+                  >返回检查素材</n-button
+                >
                 <n-button
                   block
                   type="primary"
@@ -3388,7 +4249,9 @@ onUnmounted(() => {
                   block
                   secondary
                   type="primary"
-                  :disabled="!subtitleWorkflowDraftId || subtitleWorkflowFinalizeLoading"
+                  :disabled="
+                    !subtitleWorkflowDraftId || subtitleWorkflowFinalizeLoading
+                  "
                   :loading="subtitleWorkflowFinalizeLoading"
                   @click="onFinalizeSubtitleWorkflow"
                 >
@@ -3397,11 +4260,16 @@ onUnmounted(() => {
               </div>
               <div
                 class="workflow-progress-card"
-                :style="{ '--workflow-percent': `${workflowProgressState.percent}%` }"
+                :style="{
+                  '--workflow-percent': `${workflowProgressState.percent}%`,
+                }"
                 :class="{
                   'workflow-progress-card--running':
-                    subtitleWorkflowPreviewLoading || subtitleWorkflowFinalizeLoading,
-                  'workflow-progress-card--done': Boolean(subtitleWorkflowFinalUrl),
+                    subtitleWorkflowPreviewLoading ||
+                    subtitleWorkflowFinalizeLoading,
+                  'workflow-progress-card--done': Boolean(
+                    subtitleWorkflowFinalUrl,
+                  ),
                 }"
               >
                 <div class="workflow-progress-card__head">
@@ -3413,7 +4281,9 @@ onUnmounted(() => {
                   <b>{{ workflowProgressState.percent }}%</b>
                 </div>
                 <div class="workflow-progress-track">
-                  <i :style="{ width: `${workflowProgressState.percent}%` }"></i>
+                  <i
+                    :style="{ width: `${workflowProgressState.percent}%` }"
+                  ></i>
                 </div>
                 <ol class="workflow-progress-steps">
                   <li
@@ -3421,7 +4291,7 @@ onUnmounted(() => {
                     :key="step.label"
                     :class="`is-${step.status}`"
                   >
-                    <b>{{ step.status === 'done' ? '✓' : index + 1 }}</b>
+                    <b>{{ step.status === "done" ? "✓" : index + 1 }}</b>
                     <div>
                       <strong>{{ step.label }}</strong>
                     </div>
@@ -3429,13 +4299,16 @@ onUnmounted(() => {
                 </ol>
               </div>
               <div class="segment-count-bar">
-                <n-text depth="3">当前链路：生成音轨 → 5 秒预览 → 对齐口型 → 输出成片</n-text>
+                <n-text depth="3"
+                  >当前链路：生成音轨 → 5 秒预览 → 对齐口型 → 输出成片</n-text
+                >
                 <n-tag size="small" :bordered="false" type="info">
                   无字幕模式
                 </n-tag>
               </div>
               <n-text depth="3" class="helper-text workflow-helper-note">
-                这条流程会先生成音轨，再合成 5 秒无字幕预览；确认无误后输出完整成片。
+                这条流程会先生成音轨，再合成 5
+                秒无字幕预览；确认无误后输出完整成片。
               </n-text>
             </div>
           </section>
@@ -3443,18 +4316,28 @@ onUnmounted(() => {
           <section class="edit-options step-three-checks">
             <div
               class="switch-row switch-row--card status-check"
-              :class="currentWorkflowScript ? 'status-check--ok' : 'status-check--fail'"
+              :class="
+                currentWorkflowScript
+                  ? 'status-check--ok'
+                  : 'status-check--fail'
+              "
             >
               <span>文案</span>
-              <b aria-label="文案就绪状态">{{ currentWorkflowScript ? '✓' : '×' }}</b>
+              <b aria-label="文案就绪状态">{{
+                currentWorkflowScript ? "✓" : "×"
+              }}</b>
             </div>
             <div class="switch-row switch-row--card status-check">
               <span>数字人视频</span>
-              <b class="compact-label" :title="selectedAvatarLabel">{{ selectedAvatarLabel }}</b>
+              <b class="compact-label" :title="selectedAvatarLabel">{{
+                selectedAvatarLabel
+              }}</b>
             </div>
             <div class="switch-row switch-row--card status-check">
               <span>音色驱动</span>
-              <b class="compact-label" :title="selectedVoiceLabel">{{ selectedVoiceLabel }}</b>
+              <b class="compact-label" :title="selectedVoiceLabel">{{
+                selectedVoiceLabel
+              }}</b>
             </div>
           </section>
         </div>
@@ -3468,20 +4351,39 @@ onUnmounted(() => {
                 <p>直接使用第一步确认的完整口播稿，不叠加字幕</p>
               </div>
             </div>
-            <n-tag size="small" :bordered="false">{{ currentWorkflowScript.length }} 字</n-tag>
+            <n-tag size="small" :bordered="false"
+              >{{ currentWorkflowScript.length }} 字</n-tag
+            >
           </div>
 
-          <div class="full-script-preview" :class="{ 'full-script-preview--empty': !currentWorkflowScript }">
-            <span>{{ currentWorkflowScript ? '当前整段口播' : '等待文案' }}</span>
+          <div
+            class="full-script-preview"
+            :class="{ 'full-script-preview--empty': !currentWorkflowScript }"
+          >
+            <span>{{
+              currentWorkflowScript ? "当前整段口播" : "等待文案"
+            }}</span>
             <p>
-              {{ currentWorkflowScript || '请先在第一步抓取、转写或手动整理一份口播文案，这里会直接使用整段文案进入音轨生成和对口型流程。' }}
+              {{
+                currentWorkflowScript ||
+                "请先在第一步抓取、转写或手动整理一份口播文案，这里会直接使用整段文案进入音轨生成和对口型流程。"
+              }}
             </p>
           </div>
 
-          <div v-if="subtitleWorkflowPreviewUrl || subtitleWorkflowFinalUrl || subtitleWorkflowHint" class="workflow-preview-stack">
+          <div
+            v-if="
+              subtitleWorkflowPreviewUrl ||
+              subtitleWorkflowFinalUrl ||
+              subtitleWorkflowHint
+            "
+            class="workflow-preview-stack"
+          >
             <div class="summary-card">
               <div>
-                <strong>{{ subtitleWorkflowFinalUrl ? '完整视频已输出' : '5 秒预览已生成' }}</strong>
+                <strong>{{
+                  subtitleWorkflowFinalUrl ? "完整视频已输出" : "5 秒预览已生成"
+                }}</strong>
                 <p>当前为无字幕模式，只检查声音和口型同步。</p>
               </div>
               <n-tag size="small" :bordered="false" type="success">
@@ -3515,7 +4417,9 @@ onUnmounted(() => {
           </div>
           <div v-else class="empty-block">
             <strong>先生成 5 秒无字幕预览</strong>
-            <p>这里会展示无字幕预览视频，确认口型和声音同步后再输出最终成片。</p>
+            <p>
+              这里会展示无字幕预览视频，确认口型和声音同步后再输出最终成片。
+            </p>
           </div>
         </section>
 
@@ -3523,12 +4427,17 @@ onUnmounted(() => {
           <div class="preview-head">
             <n-text strong>生成预览</n-text>
             <n-tag size="small" :bordered="false" type="info">
-              {{ generatedVideoCount ? '已生成' : '待生成' }}
+              {{ generatedVideoCount ? "已生成" : "待生成" }}
             </n-tag>
           </div>
           <div class="phone-preview">
             <div v-if="firstReadyVideoUrl" class="phone-face phone-face--video">
-              <video :src="firstReadyVideoUrl ?? undefined" controls playsinline preload="metadata" />
+              <video
+                :src="firstReadyVideoUrl ?? undefined"
+                controls
+                playsinline
+                preload="metadata"
+              />
             </div>
             <div v-else class="phone-face">
               <span>生成后会在这里显示整段预览视频</span>
@@ -3541,10 +4450,18 @@ onUnmounted(() => {
         <div class="publish-left">
           <section class="publish-hero">
             <h1>第四步：自动发布</h1>
-            <p>先把四步流程排完整，发布账号与计划沿用对标页结构，便于后续继续接入。</p>
+            <p>
+              先把四步流程排完整，发布账号与计划沿用对标页结构，便于后续继续接入。
+            </p>
             <div class="publish-stats">
-              <div><strong>{{ generatedVideoCount }}</strong><span>已生成成片</span></div>
-              <div><strong>{{ publishPlatforms.length }}</strong><span>预设平台</span></div>
+              <div>
+                <strong>{{ generatedVideoCount }}</strong
+                ><span>已生成成片</span>
+              </div>
+              <div>
+                <strong>{{ publishPlatforms.length }}</strong
+                ><span>预设平台</span>
+              </div>
               <div><strong>0</strong><span>已连接账号</span></div>
             </div>
           </section>
@@ -3559,8 +4476,15 @@ onUnmounted(() => {
                 </div>
               </div>
               <n-space size="small">
-                <n-button text size="small" @click="syncPublishCopyFromScript(true)">同步文案</n-button>
-                <n-button text size="small" @click="jumpToStep(3)">返回成片</n-button>
+                <n-button
+                  text
+                  size="small"
+                  @click="syncPublishCopyFromScript(true)"
+                  >同步文案</n-button
+                >
+                <n-button text size="small" @click="jumpToStep(3)"
+                  >返回成片</n-button
+                >
               </n-space>
             </div>
             <n-input
@@ -3574,13 +4498,21 @@ onUnmounted(() => {
               <div class="cover-thumb">封面</div>
               <div>
                 <strong>当前视频摘要</strong>
-                <p>数字人：{{ selectedAvatarLabel }} · 音色：{{ selectedVoiceLabel }}</p>
+                <p>
+                  数字人：{{ selectedAvatarLabel }} · 音色：{{
+                    selectedVoiceLabel
+                  }}
+                </p>
               </div>
             </div>
             <div class="publish-result-list">
-              <div v-for="item in publishReadyItems" :key="item.index" class="publish-result-item">
+              <div
+                v-for="item in publishReadyItems"
+                :key="item.index"
+                class="publish-result-item"
+              >
                 <strong>整段成片</strong>
-                <p>{{ item.text || '已生成可发布视频' }}</p>
+                <p>{{ item.text || "已生成可发布视频" }}</p>
               </div>
               <div v-if="!publishReadyItems.length" class="plan-empty">
                 先回到第三步生成整段对口型视频。
@@ -3593,10 +4525,16 @@ onUnmounted(() => {
           <section class="panel platform-card">
             <div class="section-title section-title--between">
               <strong>发布平台</strong>
-              <n-button text type="primary" size="small" disabled>+ 绑定账号</n-button>
+              <n-button text type="primary" size="small" disabled
+                >+ 绑定账号</n-button
+              >
             </div>
             <div class="platform-list">
-              <div v-for="platform in publishPlatforms" :key="platform.name" class="platform-item">
+              <div
+                v-for="platform in publishPlatforms"
+                :key="platform.name"
+                class="platform-item"
+              >
                 <span>{{ platform.icon }}</span>
                 <div>
                   <strong>{{ platform.name }}</strong>
@@ -3629,13 +4567,23 @@ onUnmounted(() => {
         <aside class="preview-side preview-side--publish">
           <div class="preview-head">
             <n-text strong>发布预览</n-text>
-            <n-tag size="small" :bordered="false" type="success" v-if="firstReadyVideoUrl">
+            <n-tag
+              size="small"
+              :bordered="false"
+              type="success"
+              v-if="firstReadyVideoUrl"
+            >
               可预览
             </n-tag>
           </div>
           <div class="phone-preview phone-preview--final">
             <div v-if="firstReadyVideoUrl" class="phone-face phone-face--video">
-              <video :src="firstReadyVideoUrl ?? undefined" controls playsinline preload="metadata" />
+              <video
+                :src="firstReadyVideoUrl ?? undefined"
+                controls
+                playsinline
+                preload="metadata"
+              />
             </div>
             <div v-else class="phone-face phone-face--poster">
               <strong>自动发布</strong>
@@ -3647,11 +4595,13 @@ onUnmounted(() => {
     </Transition>
 
     <NewAvatarModal
+      v-if="createAvatarOpen"
       v-model:show="createAvatarOpen"
       :loading="creatingAvatar"
       @submit="createAvatarFromStudio"
     />
     <VoiceCloneModal
+      v-if="cloneVoiceOpen"
       v-model:show="cloneVoiceOpen"
       :loading="cloningVoice"
       @submit="cloneVoiceFromStudio"
@@ -3661,10 +4611,16 @@ onUnmounted(() => {
       <div class="footer-progress">
         <n-text depth="3">创作进度</n-text>
         <strong>{{ progressText }}</strong>
-        <n-progress type="line" :percentage="progressPercent" :show-indicator="false" />
+        <n-progress
+          type="line"
+          :percentage="progressPercent"
+          :show-indicator="false"
+        />
       </div>
       <n-space>
-        <n-button v-if="activeStep > 1" size="large" quaternary @click="goPrev">上一步</n-button>
+        <n-button v-if="activeStep > 1" size="large" quaternary @click="goPrev"
+          >上一步</n-button
+        >
         <n-button
           class="next-btn"
           size="large"
@@ -3704,8 +4660,16 @@ onUnmounted(() => {
   overflow-x: clip;
   container-type: inline-size;
   background:
-    radial-gradient(circle at 84% 20%, rgba(75, 107, 255, 0.12), transparent 26%),
-    radial-gradient(circle at 34% 62%, rgba(75, 199, 187, 0.08), transparent 28%),
+    radial-gradient(
+      circle at 84% 20%,
+      rgba(75, 107, 255, 0.12),
+      transparent 26%
+    ),
+    radial-gradient(
+      circle at 34% 62%,
+      rgba(75, 199, 187, 0.08),
+      transparent 28%
+    ),
     linear-gradient(180deg, transparent, rgba(255, 255, 255, 0.18));
 }
 
@@ -3769,8 +4733,11 @@ onUnmounted(() => {
   min-height: 42px;
   border: 2px solid rgba(255, 255, 255, 0.72);
   border-radius: 999px;
-  background:
-    linear-gradient(180deg, var(--vc-scrollbar-thumb), rgba(75, 199, 187, 0.36))
+  background: linear-gradient(
+      180deg,
+      var(--vc-scrollbar-thumb),
+      rgba(75, 199, 187, 0.36)
+    )
     padding-box;
 }
 
@@ -3797,8 +4764,11 @@ onUnmounted(() => {
 .edit-layout > .panel:hover::-webkit-scrollbar-thumb,
 .publish-left > .panel:hover::-webkit-scrollbar-thumb,
 .publish-center > .panel:hover::-webkit-scrollbar-thumb {
-  background:
-    linear-gradient(180deg, var(--vc-scrollbar-thumb-hover), rgba(75, 199, 187, 0.52))
+  background: linear-gradient(
+      180deg,
+      var(--vc-scrollbar-thumb-hover),
+      rgba(75, 199, 187, 0.52)
+    )
     padding-box;
 }
 
@@ -3920,7 +4890,11 @@ onUnmounted(() => {
   padding: var(--vc-panel-pad);
   border: 1px solid rgba(255, 255, 255, 0.56);
   border-radius: var(--vc-radius);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(246, 249, 255, 0.82));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.88),
+    rgba(246, 249, 255, 0.82)
+  );
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.94),
     var(--shadow-soft);
@@ -4059,8 +5033,11 @@ onUnmounted(() => {
   padding: 6px;
   border: 1px solid rgba(121, 144, 184, 0.16);
   border-radius: 22px;
-  background:
-    linear-gradient(180deg, rgba(246, 249, 255, 0.92), rgba(236, 242, 254, 0.72));
+  background: linear-gradient(
+    180deg,
+    rgba(246, 249, 255, 0.92),
+    rgba(236, 242, 254, 0.72)
+  );
   box-shadow: inset 0 1px 2px rgba(65, 83, 122, 0.06);
 }
 
@@ -4188,8 +5165,11 @@ onUnmounted(() => {
 .recent-extract__list::-webkit-scrollbar-thumb {
   border: 2px solid rgba(255, 255, 255, 0.72);
   border-radius: 999px;
-  background:
-    linear-gradient(180deg, var(--vc-scrollbar-thumb), rgba(75, 199, 187, 0.34))
+  background: linear-gradient(
+      180deg,
+      var(--vc-scrollbar-thumb),
+      rgba(75, 199, 187, 0.34)
+    )
     padding-box;
 }
 
@@ -4229,7 +5209,11 @@ onUnmounted(() => {
   cursor: pointer;
   border: 0;
   border-radius: 13px;
-  background: linear-gradient(135deg, rgba(75, 107, 255, 0.86), rgba(69, 200, 194, 0.74));
+  background: linear-gradient(
+    135deg,
+    rgba(75, 107, 255, 0.86),
+    rgba(69, 200, 194, 0.74)
+  );
   box-shadow: 0 12px 22px rgba(75, 107, 255, 0.16);
 }
 
@@ -4243,7 +5227,7 @@ onUnmounted(() => {
 .recent-extract-card__preview::before {
   position: absolute;
   inset: 0;
-  content: '';
+  content: "";
   background: linear-gradient(180deg, transparent 40%, rgba(8, 16, 35, 0.56));
   opacity: 0.85;
 }
@@ -4551,7 +5535,11 @@ onUnmounted(() => {
   border-radius: 20px;
   background:
     radial-gradient(circle at 12% 0%, rgba(75, 107, 255, 0.1), transparent 32%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 251, 255, 0.88));
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.94),
+      rgba(248, 251, 255, 0.88)
+    );
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.98),
     0 16px 34px rgba(86, 104, 140, 0.1);
@@ -4701,8 +5689,11 @@ onUnmounted(() => {
 .outline-editor :deep(textarea::-webkit-scrollbar-thumb) {
   border: 2px solid rgba(255, 255, 255, 0.72);
   border-radius: 999px;
-  background:
-    linear-gradient(180deg, var(--vc-scrollbar-thumb), rgba(75, 199, 187, 0.36))
+  background: linear-gradient(
+      180deg,
+      var(--vc-scrollbar-thumb),
+      rgba(75, 199, 187, 0.36)
+    )
     padding-box;
 }
 
@@ -4726,7 +5717,11 @@ onUnmounted(() => {
   padding: 14px 16px;
   border: 1px solid rgba(75, 107, 255, 0.14);
   border-radius: 16px;
-  background: linear-gradient(180deg, rgba(244, 248, 255, 0.94), rgba(237, 245, 255, 0.82));
+  background: linear-gradient(
+    180deg,
+    rgba(244, 248, 255, 0.94),
+    rgba(237, 245, 255, 0.82)
+  );
   box-shadow: 0 16px 34px rgba(64, 86, 122, 0.08);
   transition:
     transform var(--transition-fast),
@@ -5040,7 +6035,10 @@ onUnmounted(() => {
 
 .step-two-workbench {
   display: grid;
-  grid-template-columns: minmax(280px, 0.86fr) minmax(340px, 1fr) minmax(320px, 0.9fr);
+  grid-template-columns: minmax(280px, 0.86fr) minmax(340px, 1fr) minmax(
+      320px,
+      0.9fr
+    );
   gap: var(--step-two-gap);
   min-height: 0;
   align-items: stretch;
@@ -5178,7 +6176,11 @@ onUnmounted(() => {
   padding: 14px 16px;
   border: 1px solid rgba(121, 144, 184, 0.16);
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(244, 248, 255, 0.84));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.92),
+    rgba(244, 248, 255, 0.84)
+  );
 }
 
 .step-two-script-line span {
@@ -5219,7 +6221,11 @@ onUnmounted(() => {
 .lip-sync-setup-card {
   border: 1px solid rgba(121, 144, 184, 0.16);
   border-radius: 22px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(245, 248, 255, 0.84));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.92),
+    rgba(245, 248, 255, 0.84)
+  );
   box-shadow: 0 22px 46px rgba(64, 86, 122, 0.08);
 }
 
@@ -5366,7 +6372,11 @@ onUnmounted(() => {
   border-radius: 18px;
   background:
     radial-gradient(circle at 0% 0%, rgba(75, 107, 255, 0.12), transparent 36%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(245, 249, 255, 0.88));
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.94),
+      rgba(245, 249, 255, 0.88)
+    );
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.94);
 }
 
@@ -5412,8 +6422,13 @@ onUnmounted(() => {
 .voice-generate-progress__bar i::after {
   position: absolute;
   inset: 0;
-  content: '';
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+  content: "";
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.55),
+    transparent
+  );
   animation: voice-progress-flow 1.15s linear infinite;
 }
 
@@ -5655,7 +6670,11 @@ onUnmounted(() => {
   display: grid;
   place-items: center;
   color: #7787a8;
-  background: linear-gradient(180deg, rgba(244, 247, 255, 0.94), rgba(232, 239, 252, 0.94));
+  background: linear-gradient(
+    180deg,
+    rgba(244, 247, 255, 0.94),
+    rgba(232, 239, 252, 0.94)
+  );
   font-size: 34px;
   font-weight: 800;
 }
@@ -5698,7 +6717,11 @@ onUnmounted(() => {
 
 .lip-sync-setup-card__tab--active {
   border-color: rgba(122, 78, 255, 0.28);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(244, 242, 255, 0.94));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.94),
+    rgba(244, 242, 255, 0.94)
+  );
   box-shadow: 0 18px 34px rgba(116, 92, 255, 0.12);
 }
 
@@ -5809,7 +6832,10 @@ onUnmounted(() => {
 
 .smart-clip-grid {
   display: grid;
-  grid-template-columns: minmax(240px, 0.88fr) minmax(360px, 1.25fr) minmax(240px, 0.9fr);
+  grid-template-columns: minmax(240px, 0.88fr) minmax(360px, 1.25fr) minmax(
+      240px,
+      0.9fr
+    );
   gap: 14px;
   min-height: 0;
 }
@@ -5876,7 +6902,11 @@ onUnmounted(() => {
 .smart-mode-card--active,
 .smart-config-item--active {
   border-color: rgba(123, 79, 255, 0.34);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(247, 243, 255, 0.92));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.96),
+    rgba(247, 243, 255, 0.92)
+  );
   box-shadow: 0 18px 36px rgba(123, 79, 255, 0.12);
   transform: translateY(-1px);
 }
@@ -5961,7 +6991,10 @@ onUnmounted(() => {
 
 .smart-subtitle-row {
   display: grid;
-  grid-template-columns: minmax(170px, 0.32fr) minmax(0, 1fr) minmax(96px, 0.16fr);
+  grid-template-columns: minmax(170px, 0.32fr) minmax(0, 1fr) minmax(
+      96px,
+      0.16fr
+    );
   gap: 10px;
   align-items: center;
   padding: 10px;
@@ -6028,7 +7061,10 @@ onUnmounted(() => {
   bottom: 0;
   z-index: 3;
   display: grid;
-  grid-template-columns: minmax(130px, 0.24fr) minmax(0, 1fr) minmax(190px, 0.34fr) minmax(130px, 0.22fr);
+  grid-template-columns: minmax(130px, 0.24fr) minmax(0, 1fr) minmax(
+      190px,
+      0.34fr
+    ) minmax(130px, 0.22fr);
   gap: 12px;
   align-items: center;
   padding: 14px;
@@ -6108,7 +7144,9 @@ onUnmounted(() => {
     border-color var(--transition-fast);
 }
 
-.workflow-action-card .input-actions--triple :deep(.n-button:not(.n-button--disabled):hover) {
+.workflow-action-card
+  .input-actions--triple
+  :deep(.n-button:not(.n-button--disabled):hover) {
   transform: translateY(-2px);
   box-shadow: 0 18px 34px rgba(75, 107, 255, 0.14);
 }
@@ -6130,8 +7168,16 @@ onUnmounted(() => {
   border: 1px solid rgba(75, 107, 255, 0.16);
   border-radius: 26px;
   background:
-    radial-gradient(circle at 92% 6%, rgba(75, 107, 255, 0.12), transparent 28%),
-    radial-gradient(circle at 0% 100%, rgba(69, 200, 194, 0.1), transparent 30%),
+    radial-gradient(
+      circle at 92% 6%,
+      rgba(75, 107, 255, 0.12),
+      transparent 28%
+    ),
+    radial-gradient(
+      circle at 0% 100%,
+      rgba(69, 200, 194, 0.1),
+      transparent 30%
+    ),
     linear-gradient(180deg, rgba(255, 255, 255, 0.97), rgba(246, 250, 255, 0.9));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.96),
@@ -6141,8 +7187,16 @@ onUnmounted(() => {
 .workflow-progress-card--done {
   border-color: rgba(31, 184, 133, 0.24);
   background:
-    radial-gradient(circle at 12% 0%, rgba(31, 184, 133, 0.14), transparent 34%),
-    linear-gradient(180deg, rgba(250, 255, 253, 0.98), rgba(241, 253, 249, 0.92));
+    radial-gradient(
+      circle at 12% 0%,
+      rgba(31, 184, 133, 0.14),
+      transparent 34%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(250, 255, 253, 0.98),
+      rgba(241, 253, 249, 0.92)
+    );
 }
 
 .workflow-progress-card__head {
@@ -6201,15 +7255,20 @@ onUnmounted(() => {
 .workflow-progress-card__head > b::after {
   position: absolute;
   inset: -5px;
-  content: '';
+  content: "";
   border-radius: inherit;
   background: conic-gradient(
     from 0deg,
     var(--primary) 0 var(--workflow-percent, 0%),
-    var(--accent-teal) var(--workflow-percent, 0%) calc(var(--workflow-percent, 0%) + 6%),
+    var(--accent-teal) var(--workflow-percent, 0%)
+      calc(var(--workflow-percent, 0%) + 6%),
     transparent calc(var(--workflow-percent, 0%) + 6%) 100%
   );
-  mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 5px),
+    #000 calc(100% - 4px)
+  );
   pointer-events: none;
 }
 
@@ -6231,8 +7290,13 @@ onUnmounted(() => {
 .workflow-progress-card--running .workflow-progress-track i::after {
   position: absolute;
   inset: 0;
-  content: '';
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.56), transparent);
+  content: "";
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.56),
+    transparent
+  );
   animation: workflow-progress-flow 1.2s linear infinite;
 }
 
@@ -6463,7 +7527,11 @@ onUnmounted(() => {
   border: 1px solid rgba(75, 107, 255, 0.16);
   border-radius: 18px;
   background:
-    radial-gradient(circle at 100% 0%, rgba(75, 107, 255, 0.12), transparent 28%),
+    radial-gradient(
+      circle at 100% 0%,
+      rgba(75, 107, 255, 0.12),
+      transparent 28%
+    ),
     rgba(255, 255, 255, 0.74);
 }
 
@@ -6533,17 +7601,17 @@ onUnmounted(() => {
 }
 
 .step-three-summary .summary-pill:nth-child(1)::before {
-  content: '人';
+  content: "人";
 }
 
 .step-three-summary .summary-pill:nth-child(2)::before {
-  content: '声';
+  content: "声";
   color: #139d9a;
   background: rgba(69, 200, 194, 0.12);
 }
 
 .step-three-summary .summary-pill:nth-child(3)::before {
-  content: 'T';
+  content: "T";
   color: #7c4dff;
   background: rgba(124, 77, 255, 0.1);
 }
@@ -6570,7 +7638,7 @@ onUnmounted(() => {
   width: 20px;
   height: 20px;
   color: #ffffff;
-  content: 'i';
+  content: "i";
   border-radius: 999px;
   background: linear-gradient(135deg, var(--primary), var(--accent-teal));
   box-shadow: 0 8px 18px rgba(75, 107, 255, 0.18);
@@ -6581,7 +7649,7 @@ onUnmounted(() => {
 
 .workflow-helper-note::after {
   color: var(--text-sub);
-  content: '先生成音轨，再合成 5 秒无字幕预览；确认无误后输出完整成片。';
+  content: "先生成音轨，再合成 5 秒无字幕预览；确认无误后输出完整成片。";
   font-size: 13px;
   line-height: 1.6;
 }
@@ -6717,7 +7785,10 @@ onUnmounted(() => {
 }
 
 .publish-layout {
-  grid-template-columns: minmax(0, 0.92fr) minmax(0, 0.92fr) minmax(0, min(240px, 26vw));
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 0.92fr) minmax(
+      0,
+      min(240px, 26vw)
+    );
   align-items: stretch;
 }
 
@@ -6799,7 +7870,11 @@ onUnmounted(() => {
   color: #ffffff;
   border-radius: 24px;
   background:
-    radial-gradient(circle at 50% 20%, rgba(75, 107, 255, 0.2), transparent 26%),
+    radial-gradient(
+      circle at 50% 20%,
+      rgba(75, 107, 255, 0.2),
+      transparent 26%
+    ),
     linear-gradient(180deg, #2a3856, #152036);
   box-shadow:
     0 18px 42px rgba(64, 86, 122, 0.22),
@@ -6834,8 +7909,17 @@ onUnmounted(() => {
   border: 1px solid var(--border-strong);
   border-radius: 20px;
   background:
-    radial-gradient(circle at 90% 0%, rgba(75, 107, 255, 0.22), transparent 32%),
-    linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(236, 242, 255, 0.94) 54%, rgba(228, 236, 248, 0.96));
+    radial-gradient(
+      circle at 90% 0%,
+      rgba(75, 107, 255, 0.22),
+      transparent 32%
+    ),
+    linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.9),
+      rgba(236, 242, 255, 0.94) 54%,
+      rgba(228, 236, 248, 0.96)
+    );
   box-shadow: 0 18px 44px rgba(75, 107, 255, 0.1);
 }
 
@@ -6992,7 +8076,11 @@ onUnmounted(() => {
   text-align: center;
   background:
     linear-gradient(180deg, transparent 45%, rgba(16, 28, 48, 0.72)),
-    radial-gradient(circle at 50% 18%, rgba(75, 107, 255, 0.42), transparent 22%),
+    radial-gradient(
+      circle at 50% 18%,
+      rgba(75, 107, 255, 0.42),
+      transparent 22%
+    ),
     linear-gradient(180deg, #243453, #172235);
 }
 
@@ -7014,7 +8102,10 @@ onUnmounted(() => {
   position: fixed;
   right: var(--shell-pad, 18px);
   bottom: max(12px, var(--app-safe-bottom));
-  left: calc(var(--shell-pad, 18px) + var(--shell-sidebar-width, 252px) + var(--shell-gap, 18px));
+  left: calc(
+    var(--shell-pad, 18px) + var(--shell-sidebar-width, 252px) +
+      var(--shell-gap, 18px)
+  );
   z-index: 20;
   display: flex;
   align-items: center;
@@ -7473,7 +8564,11 @@ onUnmounted(() => {
   overflow: hidden;
   border: 1px solid rgba(121, 144, 184, 0.16);
   border-radius: 22px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(247, 250, 255, 0.88));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.94),
+    rgba(247, 250, 255, 0.88)
+  );
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
 }
 
@@ -7528,7 +8623,11 @@ onUnmounted(() => {
 .step-two-hook-card {
   padding: 12px 14px;
   border-radius: 18px;
-  background: linear-gradient(180deg, rgba(247, 242, 255, 0.96), rgba(245, 248, 255, 0.9));
+  background: linear-gradient(
+    180deg,
+    rgba(247, 242, 255, 0.96),
+    rgba(245, 248, 255, 0.9)
+  );
   box-shadow: none;
 }
 
@@ -7546,7 +8645,11 @@ onUnmounted(() => {
   padding-bottom: 16px;
   border: 1px solid rgba(121, 144, 184, 0.14);
   border-radius: 22px;
-  background: linear-gradient(180deg, rgba(248, 250, 255, 0.96), rgba(240, 245, 255, 0.9));
+  background: linear-gradient(
+    180deg,
+    rgba(248, 250, 255, 0.96),
+    rgba(240, 245, 255, 0.9)
+  );
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92);
   scrollbar-gutter: stable;
   scrollbar-width: thin;
@@ -7567,8 +8670,11 @@ onUnmounted(() => {
   min-height: 42px;
   border: 2px solid rgba(255, 255, 255, 0.72);
   border-radius: 999px;
-  background:
-    linear-gradient(180deg, rgba(75, 107, 255, 0.34), rgba(75, 199, 187, 0.42))
+  background: linear-gradient(
+      180deg,
+      rgba(75, 107, 255, 0.34),
+      rgba(75, 199, 187, 0.42)
+    )
     padding-box;
 }
 
@@ -7577,7 +8683,7 @@ onUnmounted(() => {
 }
 
 .step-two-voice-panel .step-two-slider-grid {
-  display: none;
+  display: grid;
 }
 
 .step-two-control-grid,
@@ -7745,7 +8851,11 @@ onUnmounted(() => {
   gap: 11px;
   padding: 12px;
   border-radius: 22px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 249, 255, 0.9));
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.96),
+    rgba(246, 249, 255, 0.9)
+  );
 }
 
 .lip-sync-setup-card__tabs {
@@ -8100,7 +9210,7 @@ onUnmounted(() => {
   left: 3px;
   width: 24px;
   height: 24px;
-  content: '';
+  content: "";
   border-radius: 50%;
   background: #ffffff;
   box-shadow: 0 3px 8px rgba(15, 23, 42, 0.2);
@@ -8381,7 +9491,11 @@ onUnmounted(() => {
   padding: 28px;
   border-left: 1px solid #edf0f5;
   background:
-    radial-gradient(circle at 70% 8%, rgba(124, 58, 237, 0.04), transparent 28%),
+    radial-gradient(
+      circle at 70% 8%,
+      rgba(124, 58, 237, 0.04),
+      transparent 28%
+    ),
     #ffffff;
 }
 
@@ -8463,8 +9577,13 @@ onUnmounted(() => {
 .smart-phone-placeholder::after {
   position: absolute;
   inset: 0;
-  content: '';
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0.08), transparent 38%, rgba(0, 0, 0, 0.58));
+  content: "";
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.08),
+    transparent 38%,
+    rgba(0, 0, 0, 0.58)
+  );
 }
 
 .smart-phone-copy {
@@ -8545,7 +9664,8 @@ onUnmounted(() => {
   grid-template-columns: minmax(500px, 1.04fr) minmax(500px, 0.96fr);
   column-gap: clamp(28px, 2.6vw, 46px);
   row-gap: 22px;
-  padding: clamp(30px, 3vw, 52px) clamp(28px, 2vw, 40px) 28px clamp(38px, 3vw, 58px);
+  padding: clamp(30px, 3vw, 52px) clamp(28px, 2vw, 40px) 28px
+    clamp(38px, 3vw, 58px);
 }
 
 .smart-editor-head {

@@ -15,10 +15,24 @@ export interface AvatarResourceDto {
   recommended: boolean;
   coverUrl: string;
   originalVideoUrl: string | null;
+  renderMode: 'source-video';
+  canUseForRender: boolean;
+  renderUnavailableReason: string | null;
   styleId: string | null;
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AvatarSavedVideoDto {
+  avatarId: string;
+  avatarName: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  mtime: string;
+  previewUrl: string;
+  metadataUrl: string;
 }
 
 export interface VoiceResourceDto {
@@ -28,6 +42,10 @@ export interface VoiceResourceDto {
   recommended: boolean;
   audioUrl: string;
   cloneStatus: 'ready' | 'processing' | 'failed';
+  renderMode: 'tts' | 'sample-audio';
+  canUseForRender: boolean;
+  renderUnavailableReason: string | null;
+  supportsDynamicTts: boolean;
   provider: string | null;
   providerVoice: string | null;
   providerModel: string | null;

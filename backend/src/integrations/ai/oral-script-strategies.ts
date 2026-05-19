@@ -48,7 +48,8 @@ export const ORAL_SCRIPT_STRATEGIES: OralScriptStrategy[] = [
       '适合把“做到什么结果”说得更明确。',
     ],
     mockHook3Lead: '先说结论，照这个思路做，',
-    mockHook10Lead: '接下来 10 秒，我把结果为什么能出来，以及你该怎么照着做讲清楚。',
+    mockHook10Lead:
+      '接下来 10 秒，我把结果为什么能出来，以及你该怎么照着做讲清楚。',
     mockBodyLead: '我们先锁定结果，再倒推关键动作：',
     mockEnding: '先亮结果再拆过程，会更适合短视频用户的阅读习惯。',
   },
@@ -104,7 +105,8 @@ export const ORAL_SCRIPT_STRATEGIES: OralScriptStrategy[] = [
       '正文要围绕场景推进，不要发散。',
     ],
     mockHook3Lead: '想象一下，你现在正遇到这个场景，',
-    mockHook10Lead: '接下来 10 秒，我把这个场景里最该怎么说、怎么做直接排给你。',
+    mockHook10Lead:
+      '接下来 10 秒，我把这个场景里最该怎么说、怎么做直接排给你。',
     mockBodyLead: '从场景切进去，这段文案会更有代入感：',
     mockEnding: '有场景的口播更容易让用户把内容和自己对上号。',
   },
@@ -118,7 +120,8 @@ export const ORAL_SCRIPT_STRATEGIES: OralScriptStrategy[] = [
       '结尾要给人一种被理解、被接住的感觉。',
     ],
     mockHook3Lead: '如果你最近也被这件事反复消耗，先听我一句，',
-    mockHook10Lead: '再给我 10 秒，我把最容易共鸣、也最能打动人的那层意思讲出来。',
+    mockHook10Lead:
+      '再给我 10 秒，我把最容易共鸣、也最能打动人的那层意思讲出来。',
     mockBodyLead: '先把情绪接住，再把方法讲透：',
     mockEnding: '有共鸣的讲法更容易让视频被看完，也更容易带来互动。',
   },
@@ -132,7 +135,8 @@ export const ORAL_SCRIPT_STRATEGIES: OralScriptStrategy[] = [
       '结尾留一个可自然承接评论互动的问题。',
     ],
     mockHook3Lead: '你有没有发现，真正拉开差距的往往不是努力，而是，',
-    mockHook10Lead: '你再听 10 秒，我问你的这个问题，很可能正好卡住了这段内容的重点。',
+    mockHook10Lead:
+      '你再听 10 秒，我问你的这个问题，很可能正好卡住了这段内容的重点。',
     mockBodyLead: '用提问带着观众往下听，会更自然：',
     mockEnding: '如果你也遇到过类似情况，后面完全可以顺势接一句互动提问。',
   },

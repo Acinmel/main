@@ -16,6 +16,7 @@ const emit = defineEmits<{
   delete: []
   preview: []
   create: []
+  'request-preview': []
 }>()
 
 const editing = ref(false)
@@ -38,6 +39,12 @@ function pauseVideoPreview(event: Event) {
   video.pause()
 }
 
+function requestCardPreview() {
+  if (!hasSourceVideo.value) return
+  if (props.previewVideoUrl || props.previewLoading) return
+  emit('request-preview')
+}
+
 function formatCreatedAt(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
@@ -48,7 +55,11 @@ function formatCreatedAt(value: string) {
 
 <template>
   <n-card class="resource-card" content-style="padding: 0">
-    <div class="resource-card__media" :class="{ 'resource-card__media--video': previewVideoUrl }">
+    <div
+      class="resource-card__media"
+      :class="{ 'resource-card__media--video': previewVideoUrl }"
+      @pointerenter="requestCardPreview"
+    >
       <video
         v-if="previewVideoUrl"
         :src="previewVideoUrl"

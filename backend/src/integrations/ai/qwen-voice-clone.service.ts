@@ -50,6 +50,8 @@ type CreateQwenVoiceDesignParams = {
   responseFormat?: 'pcm' | 'wav' | 'mp3' | 'opus' | null;
 };
 
+type QwenProviderResponse = Record<string, unknown>;
+
 @Injectable()
 export class QwenVoiceCloneService {
   private readonly logger = new Logger(QwenVoiceCloneService.name);
@@ -80,12 +82,19 @@ export class QwenVoiceCloneService {
   ): Promise<QwenVoiceCloneResult> {
     const apiKey = this.resolveApiKey();
     if (!apiKey) {
-      throw new BadRequestException('请先配置 DASHSCOPE_API_KEY 后再进行声音克隆');
+      throw new BadRequestException(
+        '请先配置 DASHSCOPE_API_KEY 后再进行声音克隆',
+      );
     }
 
     const preferredName = this.sanitizePreferredName(params.preferredName);
+    const clonePrefix = this.sanitizeClonePrefix(params.preferredName);
     let targetModel = this.resolveCloneTargetModel();
-    if (this.isCosyVoiceModel(targetModel) && !params.sample.url?.trim() && params.sample.buffer?.length) {
+    if (
+      this.isCosyVoiceModel(targetModel) &&
+      !params.sample.url?.trim() &&
+      params.sample.buffer?.length
+    ) {
       targetModel =
         this.config.get<string>('QWEN_UPLOAD_CLONE_FALLBACK_MODEL')?.trim() ||
         LEGACY_UPLOAD_CLONE_FALLBACK_MODEL;
@@ -106,7 +115,7 @@ export class QwenVoiceCloneService {
         input: {
           action: 'create_voice',
           target_model: targetModel,
-          prefix: preferredName,
+          prefix: clonePrefix,
           url: sampleUrl,
           language_hints: this.normalizeLanguageHints(params.language),
         },
@@ -119,16 +128,20 @@ export class QwenVoiceCloneService {
         { timeoutMs: this.resolveVoiceCloneTimeoutMs() },
       );
 
-      const voice = this.readString(response?.output?.voice);
+      const output = this.readRecord(response.output);
+      const voice =
+        this.readString(output?.voice) || this.readString(output?.voice_id);
       if (!voice) {
-        throw new BadRequestException('阿里云 CosyVoice 声音复刻未返回可用 voice');
+        throw new BadRequestException(
+          '阿里云 CosyVoice 声音复刻未返回可用 voice',
+        );
       }
 
       return {
         provider: 'aliyun-qwen-vc',
         voice,
         targetModel,
-        requestId: this.readString(response?.request_id),
+        requestId: this.readString(response.request_id),
       };
     }
 
@@ -143,7 +156,9 @@ export class QwenVoiceCloneService {
         ...(params.transcriptText?.trim()
           ? { text: params.transcriptText.trim().slice(0, 1024) }
           : {}),
-        ...(params.language?.trim() ? { language: params.language.trim() } : {}),
+        ...(params.language?.trim()
+          ? { language: params.language.trim() }
+          : {}),
       },
     };
 
@@ -154,9 +169,10 @@ export class QwenVoiceCloneService {
       { timeoutMs: this.resolveVoiceCloneTimeoutMs() },
     );
 
-    const voice = this.readString(response?.output?.voice);
+    const output = this.readRecord(response.output);
+    const voice = this.readString(output?.voice);
     const responseTargetModel =
-      this.readString(response?.output?.target_model) || targetModel;
+      this.readString(output?.target_model) || targetModel;
 
     if (!voice) {
       throw new BadRequestException('阿里云声音克隆未返回可用 voice');
@@ -166,7 +182,7 @@ export class QwenVoiceCloneService {
       provider: 'aliyun-qwen-vc',
       voice,
       targetModel: responseTargetModel,
-      requestId: this.readString(response?.request_id),
+      requestId: this.readString(response.request_id),
     };
   }
 
@@ -175,13 +191,17 @@ export class QwenVoiceCloneService {
   ): Promise<QwenVoiceDesignResult> {
     const apiKey = this.resolveApiKey();
     if (!apiKey) {
-      throw new BadRequestException('DASHSCOPE_API_KEY is required for voice design');
+      throw new BadRequestException(
+        'DASHSCOPE_API_KEY is required for voice design',
+      );
     }
 
     const voicePrompt = params.voicePrompt.trim();
     const previewText = params.previewText.trim();
     if (!voicePrompt || !previewText) {
-      throw new BadRequestException('voice_prompt and preview_text are required');
+      throw new BadRequestException(
+        'voice_prompt and preview_text are required',
+      );
     }
 
     const targetModel = this.resolveDesignTargetModel();
@@ -208,34 +228,39 @@ export class QwenVoiceCloneService {
       payload,
     );
 
-    const voice = this.readString(response?.output?.voice);
+    const output = this.readRecord(response.output);
+    const previewAudio = this.readRecord(output?.preview_audio);
+    const voice = this.readString(output?.voice);
     const responseTargetModel =
-      this.readString(response?.output?.target_model) || targetModel;
-    const audioData = this.readString(response?.output?.preview_audio?.data);
+      this.readString(output?.target_model) || targetModel;
+    const audioData = this.readString(previewAudio?.data);
     if (!voice || !audioData) {
-      throw new BadRequestException('Voice design did not return a usable voice or preview audio');
+      throw new BadRequestException(
+        'Voice design did not return a usable voice or preview audio',
+      );
     }
 
     const buffer = Buffer.from(audioData, 'base64');
     if (buffer.length < 128) {
-      throw new BadRequestException('Voice design returned an empty preview audio');
+      throw new BadRequestException(
+        'Voice design returned an empty preview audio',
+      );
     }
 
     const returnedFormat =
-      this.readString(response?.output?.preview_audio?.response_format) ||
-      responseFormat;
+      this.readString(previewAudio?.response_format) || responseFormat;
 
     return {
       provider: 'aliyun-qwen-vd',
       voice,
       targetModel: responseTargetModel,
-      requestId: this.readString(response?.request_id),
+      requestId: this.readString(response.request_id),
       previewAudio: {
         buffer,
         mimeType: this.mimeTypeForAudioFormat(returnedFormat),
         sampleRate:
-          typeof response?.output?.preview_audio?.sample_rate === 'number'
-            ? response.output.preview_audio.sample_rate
+          typeof previewAudio?.sample_rate === 'number'
+            ? previewAudio.sample_rate
             : null,
         responseFormat: returnedFormat,
       },
@@ -262,7 +287,9 @@ export class QwenVoiceCloneService {
   }> {
     const apiKey = this.resolveApiKey();
     if (!apiKey) {
-      throw new BadRequestException('请先配置 DASHSCOPE_API_KEY 后再进行语音合成');
+      throw new BadRequestException(
+        '请先配置 DASHSCOPE_API_KEY 后再进行语音合成',
+      );
     }
 
     const model = params.targetModel?.trim() || this.resolveCloneTargetModel();
@@ -283,7 +310,9 @@ export class QwenVoiceCloneService {
         ...(languageType ? { language_type: languageType } : {}),
         ...style.input,
       },
-      ...(Object.keys(style.parameters).length ? { parameters: style.parameters } : {}),
+      ...(Object.keys(style.parameters).length
+        ? { parameters: style.parameters }
+        : {}),
     };
 
     const response = await this.postJson(
@@ -292,21 +321,23 @@ export class QwenVoiceCloneService {
       payload,
     );
 
-    const audioUrl = this.readString(response?.output?.audio?.url);
-    const requestId = this.readString(response?.request_id);
+    const output = this.readRecord(response.output);
+    const outputAudio = this.readRecord(output?.audio);
+    const audioUrl = this.readString(outputAudio?.url);
+    const requestId = this.readString(response.request_id);
 
     if (!audioUrl) {
       throw new BadRequestException('阿里云语音合成未返回音频地址');
     }
 
-    const audio = await this.fetchBinary(audioUrl);
-    if (audio.buffer.length < 128) {
+    const synthesizedAudio = await this.fetchBinary(audioUrl);
+    if (synthesizedAudio.buffer.length < 128) {
       throw new BadRequestException('阿里云语音合成返回的音频内容过小');
     }
 
     return {
-      buffer: audio.buffer,
-      mimeType: audio.mimeType,
+      buffer: synthesizedAudio.buffer,
+      mimeType: synthesizedAudio.mimeType,
       providerVoice: params.voice,
       requestId,
       audioUrl,
@@ -386,13 +417,17 @@ export class QwenVoiceCloneService {
   }> {
     const apiKey = this.resolveApiKey();
     if (!apiKey) {
-      throw new BadRequestException('请先配置 DASHSCOPE_API_KEY 后再进行语音合成');
+      throw new BadRequestException(
+        '请先配置 DASHSCOPE_API_KEY 后再进行语音合成',
+      );
     }
 
     const style = this.buildSynthesisStyle(params.model, params);
     const responseFormat =
       this.config.get<string>('QWEN_TTS_RESPONSE_FORMAT')?.trim() || 'mp3';
-    const rawSampleRate = Number(this.config.get('QWEN_TTS_SAMPLE_RATE') ?? 24_000);
+    const rawSampleRate = Number(
+      this.config.get('QWEN_TTS_SAMPLE_RATE') ?? 24_000,
+    );
     const payload = {
       model: params.model,
       input: {
@@ -403,7 +438,9 @@ export class QwenVoiceCloneService {
         language_hints: this.normalizeLanguageHints(params.languageType),
         ...style.input,
       },
-      ...(Object.keys(style.parameters).length ? { parameters: style.parameters } : {}),
+      ...(Object.keys(style.parameters).length
+        ? { parameters: style.parameters }
+        : {}),
     };
 
     const response = await this.postJson(
@@ -412,20 +449,24 @@ export class QwenVoiceCloneService {
       payload,
     );
 
-    const audioUrl = this.readString(response?.output?.audio?.url);
-    const requestId = this.readString(response?.request_id);
+    const output = this.readRecord(response.output);
+    const outputAudio = this.readRecord(output?.audio);
+    const audioUrl = this.readString(outputAudio?.url);
+    const requestId = this.readString(response.request_id);
     if (!audioUrl) {
       throw new BadRequestException('阿里云 CosyVoice 语音合成未返回音频地址');
     }
 
-    const audio = await this.fetchBinary(audioUrl);
-    if (audio.buffer.length < 128) {
-      throw new BadRequestException('阿里云 CosyVoice 语音合成返回的音频内容过小');
+    const synthesizedAudio = await this.fetchBinary(audioUrl);
+    if (synthesizedAudio.buffer.length < 128) {
+      throw new BadRequestException(
+        '阿里云 CosyVoice 语音合成返回的音频内容过小',
+      );
     }
 
     return {
-      buffer: audio.buffer,
-      mimeType: audio.mimeType,
+      buffer: synthesizedAudio.buffer,
+      mimeType: synthesizedAudio.mimeType,
       providerVoice: params.voice,
       requestId,
       audioUrl,
@@ -476,7 +517,9 @@ export class QwenVoiceCloneService {
     return Number.isFinite(raw) && raw >= 60_000 ? raw : 600_000;
   }
 
-  private resolveSampleData(sample: CreateQwenVoiceCloneParams['sample']): string {
+  private resolveSampleData(
+    sample: CreateQwenVoiceCloneParams['sample'],
+  ): string {
     const sampleUrl = sample.url?.trim();
     if (sampleUrl) {
       return sampleUrl;
@@ -503,6 +546,22 @@ export class QwenVoiceCloneService {
       .replace(/^_+|_+$/g, '')
       .slice(0, 16);
     return normalized || `voice_${Date.now().toString(36).slice(-8)}`;
+  }
+
+  private sanitizeClonePrefix(name: string): string {
+    const alnum = name
+      .trim()
+      .replace(/[^0-9A-Za-z]+/g, '')
+      .toLowerCase();
+    const base = alnum.slice(0, 10);
+    if (base) {
+      return /^[a-z]/i.test(base) ? base : `v${base}`.slice(0, 10);
+    }
+    const fallback = `v${Date.now()
+      .toString(36)
+      .replace(/[^0-9a-z]/g, '')
+      .slice(-9)}`;
+    return fallback.padEnd(10, '0').slice(0, 10);
   }
 
   private mimeTypeForAudioFormat(format: string): string {
@@ -551,7 +610,10 @@ export class QwenVoiceCloneService {
       typeof params.speechRate === 'number' &&
       Number.isFinite(params.speechRate)
     ) {
-      parameters.rate = Math.min(2, Math.max(0.5, Number(params.speechRate.toFixed(2))));
+      parameters.rate = Math.min(
+        2,
+        Math.max(0.5, Number(params.speechRate.toFixed(2))),
+      );
     }
 
     if (
@@ -559,7 +621,10 @@ export class QwenVoiceCloneService {
       typeof params.volume === 'number' &&
       Number.isFinite(params.volume)
     ) {
-      parameters.volume = Math.min(100, Math.max(0, Math.round(params.volume * 50)));
+      parameters.volume = Math.min(
+        100,
+        Math.max(0, Math.round(params.volume * 50)),
+      );
     }
 
     if (
@@ -567,19 +632,22 @@ export class QwenVoiceCloneService {
       typeof params.pitch === 'number' &&
       Number.isFinite(params.pitch)
     ) {
-      parameters.pitch = Math.min(2, Math.max(0.5, Number(params.pitch.toFixed(2))));
+      parameters.pitch = Math.min(
+        2,
+        Math.max(0.5, Number(params.pitch.toFixed(2))),
+      );
     }
 
-    const applied = Object.keys(input).length > 0 || Object.keys(parameters).length > 0;
+    const applied =
+      Object.keys(input).length > 0 || Object.keys(parameters).length > 0;
     if (hasInstruction && !supportsInstruction) {
       return {
         input,
         parameters,
         applied,
-        hint:
-          applied
-            ? '当前音色模型不支持情绪指令，已应用语速/音量/音调参数生成。'
-            : '当前音色模型不支持情绪指令，已按原音色合成。',
+        hint: applied
+          ? '当前音色模型不支持情绪指令，已应用语速/音量/音调参数生成。'
+          : '当前音色模型不支持情绪指令，已按原音色合成。',
       };
     }
 
@@ -587,7 +655,9 @@ export class QwenVoiceCloneService {
       input,
       parameters,
       applied,
-      hint: applied ? `已使用 ${model} 的情绪指令或语速/音量/音调参数生成配音。` : undefined,
+      hint: applied
+        ? `已使用 ${model} 的情绪指令或语速/音量/音调参数生成配音。`
+        : undefined,
     };
   }
 
@@ -614,9 +684,11 @@ export class QwenVoiceCloneService {
     const raw = language?.trim().toLowerCase();
     if (!raw) return ['zh'];
     if (raw.includes('en') || raw === 'english') return ['en'];
-    if (raw.includes('ja') || raw.includes('jp') || raw === 'japanese') return ['ja'];
+    if (raw.includes('ja') || raw.includes('jp') || raw === 'japanese')
+      return ['ja'];
     if (raw.includes('ko') || raw === 'korean') return ['ko'];
-    if (raw.includes('yue') || raw.includes('hk') || raw.includes('cantonese')) return ['yue'];
+    if (raw.includes('yue') || raw.includes('hk') || raw.includes('cantonese'))
+      return ['yue'];
     return ['zh'];
   }
 
@@ -668,8 +740,10 @@ export class QwenVoiceCloneService {
     apiKey: string,
     payload: Record<string, unknown>,
     options: { timeoutMs?: number } = {},
-  ): Promise<any> {
-    const timeoutMs = Number(options.timeoutMs ?? this.config.get('OPENAI_TIMEOUT_MS') ?? 120_000);
+  ): Promise<QwenProviderResponse> {
+    const timeoutMs = Number(
+      options.timeoutMs ?? this.config.get('OPENAI_TIMEOUT_MS') ?? 120_000,
+    );
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -698,13 +772,15 @@ export class QwenVoiceCloneService {
       const json = text ? this.tryParseJson(text) : null;
 
       if (!response.ok) {
-        const providerMessage = this.formatProviderError(response.status, json, text);
-        throw new BadRequestException(
-          `阿里云语音接口失败：${providerMessage}`,
+        const providerMessage = this.formatProviderError(
+          response.status,
+          json,
+          text,
         );
+        throw new BadRequestException(`阿里云语音接口失败：${providerMessage}`);
       }
 
-      return json ?? {};
+      return this.readRecord(json) ?? {};
     } finally {
       clearTimeout(timer);
     }
@@ -752,7 +828,7 @@ export class QwenVoiceCloneService {
     return typeof value === 'string' && value.trim() ? value.trim() : null;
   }
 
-  private tryParseJson(text: string): any {
+  private tryParseJson(text: string): unknown {
     try {
       return JSON.parse(text);
     } catch {
@@ -760,15 +836,26 @@ export class QwenVoiceCloneService {
     }
   }
 
-  private formatProviderError(status: number, json: any, rawText: string): string {
-    const code = this.readString(json?.code);
-    const message = this.readString(json?.message);
-    const requestId = this.readString(json?.request_id);
+  private formatProviderError(
+    status: number,
+    json: unknown,
+    rawText: string,
+  ): string {
+    const payload = this.readRecord(json);
+    const code = this.readString(payload?.code);
+    const message = this.readString(payload?.message);
+    const requestId = this.readString(payload?.request_id);
     const parts = [`HTTP ${status}`];
     if (code) parts.push(code);
     if (message) parts.push(message);
     if (requestId) parts.push(`request_id=${requestId}`);
     if (parts.length > 1) return parts.join(' | ');
     return `HTTP ${status} ${rawText.slice(0, 500)}`;
+  }
+
+  private readRecord(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
   }
 }

@@ -10,9 +10,10 @@ export function assertUrlSafeForServerFetch(url: URL): void {
   }
   /** 部分环境下 IPv6 的 hostname 形如 `[::1]`，需去括号后再做 isIPv6 / 分段判断 */
   const raw = url.hostname.split('%')[0];
-  const host = raw.startsWith('[') && raw.endsWith(']')
-    ? raw.slice(1, -1).toLowerCase()
-    : raw.toLowerCase();
+  const host =
+    raw.startsWith('[') && raw.endsWith(']')
+      ? raw.slice(1, -1).toLowerCase()
+      : raw.toLowerCase();
 
   if (host === 'localhost' || host.endsWith('.localhost')) {
     throw new BadRequestException('不允许抓取本机地址');
@@ -36,8 +37,10 @@ function assertIpv4OctetsPrivate(m: RegExpExecArray): void {
   if (a === 10) throw new BadRequestException('不允许抓取私网地址');
   if (a === 127) throw new BadRequestException('不允许抓取回环地址');
   if (a === 0) throw new BadRequestException('不允许抓取保留地址');
-  if (a === 169 && b === 254) throw new BadRequestException('不允许抓取链路本地地址');
-  if (a === 192 && b === 168) throw new BadRequestException('不允许抓取私网地址');
+  if (a === 169 && b === 254)
+    throw new BadRequestException('不允许抓取链路本地地址');
+  if (a === 192 && b === 168)
+    throw new BadRequestException('不允许抓取私网地址');
   if (a === 172 && b >= 16 && b <= 31) {
     throw new BadRequestException('不允许抓取私网地址');
   }
@@ -49,7 +52,8 @@ function assertIPv6Safe(host: string): void {
   }
 
   /** IPv4-mapped IPv6：::ffff:a.b.c.d（部分运行时会规范为 ::ffff:7f00:1 等双十六进制段） */
-  const mappedDotted = /^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/i.exec(host);
+  const mappedDotted =
+    /^::ffff:(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/i.exec(host);
   if (mappedDotted) {
     assertIpv4OctetsPrivate(mappedDotted);
     return;

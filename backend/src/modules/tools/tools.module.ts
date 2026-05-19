@@ -7,6 +7,10 @@ import { VideoMediaDownloadService } from '../../integrations/video/video-media-
 import { VideoMetaService } from '../../integrations/video/video-meta.service';
 import { ResourcesModule } from '../resources/resources.module';
 import { SubtitleWorkflowService } from './subtitle-workflow.service';
+import { TaskStatusCacheService } from './task-status-cache.service';
+import { VoicePreviewTaskService } from './voice-preview-task.service';
+import { RecentExtractionService } from './recent-extraction.service';
+import { SavedVideoService } from './saved-video.service';
 import { ToolsController } from './tools.controller';
 import { VideoProjectRenderService } from './video-project-render.service';
 import { VideoProjectsController } from './video-projects.controller';
@@ -20,6 +24,10 @@ import { VideoProjectsController } from './video-projects.controller';
     VideoMediaDownloadService,
     FfmpegAudioService,
     SubtitleWorkflowService,
+    TaskStatusCacheService,
+    VoicePreviewTaskService,
+    RecentExtractionService,
+    SavedVideoService,
     VideoProjectRenderService,
   ],
 })

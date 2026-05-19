@@ -1,5 +1,7 @@
-import type { INestApplication } from '@nestjs/common';
+import { Logger, type INestApplication } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
+
+const httpTimingLogger = new Logger('HttpTiming');
 
 /**
  * Shared HTTP bootstrap config for local e2e and production runtime.
@@ -8,6 +10,7 @@ export function configureHttpApp(app: INestApplication): void {
   app.setGlobalPrefix('api');
   assertProductionRuntimeConfig();
   applySecurityHeaders(app);
+  applyRequestTiming(app);
   applyCors(app);
   applyTrustProxy(app);
   applyBasicRateLimit(app);
@@ -54,6 +57,24 @@ function applySecurityHeaders(app: INestApplication): void {
         'max-age=31536000; includeSubDomains',
       );
     }
+    next();
+  });
+}
+
+function applyRequestTiming(app: INestApplication): void {
+  const slowMs = readPositiveInt('HTTP_SLOW_LOG_MS', 800);
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const start = process.hrtime.bigint();
+    res.on('finish', () => {
+      const durationMs = Number(process.hrtime.bigint() - start) / 1_000_000;
+      const rounded = Math.round(durationMs);
+      const line = `${req.method} ${req.originalUrl || req.url} ${res.statusCode} ${rounded}ms`;
+      if (rounded >= slowMs || res.statusCode >= 500) {
+        httpTimingLogger.warn(line);
+        return;
+      }
+      httpTimingLogger.log(line);
+    });
     next();
   });
 }

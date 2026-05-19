@@ -52,6 +52,22 @@ export interface TaskFlagsDto {
   outputReady: boolean;
 }
 
+export interface TaskProgressStepDto {
+  key: TaskStatus;
+  label: string;
+  status: 'waiting' | 'running' | 'done' | 'failed';
+  startedAt?: string;
+  endedAt?: string;
+  durationMs?: number;
+  error?: string;
+}
+
+export interface TaskProgressDto {
+  percentage: number;
+  label: string;
+  steps: TaskProgressStepDto[];
+}
+
 export interface TaskDetailDto {
   id: string;
   userId: string;
@@ -60,6 +76,7 @@ export interface TaskDetailDto {
   createdAt: string;
   updatedAt: string;
   failReason?: string;
+  progress: TaskProgressDto;
   photo: {
     originalName: string;
     mimeType: string;
@@ -95,6 +112,22 @@ export interface TaskInternal {
   createdAt: string;
   updatedAt: string;
   failReason?: string;
+  metrics?: {
+    startedAt: string;
+    completedAt?: string;
+    steps: Partial<
+      Record<
+        TaskStatus,
+        {
+          label: string;
+          startedAt?: string;
+          endedAt?: string;
+          durationMs?: number;
+          error?: string;
+        }
+      >
+    >;
+  };
   photo?: {
     originalName: string;
     mimeType: string;

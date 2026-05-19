@@ -41,6 +41,22 @@ export interface TaskFlags {
   outputReady: boolean
 }
 
+export interface TaskProgressStep {
+  key: TaskStatus
+  label: string
+  status: 'waiting' | 'running' | 'done' | 'failed'
+  startedAt?: string
+  endedAt?: string
+  durationMs?: number
+  error?: string
+}
+
+export interface TaskProgress {
+  percentage: number
+  label: string
+  steps: TaskProgressStep[]
+}
+
 export interface TaskDetail {
   id: string
   userId: string
@@ -49,6 +65,7 @@ export interface TaskDetail {
   createdAt: string
   updatedAt: string
   failReason?: string
+  progress?: TaskProgress
   photo: {
     originalName: string
     mimeType: string

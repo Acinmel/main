@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 import {
   resolveOpenAiStyleV1Base,
   resolveSpeechApiKey,
@@ -81,7 +82,9 @@ export class SpeechAiService {
   }
 
   isConfigured(): boolean {
-    return Boolean(resolveSpeechApiKey(this.config) || this.qwenVoiceClone.isConfigured());
+    return Boolean(
+      resolveSpeechApiKey(this.config) || this.qwenVoiceClone.isConfigured(),
+    );
   }
 
   async synthesizeAudio(params: {
@@ -101,16 +104,22 @@ export class SpeechAiService {
     styleApplied?: boolean;
     styleHint?: string;
   }> {
-    if (this.isQwenCustomVoiceProvider(params.provider) && params.providerVoice) {
+    if (
+      this.isQwenCustomVoiceProvider(params.provider) &&
+      params.providerVoice
+    ) {
       if (!this.qwenVoiceClone.isConfigured()) {
-        throw new BadRequestException('DASHSCOPE_API_KEY is required for Qwen custom voices');
+        throw new BadRequestException(
+          'DASHSCOPE_API_KEY is required for Qwen custom voices',
+        );
       }
 
       const qwenSpeech = await this.qwenVoiceClone.synthesizeVoice({
         text: params.text,
         voice: params.providerVoice,
         targetModel: params.providerModel,
-        languageType: params.voiceTuning?.language || this.detectLanguageType(params.text),
+        languageType:
+          params.voiceTuning?.language || this.detectLanguageType(params.text),
         instruction: this.buildVoiceInstruction(params.voiceTuning),
         speechRate: params.voiceTuning?.speechRate,
         volume: params.voiceTuning?.volume,
@@ -130,7 +139,8 @@ export class SpeechAiService {
     if (this.qwenVoiceClone.isConfigured()) {
       const qwenSpeech = await this.qwenVoiceClone.synthesizeDefaultVoice({
         text: params.text,
-        languageType: params.voiceTuning?.language || this.detectLanguageType(params.text),
+        languageType:
+          params.voiceTuning?.language || this.detectLanguageType(params.text),
         instruction: this.buildVoiceInstruction(params.voiceTuning),
         speechRate: params.voiceTuning?.speechRate,
         volume: params.voiceTuning?.volume,
@@ -165,12 +175,17 @@ export class SpeechAiService {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const res = await fetch(req.url, {
-        method: 'POST',
-        headers: req.headers,
-        body: JSON.stringify(req.body),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(
+        this.config,
+        () =>
+          fetch(req.url, {
+            method: 'POST',
+            headers: req.headers,
+            body: JSON.stringify(req.body),
+            signal: controller.signal,
+          }),
+        { retries: 1 },
+      );
       if (!res.ok) {
         const text = await res.text().catch(() => '');
         throw new BadRequestException(
@@ -205,6 +220,7 @@ export class SpeechAiService {
   }): Promise<{ ok: boolean; note: string }> {
     const apiKey = resolveSpeechApiKey(this.config);
     const req = this.buildOpenAiSpeechRequest(params.text, params.voiceStyleId);
+    await Promise.resolve();
     if (!apiKey) {
       this.logger.log(
         `task=${params.taskId} TTS skipped because no generic speech key is configured: ${JSON.stringify(
@@ -228,7 +244,11 @@ export class SpeechAiService {
   }
 
   private normalizeMimeType(input: string): SpeechMimeType {
-    if (input === 'audio/wav' || input === 'audio/mp4' || input === 'audio/mpeg') {
+    if (
+      input === 'audio/wav' ||
+      input === 'audio/mp4' ||
+      input === 'audio/mpeg'
+    ) {
       return input;
     }
     return 'application/octet-stream';
@@ -255,13 +275,24 @@ export class SpeechAiService {
       parts.push(emotionMap[emotion] || `${emotion}语气，表达自然`);
     }
 
-    if (typeof tuning.emotionIntensity === 'number' && Number.isFinite(tuning.emotionIntensity)) {
+    if (
+      typeof tuning.emotionIntensity === 'number' &&
+      Number.isFinite(tuning.emotionIntensity)
+    ) {
       const intensity = Math.min(1.5, Math.max(0.6, tuning.emotionIntensity));
-      const label = intensity >= 1.18 ? '情绪更明显' : intensity <= 0.85 ? '情绪更克制' : '情绪适中';
+      const label =
+        intensity >= 1.18
+          ? '情绪更明显'
+          : intensity <= 0.85
+            ? '情绪更克制'
+            : '情绪适中';
       parts.push(label);
     }
 
-    if (typeof tuning.speechRate === 'number' && Number.isFinite(tuning.speechRate)) {
+    if (
+      typeof tuning.speechRate === 'number' &&
+      Number.isFinite(tuning.speechRate)
+    ) {
       if (tuning.speechRate >= 1.08) parts.push('语速稍快但吐字清楚');
       else if (tuning.speechRate <= 0.92) parts.push('语速稍慢，停顿自然');
     }

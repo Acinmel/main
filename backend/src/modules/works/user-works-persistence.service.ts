@@ -1,6 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import type { TaskInternal, TaskStatus, TaskSummaryDto } from '../tasks/tasks.types';
+import type {
+  TaskInternal,
+  TaskStatus,
+  TaskSummaryDto,
+} from '../tasks/tasks.types';
 
 function deriveTitleFromUrl(url: string): string {
   try {
@@ -24,7 +28,16 @@ export class UserWorksPersistenceService {
   /**
    * 列出当前用户的作品摘要（仅本人数据）。
    */
-  async listSummaries(userId: string): Promise<TaskSummaryDto[]> {
+  async listSummaries(
+    userId: string,
+    opts: { page?: number; limit?: number } = {},
+  ): Promise<TaskSummaryDto[]> {
+    const page =
+      Number.isFinite(opts.page) && opts.page! > 0 ? Math.floor(opts.page!) : 1;
+    const limit = Number.isFinite(opts.limit)
+      ? Math.min(100, Math.max(1, Math.floor(opts.limit!)))
+      : 50;
+    const offset = (page - 1) * limit;
     const rows = await this.db.queryAll<{
       id: string;
       status: TaskStatus;
@@ -34,8 +47,8 @@ export class UserWorksPersistenceService {
       title: string;
     }>(
       `SELECT id, status, source_video_url, created_at, updated_at, title
-       FROM user_works WHERE user_id = ? ORDER BY updated_at DESC`,
-      [userId],
+       FROM user_works WHERE user_id = ? ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?`,
+      [userId, limit, offset],
     );
     return rows.map((r) => ({
       id: r.id,
@@ -79,7 +92,8 @@ export class UserWorksPersistenceService {
     digitalHumanStyleId: string | null,
   ): Promise<void> {
     const title =
-      (task.title && task.title.trim()) || deriveTitleFromUrl(task.sourceVideoUrl);
+      (task.title && task.title.trim()) ||
+      deriveTitleFromUrl(task.sourceVideoUrl);
     const transcriptText = task.transcript?.fullText ?? null;
     const rewriteText = task.rewrite?.text ?? null;
     const outputVideoUrl = task.output?.mp4Url ?? null;

@@ -34,6 +34,9 @@ services:
       dockerfile: Dockerfile
       args:
         USE_CN_MIRROR: ${USE_CN_MIRROR:-1}
+        APP_VERSION: ${APP_VERSION:-local}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+        BUILD_TIME_UTC: ${BUILD_TIME_UTC:-unknown}
     restart: unless-stopped
     extra_hosts:
       - 'host.docker.internal:host-gateway'
@@ -45,6 +48,14 @@ services:
     environment:
       NODE_ENV: production
       PORT: '3000'
+      UPLOAD_DIR: ${UPLOAD_DIR:-/workspace/uploads}
+      TEMP_DIR: ${TEMP_DIR:-/workspace/tmp}
+      PUBLIC_UPLOAD_BASE_URL: ${PUBLIC_UPLOAD_BASE_URL:-http://localhost:8080/uploads}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8080}
+      VOICE_PROVIDER_STREAM_SECRET: ${VOICE_PROVIDER_STREAM_SECRET:-}
+      APP_VERSION: ${APP_VERSION:-local}
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      BUILD_TIME_UTC: ${BUILD_TIME_UTC:-unknown}
       MYSQL_HOST: ${MYSQL_HOST:-mysql}
       MYSQL_PORT: ${MYSQL_PORT:-3306}
       MYSQL_USER: ${MYSQL_USER:-koubo}
@@ -55,13 +66,27 @@ services:
       TRUST_PROXY: '1'
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       YTDLP_BIN: /usr/local/bin/yt-dlp
+      ASR_PYTHON_BIN: ${ASR_PYTHON_BIN:-python3}
+      ASR_FUNASR_SCRIPT: ${ASR_FUNASR_SCRIPT:-/workspace/scripts/dashscope_funasr_transcribe.py}
       YTDLP_TIMEOUT_MS: '300000'
       DY_DOWNLOADER_FETCH_TIMEOUT_MS: ${DY_DOWNLOADER_FETCH_TIMEOUT_MS:-300000}
       VIDEO_SAVE_DIR: ${VIDEO_SAVE_DIR:-/workspace/data/download-video}
+      PREVIEW_VIDEO_SAVE_DIR: ${PREVIEW_VIDEO_SAVE_DIR:-/workspace/data/preview-videos}
+      PREVIEW_AUDIO_SAVE_DIR: ${PREVIEW_AUDIO_SAVE_DIR:-/workspace/data/preview-audios}
+      LIP_SYNC_PUBLIC_MEDIA_DIR: ${LIP_SYNC_PUBLIC_MEDIA_DIR:-/workspace/data/lip-sync-public}
+      VOICE_SAMPLE_DIR: ${VOICE_SAMPLE_DIR:-/workspace/data/voice-samples}
       FFMPEG_BIN: /usr/bin/ffmpeg
       DIGITAL_HUMAN_STORAGE_DIR: ${DIGITAL_HUMAN_STORAGE_DIR:-/workspace/data/digital-humans}
+      USER_UPLOAD_RESOURCE_TTL_DAYS: ${USER_UPLOAD_RESOURCE_TTL_DAYS:-7}
+      USER_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS: ${USER_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS:-3600000}
     volumes:
+      - uploads_data:/workspace/uploads
+      - tmp_data:/workspace/tmp
       - video_downloads:/workspace/data/download-video
+      - preview_videos:/workspace/data/preview-videos
+      - preview_audios:/workspace/data/preview-audios
+      - lip_sync_public:/workspace/data/lip-sync-public
+      - voice_samples:/workspace/data/voice-samples
       - digital_human_storage:/workspace/data/digital-humans
     depends_on:
       mysql:
@@ -84,7 +109,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - '${WEB_PORT:-8080}:80'
+      - '${WEB_BIND_HOST:-0.0.0.0}:${WEB_PORT:-8080}:80'
     depends_on:
       api:
         condition: service_healthy
@@ -93,7 +118,13 @@ services:
 
 volumes:
   mysql_data:
+  uploads_data:
+  tmp_data:
   video_downloads:
+  preview_videos:
+  preview_audios:
+  lip_sync_public:
+  voice_samples:
   digital_human_storage:
 
 networks:

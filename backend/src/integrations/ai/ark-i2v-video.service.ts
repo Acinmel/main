@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -77,7 +78,9 @@ export class ArkI2vVideoService {
 
     const model = (body.model?.trim() || this.defaultModel()).trim();
     const url = `${this.resolveBaseUrl()}/contents/generations/tasks`;
-    const timeoutMs = Number(this.config.get('ARK_I2V_HTTP_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(
+      this.config.get('ARK_I2V_HTTP_TIMEOUT_MS') ?? 120_000,
+    );
 
     const payload = {
       model,
@@ -94,15 +97,17 @@ export class ArkI2vVideoService {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(this.config, () =>
+        fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        }),
+      );
 
       const text = await res.text();
       let data: unknown;
@@ -113,7 +118,9 @@ export class ArkI2vVideoService {
       }
 
       if (!res.ok) {
-        this.logger.warn(`Ark i2v task HTTP ${res.status}: ${text.slice(0, 500)}`);
+        this.logger.warn(
+          `Ark i2v task HTTP ${res.status}: ${text.slice(0, 500)}`,
+        );
       }
 
       return { status: res.status, data };
@@ -129,24 +136,33 @@ export class ArkI2vVideoService {
   /**
    * 查询任务详情（轮询用）。
    */
-  async getTaskById(taskId: string): Promise<{ status: number; data: unknown }> {
+  async getTaskById(
+    taskId: string,
+  ): Promise<{ status: number; data: unknown }> {
     const apiKey = this.resolveApiKey();
     if (!apiKey) {
       throw new BadRequestException('未配置 ARK_API_KEY');
     }
     const url = `${this.resolveBaseUrl()}/contents/generations/tasks/${encodeURIComponent(taskId)}`;
-    const timeoutMs = Number(this.config.get('ARK_I2V_HTTP_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(
+      this.config.get('ARK_I2V_HTTP_TIMEOUT_MS') ?? 120_000,
+    );
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(
+        this.config,
+        () =>
+          fetch(url, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              'Content-Type': 'application/json',
+            },
+            signal: controller.signal,
+          }),
+        { retries: 1 },
+      );
       const text = await res.text();
       let data: unknown;
       try {
@@ -165,7 +181,9 @@ export class ArkI2vVideoService {
    */
   async pollUntilVideoUrl(taskId: string): Promise<string> {
     const maxMs = Number(this.config.get('ARK_I2V_POLL_MAX_MS') ?? 600_000);
-    const intervalMs = Number(this.config.get('ARK_I2V_POLL_INTERVAL_MS') ?? 2500);
+    const intervalMs = Number(
+      this.config.get('ARK_I2V_POLL_INTERVAL_MS') ?? 2500,
+    );
     const deadline = Date.now() + maxMs;
 
     while (Date.now() < deadline) {

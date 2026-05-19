@@ -3,7 +3,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { FIXED_ADMIN_EMAIL, type AccountStatus, type UserRole } from '../auth/auth.service';
+import {
+  FIXED_ADMIN_EMAIL,
+  type AccountStatus,
+  type UserRole,
+} from '../auth/auth.service';
 import { DatabaseService } from '../../database/database.service';
 
 export type AdminUserDto = {
@@ -124,35 +128,25 @@ export class AdminService {
       where = 'WHERE email LIKE ? OR id LIKE ?';
       args.push(`%${qq}%`, `%${qq}%`);
     }
-    const countRow = await this.db.queryOne<{ c: number }>(
-      `SELECT COUNT(1) AS c FROM users ${where}`,
-      args,
-    );
-    const rows = await this.db.queryAll<{
-      id: string;
-      email: string;
-      role: string | null;
-      account_status: string | null;
-      created_at: string;
-    }>(
-      `SELECT id, email, role, account_status, created_at FROM users ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
-      [...args, limit, offset],
-    );
+    const [countRow, rows] = await Promise.all([
+      this.db.queryOne<{ c: number }>(
+        `SELECT COUNT(1) AS c FROM users ${where}`,
+        args,
+      ),
+      this.db.queryAll<{
+        id: string;
+        email: string;
+        role: string | null;
+        account_status: string | null;
+        created_at: string;
+      }>(
+        `SELECT id, email, role, account_status, created_at FROM users ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+        [...args, limit, offset],
+      ),
+    ]);
 
     /** 每个用户每种 action 的计数（按需合并进列表） */
-    const stats = await this.db.queryAll<{
-      user_id: string;
-      action: string;
-      c: number;
-    }>(
-      `SELECT user_id, action, COUNT(1) AS c FROM audit_logs GROUP BY user_id, action`,
-    );
     const byUser = new Map<string, Record<string, number>>();
-    for (const s of stats) {
-      const prev = byUser.get(s.user_id) ?? {};
-      prev[s.action] = s.c;
-      byUser.set(s.user_id, prev);
-    }
 
     const ids = rows.map((r) => r.id);
     const workMeta = new Map<
@@ -162,25 +156,41 @@ export class AdminService {
     const dhConfigured = new Set<string>();
     if (ids.length > 0) {
       const ph = ids.map(() => '?').join(',');
-      const workAgg = await this.db.queryAll<{
-        user_id: string;
-        work_count: number;
-        last_work_at: string | null;
-      }>(
-        `SELECT user_id, COUNT(1) AS work_count, MAX(updated_at) AS last_work_at
-         FROM user_works WHERE user_id IN (${ph}) GROUP BY user_id`,
-        [...ids],
-      );
+      const [stats, workAgg, dhRows] = await Promise.all([
+        this.db.queryAll<{
+          user_id: string;
+          action: string;
+          c: number;
+        }>(
+          `SELECT user_id, action, COUNT(1) AS c
+           FROM audit_logs WHERE user_id IN (${ph}) GROUP BY user_id, action`,
+          [...ids],
+        ),
+        this.db.queryAll<{
+          user_id: string;
+          work_count: number;
+          last_work_at: string | null;
+        }>(
+          `SELECT user_id, COUNT(1) AS work_count, MAX(updated_at) AS last_work_at
+           FROM user_works WHERE user_id IN (${ph}) GROUP BY user_id`,
+          [...ids],
+        ),
+        this.db.queryAll<{ user_id: string }>(
+          `SELECT user_id FROM digital_human_templates WHERE user_id IN (${ph})`,
+          [...ids],
+        ),
+      ]);
+      for (const s of stats) {
+        const prev = byUser.get(s.user_id) ?? {};
+        prev[s.action] = s.c;
+        byUser.set(s.user_id, prev);
+      }
       for (const w of workAgg) {
         workMeta.set(w.user_id, {
           work_count: Number(w.work_count),
           last_work_at: w.last_work_at,
         });
       }
-      const dhRows = await this.db.queryAll<{ user_id: string }>(
-        `SELECT user_id FROM digital_human_templates WHERE user_id IN (${ph})`,
-        [...ids],
-      );
       for (const d of dhRows) {
         dhConfigured.add(d.user_id);
       }
@@ -191,11 +201,10 @@ export class AdminService {
       return {
         id: r.id,
         email: r.email,
-        role: (
-          r.email.trim().toLowerCase() === FIXED_ADMIN_EMAIL && r.role === 'admin'
-            ? 'admin'
-            : 'user'
-        ) as UserRole,
+        role: (r.email.trim().toLowerCase() === FIXED_ADMIN_EMAIL &&
+        r.role === 'admin'
+          ? 'admin'
+          : 'user') as UserRole,
         accountStatus: ['pending', 'active', 'disabled'].includes(
           String(r.account_status),
         )
@@ -520,21 +529,17 @@ export class AdminService {
     /** 已在 digital_human_templates 配置的账号数 */
     digitalHumanUsers: number;
   }> {
-    const ur = await this.db.queryOne<{ c: number }>(
-      `SELECT COUNT(1) AS c FROM users`,
-    );
-    const ar = await this.db.queryOne<{ c: number }>(
-      `SELECT COUNT(1) AS c FROM audit_logs`,
-    );
-    const byAct = await this.db.queryAll<{ action: string; c: number }>(
-      `SELECT action, COUNT(1) AS c FROM audit_logs GROUP BY action ORDER BY c DESC`,
-    );
-    const kw = await this.db.queryOne<{ c: number }>(
-      `SELECT COUNT(1) AS c FROM user_works`,
-    );
-    const dh = await this.db.queryOne<{ c: number }>(
-      `SELECT COUNT(1) AS c FROM digital_human_templates`,
-    );
+    const [ur, ar, byAct, kw, dh] = await Promise.all([
+      this.db.queryOne<{ c: number }>(`SELECT COUNT(1) AS c FROM users`),
+      this.db.queryOne<{ c: number }>(`SELECT COUNT(1) AS c FROM audit_logs`),
+      this.db.queryAll<{ action: string; c: number }>(
+        `SELECT action, COUNT(1) AS c FROM audit_logs GROUP BY action ORDER BY c DESC`,
+      ),
+      this.db.queryOne<{ c: number }>(`SELECT COUNT(1) AS c FROM user_works`),
+      this.db.queryOne<{ c: number }>(
+        `SELECT COUNT(1) AS c FROM digital_human_templates`,
+      ),
+    ]);
     return {
       userCount: ur?.c ?? 0,
       auditsTotal: ar?.c ?? 0,
@@ -567,8 +572,13 @@ export class AdminService {
     if (role !== undefined && role !== 'user' && role !== 'admin') {
       throw new BadRequestException('role 必须为 user 或 admin');
     }
-    if (role === 'admin' && exists.email.trim().toLowerCase() !== FIXED_ADMIN_EMAIL) {
-      throw new BadRequestException(`后台管理员仅允许固定账号 ${FIXED_ADMIN_EMAIL}`);
+    if (
+      role === 'admin' &&
+      exists.email.trim().toLowerCase() !== FIXED_ADMIN_EMAIL
+    ) {
+      throw new BadRequestException(
+        `后台管理员仅允许固定账号 ${FIXED_ADMIN_EMAIL}`,
+      );
     }
     if (
       accountStatus !== undefined &&

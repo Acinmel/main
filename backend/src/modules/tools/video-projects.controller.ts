@@ -16,7 +16,11 @@ export class VideoProjectsController {
     @Param('projectId') projectId: string,
     @Body() body: DetectCutPointsBody,
   ) {
-    return this.videoProjectRender.detectCutPoints(req.userId!, projectId, body);
+    return this.videoProjectRender.detectCutPoints(
+      req.userId!,
+      projectId,
+      body,
+    );
   }
 
   @Post('video-projects/:projectId/render-final')
@@ -25,7 +29,11 @@ export class VideoProjectsController {
     @Param('projectId') projectId: string,
     @Body() body: RenderFinalBody,
   ) {
-    return this.videoProjectRender.createFinalRenderTask(req.userId!, projectId, body);
+    return this.videoProjectRender.createFinalRenderTask(
+      req.userId!,
+      projectId,
+      body,
+    );
   }
 
   @Get('render-tasks/:taskId')

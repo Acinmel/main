@@ -1,15 +1,49 @@
 <script setup lang="ts">
-defineProps<{
-  fileName?: string
-  videoUrl?: string
-  loading?: boolean
-  error?: string
-  directory?: string
-}>()
+import { onBeforeUnmount, ref, watch } from "vue";
+
+const props = defineProps<{
+  fileName?: string;
+  videoUrl?: string;
+  loading?: boolean;
+  error?: string;
+  directory?: string;
+}>();
 
 const emit = defineEmits<{
-  open: []
-}>()
+  open: [];
+}>();
+
+const metadataLoading = ref(false);
+let metadataTimer: number | null = null;
+
+function clearMetadataTimer() {
+  if (metadataTimer !== null) {
+    window.clearTimeout(metadataTimer);
+    metadataTimer = null;
+  }
+}
+
+function onVideoLoadStart() {
+  clearMetadataTimer();
+  metadataLoading.value = false;
+  metadataTimer = window.setTimeout(() => {
+    metadataLoading.value = true;
+  }, 2_000);
+}
+
+function onVideoReady() {
+  clearMetadataTimer();
+  metadataLoading.value = false;
+}
+
+watch(
+  () => props.videoUrl,
+  () => onVideoReady(),
+);
+
+onBeforeUnmount(() => {
+  clearMetadataTimer();
+});
 </script>
 
 <template>
@@ -17,7 +51,7 @@ const emit = defineEmits<{
     <div class="saved-video-preview__header">
       <div>
         <span class="saved-video-preview__eyebrow">服务器视频预览</span>
-        <strong>{{ fileName || '请选择已保存视频' }}</strong>
+        <strong>{{ fileName || "请选择已保存视频" }}</strong>
       </div>
       <button
         type="button"
@@ -36,15 +70,33 @@ const emit = defineEmits<{
       aria-label="打开视频预览"
       @click="emit('open')"
     >
-      <video :src="videoUrl" muted playsinline preload="metadata" />
-      <span>点击放大预览</span>
+      <video
+        :src="videoUrl"
+        muted
+        playsinline
+        preload="metadata"
+        @loadstart="onVideoLoadStart"
+        @loadedmetadata="onVideoReady"
+        @error="onVideoReady"
+      />
+      <span>{{ metadataLoading ? "正在加载元数据" : "点击放大预览" }}</span>
     </button>
 
-    <div v-else class="saved-video-preview__empty" :class="{ 'is-error': error }">
-      <span>{{ loading ? '正在加载服务器视频...' : error || '选择后会在这里显示视频预览' }}</span>
+    <div
+      v-else
+      class="saved-video-preview__empty"
+      :class="{ 'is-error': error }"
+    >
+      <span>{{
+        loading
+          ? "正在加载服务器视频..."
+          : error || "选择后会在这里显示视频预览"
+      }}</span>
     </div>
 
-    <p v-if="directory" class="saved-video-preview__path">服务器目录：{{ directory }}</p>
+    <p v-if="directory" class="saved-video-preview__path">
+      服务器目录：{{ directory }}
+    </p>
   </section>
 </template>
 
@@ -55,7 +107,11 @@ const emit = defineEmits<{
   border: 1px solid rgba(96, 132, 255, 0.22);
   border-radius: 22px;
   background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(245, 249, 255, 0.86)),
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.96),
+      rgba(245, 249, 255, 0.86)
+    ),
     radial-gradient(circle at 10% 0%, rgba(81, 111, 255, 0.12), transparent 30%);
   box-shadow: 0 18px 42px rgba(35, 63, 138, 0.08);
 }

@@ -1,7 +1,12 @@
 import type { VoiceTuningOptions } from '../../integrations/ai/speech-ai.service';
+import type { VoiceTuningRequest } from './voice-tuning.util';
 
 export type CutMode = 'light' | 'standard' | 'strong';
-export type RenderTaskStatus = 'pending' | 'processing' | 'completed' | 'failed';
+export type RenderTaskStatus =
+  | 'pending'
+  | 'processing'
+  | 'completed'
+  | 'failed';
 
 export interface CutDetectionConfig {
   silenceThreshold: number;
@@ -52,7 +57,7 @@ export interface DetectCutPointsBody {
   sourceVideoUrl?: string;
 }
 
-export interface RenderFinalBody {
+export interface RenderFinalBody extends VoiceTuningRequest {
   script?: string;
   avatarResourceId?: string;
   voiceResourceId?: string;

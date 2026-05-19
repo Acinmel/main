@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import {
   NAlert,
   NButton,
@@ -15,304 +15,351 @@ import {
   NUpload,
   NUploadDragger,
   useMessage,
-} from 'naive-ui'
-import { fetchSavedVideoBlob, listSavedVideos } from '@/api/task'
-import SavedVideoPreview from '@/components/resources/SavedVideoPreview.vue'
-import { describeHttpOrNetworkError } from '@/utils/httpErrorMessage'
-import type { UploadFileInfo } from 'naive-ui'
-import type { CreateAvatarResourceDraft } from '@/types/resources'
+} from "naive-ui";
+import { listAvatarUploadVideos } from "@/api/resources";
+import SavedVideoPreview from "@/components/resources/SavedVideoPreview.vue";
+import { describeHttpOrNetworkError } from "@/utils/httpErrorMessage";
+import type { UploadFileInfo } from "naive-ui";
+import type {
+  AvatarUploadVideo,
+  CreateAvatarResourceDraft,
+} from "@/types/resources";
 
 const props = defineProps<{
-  show: boolean
-  loading?: boolean
-}>()
+  show: boolean;
+  loading?: boolean;
+}>();
 
 const emit = defineEmits<{
-  'update:show': [value: boolean]
-  submit: [body: CreateAvatarResourceDraft]
-}>()
+  "update:show": [value: boolean];
+  submit: [body: CreateAvatarResourceDraft];
+}>();
 
 const visible = computed({
   get: () => props.show,
-  set: (value) => emit('update:show', value),
-})
+  set: (value) => emit("update:show", value),
+});
 
-const message = useMessage()
-const AVATAR_VIDEO_MAX_SECONDS = 10 * 60
-const AVATAR_VIDEO_MAX_BYTES = 500 * 1024 * 1024
+const message = useMessage();
+const AVATAR_VIDEO_MAX_SECONDS = 10 * 60;
+const AVATAR_VIDEO_MAX_BYTES = 500 * 1024 * 1024;
 
-const sourceMode = ref<'saved' | 'upload' | 'manual'>('saved')
-const loadingSavedVideos = ref(false)
-const savedVideoDirectory = ref('')
-const savedVideoOptions = ref<Array<{ label: string; value: string }>>([])
-const uploadedVideoFile = ref<File | null>(null)
-const uploadFileList = ref<UploadFileInfo[]>([])
-const uploadedVideoDurationSeconds = ref<number | null>(null)
-const uploadedVideoError = ref('')
-const savedVideoPreviewUrl = ref('')
-const savedVideoPreviewLoading = ref(false)
-const savedVideoPreviewError = ref('')
-const savedVideoViewerOpen = ref(false)
-let savedVideoPreviewRequest = 0
+const sourceMode = ref<"saved" | "upload" | "manual">("saved");
+const loadingSavedVideos = ref(false);
+const savedVideoDirectory = ref("");
+const savedVideoOptions = ref<Array<{ label: string; value: string }>>([]);
+const savedVideoItems = ref<AvatarUploadVideo[]>([]);
+const uploadedVideoFile = ref<File | null>(null);
+const uploadFileList = ref<UploadFileInfo[]>([]);
+const uploadedVideoDurationSeconds = ref<number | null>(null);
+const uploadedVideoError = ref("");
+const savedVideoPreviewUrl = ref("");
+const savedVideoPreviewLoading = ref(false);
+const savedVideoPreviewError = ref("");
+const savedVideoLoadError = ref("");
+const savedVideoViewerOpen = ref(false);
+let savedVideoPreviewRequest = 0;
+let savedVideoListAbortController: AbortController | null = null;
 
 const form = reactive({
-  name: '',
-  savedVideoName: '',
-  originalVideoUrl: '',
-  coverUrl: '',
-})
+  name: "",
+  savedVideoName: "",
+  originalVideoUrl: "",
+  coverUrl: "",
+});
 
-const hasSavedVideos = computed(() => savedVideoOptions.value.length > 0)
+const hasSavedVideos = computed(() => savedVideoOptions.value.length > 0);
 
 const submitDisabled = computed(() => {
-  if (props.loading) return true
-  if (sourceMode.value === 'saved') return !form.savedVideoName.trim()
-  if (sourceMode.value === 'upload') return !uploadedVideoFile.value || Boolean(uploadedVideoError.value)
-  return !form.originalVideoUrl.trim()
-})
+  if (props.loading) return true;
+  if (sourceMode.value === "saved") return !form.savedVideoName.trim();
+  if (sourceMode.value === "upload")
+    return !uploadedVideoFile.value || Boolean(uploadedVideoError.value);
+  return !form.originalVideoUrl.trim();
+});
 
 const uploadedVideoDurationText = computed(() => {
-  if (uploadedVideoDurationSeconds.value === null) return '待识别'
-  return formatDuration(uploadedVideoDurationSeconds.value)
-})
+  if (uploadedVideoDurationSeconds.value === null) return "待识别";
+  return formatDuration(uploadedVideoDurationSeconds.value);
+});
+
+const selectedSavedVideo = computed(
+  () =>
+    savedVideoItems.value.find(
+      (item) => item.fileName === form.savedVideoName.trim(),
+    ) ?? null,
+);
 
 function revokeSavedVideoPreviewUrl() {
-  if (savedVideoPreviewUrl.value.startsWith('blob:')) {
-    URL.revokeObjectURL(savedVideoPreviewUrl.value)
-  }
-  savedVideoPreviewUrl.value = ''
+  savedVideoPreviewUrl.value = "";
 }
 
 function clearSavedVideoPreview() {
-  savedVideoPreviewRequest += 1
-  revokeSavedVideoPreviewUrl()
-  savedVideoPreviewLoading.value = false
-  savedVideoPreviewError.value = ''
-  savedVideoViewerOpen.value = false
+  savedVideoPreviewRequest += 1;
+  revokeSavedVideoPreviewUrl();
+  savedVideoPreviewLoading.value = false;
+  savedVideoPreviewError.value = "";
+  savedVideoViewerOpen.value = false;
 }
 
 async function refreshSavedVideoPreview() {
-  const fileName = form.savedVideoName.trim()
-  savedVideoPreviewRequest += 1
-  const requestId = savedVideoPreviewRequest
+  const fileName = form.savedVideoName.trim();
+  savedVideoPreviewRequest += 1;
+  const requestId = savedVideoPreviewRequest;
 
-  revokeSavedVideoPreviewUrl()
-  savedVideoPreviewError.value = ''
-  savedVideoViewerOpen.value = false
+  revokeSavedVideoPreviewUrl();
+  savedVideoPreviewError.value = "";
+  savedVideoViewerOpen.value = false;
 
-  if (!visible.value || sourceMode.value !== 'saved' || !fileName) {
-    savedVideoPreviewLoading.value = false
-    return
+  if (!visible.value || sourceMode.value !== "saved" || !fileName) {
+    savedVideoPreviewLoading.value = false;
+    return;
   }
 
-  savedVideoPreviewLoading.value = true
+  savedVideoPreviewLoading.value = true;
   try {
-    const blob = await fetchSavedVideoBlob(fileName)
-    const nextUrl = URL.createObjectURL(blob)
-    if (requestId !== savedVideoPreviewRequest) {
-      URL.revokeObjectURL(nextUrl)
-      return
+    const nextUrl = selectedSavedVideo.value?.previewUrl || "";
+    if (!nextUrl) {
+      throw new Error("当前视频没有可用预览地址");
     }
-    savedVideoPreviewUrl.value = nextUrl
+    if (requestId !== savedVideoPreviewRequest) {
+      return;
+    }
+    savedVideoPreviewUrl.value = nextUrl;
   } catch (error) {
     if (requestId === savedVideoPreviewRequest) {
-      savedVideoPreviewError.value = describeHttpOrNetworkError(error)
+      savedVideoPreviewError.value = describeHttpOrNetworkError(error);
     }
   } finally {
     if (requestId === savedVideoPreviewRequest) {
-      savedVideoPreviewLoading.value = false
+      savedVideoPreviewLoading.value = false;
     }
   }
 }
 
 function openSavedVideoViewer() {
   if (!savedVideoPreviewUrl.value) {
-    message.warning(savedVideoPreviewLoading.value ? '视频预览还在加载中' : '请先选择一个可预览的视频')
-    return
+    message.warning(
+      savedVideoPreviewLoading.value
+        ? "视频预览还在加载中"
+        : "请先选择一个可预览的视频",
+    );
+    return;
   }
-  savedVideoViewerOpen.value = true
+  savedVideoViewerOpen.value = true;
 }
 
 function resetForm() {
-  form.name = ''
-  form.savedVideoName = ''
-  form.originalVideoUrl = ''
-  form.coverUrl = ''
-  uploadedVideoFile.value = null
-  uploadFileList.value = []
-  uploadedVideoDurationSeconds.value = null
-  uploadedVideoError.value = ''
-  clearSavedVideoPreview()
-  sourceMode.value = hasSavedVideos.value ? 'saved' : 'manual'
+  form.name = "";
+  form.savedVideoName = "";
+  form.originalVideoUrl = "";
+  form.coverUrl = "";
+  uploadedVideoFile.value = null;
+  uploadFileList.value = [];
+  uploadedVideoDurationSeconds.value = null;
+  uploadedVideoError.value = "";
+  savedVideoLoadError.value = "";
+  clearSavedVideoPreview();
+  sourceMode.value = "saved";
 }
 
 async function loadSavedVideos() {
-  loadingSavedVideos.value = true
+  savedVideoListAbortController?.abort();
+  const controller = new AbortController();
+  savedVideoListAbortController = controller;
+  loadingSavedVideos.value = true;
+  savedVideoLoadError.value = "";
   try {
-    const data = await listSavedVideos()
-    savedVideoDirectory.value = data.directory
-    savedVideoOptions.value = data.files.map((item) => ({
-      label: `${item.name} · ${new Date(item.mtime).toLocaleString('zh-CN')}`,
-      value: item.name,
-    }))
+    const items = await listAvatarUploadVideos({
+      limit: 30,
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return;
+    savedVideoDirectory.value = "当前账号数字人上传视频";
+    savedVideoItems.value = items;
+    savedVideoOptions.value = items.map((item) => ({
+      label: `${item.avatarName || item.fileName} · ${formatFileSize(item.fileSize)} · ${new Date(item.mtime).toLocaleString("zh-CN")}`,
+      value: item.fileName,
+    }));
     if (!form.savedVideoName && savedVideoOptions.value.length) {
-      form.savedVideoName = savedVideoOptions.value[0].value
+      form.savedVideoName = savedVideoOptions.value[0].value;
     }
     if (!savedVideoOptions.value.length) {
-      form.savedVideoName = ''
-      if (sourceMode.value === 'saved') {
-        sourceMode.value = 'manual'
-      }
+      form.savedVideoName = "";
     }
-  } catch {
-    savedVideoOptions.value = []
-    if (sourceMode.value === 'saved') {
-      sourceMode.value = 'manual'
-    }
+  } catch (error: unknown) {
+    if (controller.signal.aborted) return;
+    savedVideoDirectory.value = "";
+    savedVideoItems.value = [];
+    savedVideoOptions.value = [];
+    form.savedVideoName = "";
+    savedVideoLoadError.value = describeHttpOrNetworkError(error);
   } finally {
-    loadingSavedVideos.value = false
+    if (savedVideoListAbortController === controller) {
+      savedVideoListAbortController = null;
+      loadingSavedVideos.value = false;
+    }
   }
 }
 
 function submit() {
-  if (sourceMode.value === 'upload') {
+  if (sourceMode.value === "upload") {
     if (!uploadedVideoFile.value) {
-      message.warning('请先上传一个数字人视频文件')
-      return
+      message.warning("请先上传一个数字人视频文件");
+      return;
     }
     if (uploadedVideoError.value) {
-      message.warning(uploadedVideoError.value)
-      return
+      message.warning(uploadedVideoError.value);
+      return;
     }
-    emit('submit', {
-      name: form.name.trim() || '我的数字人',
+    emit("submit", {
+      name: form.name.trim() || "我的数字人",
       coverUrl: form.coverUrl.trim() || undefined,
-      styleId: 'uploaded-video',
+      styleId: "uploaded-video",
       uploadFile: uploadedVideoFile.value,
-    })
-    return
+    });
+    return;
   }
 
   const originalVideoUrl =
-    sourceMode.value === 'saved'
+    sourceMode.value === "saved"
       ? form.savedVideoName.trim()
-      : form.originalVideoUrl.trim()
+      : form.originalVideoUrl.trim();
 
   if (!originalVideoUrl) {
-    message.warning('请先选择一个视频来源')
-    return
+    message.warning("请先选择一个视频来源");
+    return;
   }
 
-  emit('submit', {
-    name: form.name.trim() || '我的数字人',
+  emit("submit", {
+    name: form.name.trim() || "我的数字人",
     coverUrl: form.coverUrl.trim() || undefined,
     originalVideoUrl,
-    styleId: sourceMode.value === 'saved' ? 'saved-video' : 'custom-video',
-  })
+    styleId: sourceMode.value === "saved" ? "saved-video" : "custom-video",
+  });
 }
 
-watch(visible, (value) => {
-  if (value) {
-    void loadSavedVideos()
-  } else if (!props.loading) {
-    resetForm()
-  }
-})
+watch(
+  visible,
+  (value) => {
+    if (value) {
+      void loadSavedVideos();
+    } else if (!props.loading) {
+      resetForm();
+    }
+  },
+  { immediate: true },
+);
 
 watch([visible, sourceMode, () => form.savedVideoName], () => {
-  if (visible.value && sourceMode.value === 'saved' && form.savedVideoName.trim()) {
-    void refreshSavedVideoPreview()
-    return
+  if (
+    visible.value &&
+    sourceMode.value === "saved" &&
+    form.savedVideoName.trim()
+  ) {
+    void refreshSavedVideoPreview();
+    return;
   }
-  clearSavedVideoPreview()
-})
+  clearSavedVideoPreview();
+});
 
 watch(
   () => props.loading,
   (loading) => {
     if (!loading && !visible.value) {
-      resetForm()
+      resetForm();
     }
   },
-)
+);
 
 function formatDuration(seconds: number) {
-  const total = Math.max(0, Math.round(seconds))
-  const minutes = Math.floor(total / 60)
-  const restSeconds = total % 60
-  return `${String(minutes).padStart(2, '0')}:${String(restSeconds).padStart(2, '0')}`
+  const total = Math.max(0, Math.round(seconds));
+  const minutes = Math.floor(total / 60);
+  const restSeconds = total % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(restSeconds).padStart(2, "0")}`;
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "大小未知";
+  if (bytes >= 1024 * 1024 * 1024)
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)}KB`;
+  return `${bytes}B`;
 }
 
 function readVideoDuration(file: File): Promise<number> {
   return new Promise((resolve, reject) => {
-    const video = document.createElement('video')
-    const url = URL.createObjectURL(file)
+    const video = document.createElement("video");
+    const url = URL.createObjectURL(file);
     const cleanup = () => {
-      URL.revokeObjectURL(url)
-      video.removeAttribute('src')
-      video.load()
-    }
-    video.preload = 'metadata'
+      URL.revokeObjectURL(url);
+      video.removeAttribute("src");
+      video.load();
+    };
+    video.preload = "metadata";
     video.onloadedmetadata = () => {
-      const duration = video.duration
-      cleanup()
-      resolve(duration)
-    }
+      const duration = video.duration;
+      cleanup();
+      resolve(duration);
+    };
     video.onerror = () => {
-      cleanup()
-      reject(new Error('无法识别视频时长'))
-    }
-    video.src = url
-  })
+      cleanup();
+      reject(new Error("无法识别视频时长"));
+    };
+    video.src = url;
+  });
 }
 
 async function onUploadChange(fileList: UploadFileInfo[]) {
-  uploadFileList.value = fileList.slice(0, 1)
-  uploadedVideoDurationSeconds.value = null
-  uploadedVideoError.value = ''
+  uploadFileList.value = fileList.slice(0, 1);
+  uploadedVideoDurationSeconds.value = null;
+  uploadedVideoError.value = "";
 
-  const raw = uploadFileList.value[0]?.file
-  uploadedVideoFile.value = raw instanceof File ? raw : null
-  if (!uploadedVideoFile.value) return
+  const raw = uploadFileList.value[0]?.file;
+  uploadedVideoFile.value = raw instanceof File ? raw : null;
+  if (!uploadedVideoFile.value) return;
   if (uploadedVideoFile.value.size > AVATAR_VIDEO_MAX_BYTES) {
-    uploadedVideoError.value = '请上传小于 500MB 的视频文件'
-    uploadedVideoFile.value = null
-    uploadFileList.value = []
-    message.warning(uploadedVideoError.value)
-    return
+    uploadedVideoError.value = "请上传小于 500MB 的视频文件";
+    uploadedVideoFile.value = null;
+    uploadFileList.value = [];
+    message.warning(uploadedVideoError.value);
+    return;
   }
 
   try {
-    const duration = await readVideoDuration(uploadedVideoFile.value)
-    uploadedVideoDurationSeconds.value = duration
+    const duration = await readVideoDuration(uploadedVideoFile.value);
+    uploadedVideoDurationSeconds.value = duration;
     if (!Number.isFinite(duration) || duration <= 0) {
-      uploadedVideoError.value = '无法识别视频时长，请重新选择可正常播放的视频'
+      uploadedVideoError.value = "无法识别视频时长，请重新选择可正常播放的视频";
     } else if (duration > AVATAR_VIDEO_MAX_SECONDS) {
-      uploadedVideoError.value = '数字人视频最长支持 10 分钟，请重新选择更短的视频'
+      uploadedVideoError.value =
+        "数字人视频最长支持 10 分钟，请重新选择更短的视频";
     }
     if (uploadedVideoError.value) {
-      uploadedVideoFile.value = null
-      uploadFileList.value = []
-      message.warning(uploadedVideoError.value)
+      uploadedVideoFile.value = null;
+      uploadFileList.value = [];
+      message.warning(uploadedVideoError.value);
     }
   } catch {
-    uploadedVideoFile.value = null
-    uploadFileList.value = []
-    uploadedVideoError.value = '无法识别视频时长，请重新选择可正常播放的视频'
-    message.warning(uploadedVideoError.value)
+    uploadedVideoFile.value = null;
+    uploadFileList.value = [];
+    uploadedVideoError.value = "无法识别视频时长，请重新选择可正常播放的视频";
+    message.warning(uploadedVideoError.value);
   }
 }
 
 function clearUploadedVideoFile() {
-  uploadedVideoFile.value = null
-  uploadFileList.value = []
-  uploadedVideoDurationSeconds.value = null
-  uploadedVideoError.value = ''
+  uploadedVideoFile.value = null;
+  uploadFileList.value = [];
+  uploadedVideoDurationSeconds.value = null;
+  uploadedVideoError.value = "";
 }
 
 onBeforeUnmount(() => {
-  clearSavedVideoPreview()
-})
+  savedVideoListAbortController?.abort();
+  clearSavedVideoPreview();
+});
 </script>
 
 <template>
@@ -344,14 +391,57 @@ onBeforeUnmount(() => {
             :options="savedVideoOptions"
             :loading="loadingSavedVideos"
             :placeholder="
-              hasSavedVideos ? '选择已通过抖音抓取并保存的视频' : '当前目录还没有已保存视频'
+              savedVideoLoadError
+                ? '读取已保存视频失败，请重试或切换来源'
+                : hasSavedVideos
+                  ? '选择当前账号上传到数字人库的视频'
+                  : '当前账号还没有可复用的视频'
             "
           />
         </n-form-item>
 
+        <n-alert
+          v-if="savedVideoLoadError"
+          type="error"
+          :show-icon="false"
+          style="margin-bottom: 16px"
+        >
+          <div class="saved-video-error">
+            <strong>读取 /api/v1/resources/avatars/upload-videos 失败</strong>
+            <span>{{ savedVideoLoadError }}</span>
+            <div class="saved-video-error-actions">
+              <n-button
+                size="small"
+                secondary
+                type="primary"
+                :loading="loadingSavedVideos"
+                @click="loadSavedVideos"
+              >
+                重试读取
+              </n-button>
+              <n-button
+                size="small"
+                quaternary
+                type="primary"
+                @click="sourceMode = 'upload'"
+                >直接上传</n-button
+              >
+              <n-button
+                size="small"
+                quaternary
+                type="primary"
+                @click="sourceMode = 'manual'"
+                >手动填写</n-button
+              >
+            </div>
+          </div>
+        </n-alert>
+
         <n-alert type="info" :show-icon="false" style="margin-bottom: 16px">
           <n-text depth="3">
-            当前会直接引用后端保存目录中的视频文件：{{ savedVideoDirectory || '正在读取…' }}
+            当前只显示当前账号上传到数字人库的视频：{{
+              savedVideoDirectory || "正在读取…"
+            }}
           </n-text>
         </n-alert>
 
@@ -364,18 +454,25 @@ onBeforeUnmount(() => {
           @open="openSavedVideoViewer"
         />
 
-        <div v-if="!loadingSavedVideos && !hasSavedVideos" class="saved-video-empty-actions">
-          <n-button secondary type="primary" @click="sourceMode = 'upload'">直接上传视频</n-button>
-          <n-button quaternary type="primary" @click="sourceMode = 'manual'">手动填写地址</n-button>
+        <div
+          v-if="!loadingSavedVideos && !savedVideoLoadError && !hasSavedVideos"
+          class="saved-video-empty-actions"
+        >
+          <n-button secondary type="primary" @click="sourceMode = 'upload'"
+            >直接上传视频</n-button
+          >
+          <n-button quaternary type="primary" @click="sourceMode = 'manual'"
+            >手动填写地址</n-button
+          >
         </div>
 
         <n-alert
-          v-if="!loadingSavedVideos && !hasSavedVideos"
+          v-if="!loadingSavedVideos && !savedVideoLoadError && !hasSavedVideos"
           type="warning"
           :show-icon="false"
           style="margin-bottom: 16px"
         >
-          这个目录里还没有可选视频。你可以先在创作页抓取抖音视频，或直接切到手动模式填写视频地址。
+          当前账号还没有可复用的数字人上传视频。你可以直接上传视频，或切到手动模式填写视频地址。
         </n-alert>
       </template>
 
@@ -394,15 +491,21 @@ onBeforeUnmount(() => {
             :class="{ 'media-upload-card--ready': uploadedVideoFile }"
           >
             <span class="media-upload-icon">↑</span>
-            <strong>{{ uploadedVideoFile ? '已选择视频文件' : '点击或拖拽上传视频文件' }}</strong>
+            <strong>{{
+              uploadedVideoFile ? "已选择视频文件" : "点击或拖拽上传视频文件"
+            }}</strong>
             <p>
               {{
                 uploadedVideoFile
                   ? uploadedVideoFile.name
-                  : '支持 MP4、MOV、WEBM 等格式，最长 10 分钟'
+                  : "支持 MP4、MOV、WEBM 等格式，最长 10 分钟"
               }}
             </p>
-            <div v-if="uploadedVideoFile" class="media-upload-actions" @click.stop>
+            <div
+              v-if="uploadedVideoFile"
+              class="media-upload-actions"
+              @click.stop
+            >
               <button
                 type="button"
                 class="media-upload-remove"
@@ -411,16 +514,27 @@ onBeforeUnmount(() => {
                 移除文件
               </button>
             </div>
-            <span class="media-upload-rule">请上传小于 500MB，市场推荐 1-2 分钟</span>
-            <span class="media-upload-tip">视频建议：正脸清晰 + 光线稳定 + 口型完整 + 无明显遮挡</span>
+            <span class="media-upload-rule"
+              >请上传小于 500MB，市场推荐 1-2 分钟</span
+            >
+            <span class="media-upload-tip"
+              >视频建议：正脸清晰 + 光线稳定 + 口型完整 + 无明显遮挡</span
+            >
           </n-upload-dragger>
         </n-upload>
         <div class="upload-video-hint">
-          <n-text type="info">上传要求：小于 500MB，推荐 1-2 分钟；数字人库最长支持 10 分钟。</n-text>
+          <n-text type="info"
+            >上传要求：小于 500MB，推荐 1-2 分钟；数字人库最长支持 10
+            分钟。</n-text
+          >
           <n-text depth="3">
-            数字人库支持上传 10 分钟以内的视频，当前时长：{{ uploadedVideoDurationText }}
+            数字人库支持上传 10 分钟以内的视频，当前时长：{{
+              uploadedVideoDurationText
+            }}
           </n-text>
-          <n-text v-if="uploadedVideoError" type="error">{{ uploadedVideoError }}</n-text>
+          <n-text v-if="uploadedVideoError" type="error">{{
+            uploadedVideoError
+          }}</n-text>
         </div>
       </n-form-item>
 
@@ -441,8 +555,15 @@ onBeforeUnmount(() => {
 
     <template #footer>
       <n-space justify="end">
-        <n-button :disabled="props.loading" @click="visible = false">取消</n-button>
-        <n-button type="primary" :loading="props.loading" :disabled="submitDisabled" @click="submit">
+        <n-button :disabled="props.loading" @click="visible = false"
+          >取消</n-button
+        >
+        <n-button
+          type="primary"
+          :loading="props.loading"
+          :disabled="submitDisabled"
+          @click="submit"
+        >
           添加视频
         </n-button>
       </n-space>
@@ -491,6 +612,28 @@ onBeforeUnmount(() => {
   min-width: 128px;
 }
 
+.saved-video-error {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-video-error strong {
+  color: #991b1b;
+  font-size: 13px;
+}
+
+.saved-video-error span {
+  color: #7f1d1d;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.saved-video-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .media-upload-shell {
   width: 100%;
 }
@@ -504,8 +647,16 @@ onBeforeUnmount(() => {
   border: 2px dashed rgba(148, 163, 184, 0.34) !important;
   border-radius: 28px !important;
   background:
-    radial-gradient(circle at 50% 24%, rgba(75, 107, 255, 0.08), transparent 24%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(249, 250, 255, 0.82)) !important;
+    radial-gradient(
+      circle at 50% 24%,
+      rgba(75, 107, 255, 0.08),
+      transparent 24%
+    ),
+    linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0.92),
+      rgba(249, 250, 255, 0.82)
+    ) !important;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.96);
   transition:
     border-color var(--transition-fast),
@@ -598,7 +749,11 @@ onBeforeUnmount(() => {
   font-weight: 800;
   line-height: 1.35;
   text-align: center;
-  background: linear-gradient(135deg, rgba(75, 107, 255, 0.1), rgba(75, 199, 187, 0.13));
+  background: linear-gradient(
+    135deg,
+    rgba(75, 107, 255, 0.1),
+    rgba(75, 199, 187, 0.13)
+  );
 }
 
 .media-upload-rule {

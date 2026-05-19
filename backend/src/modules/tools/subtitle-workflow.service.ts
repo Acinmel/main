@@ -1,11 +1,20 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { existsSync } from 'node:fs';
+import { createWriteStream, existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
+import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
+import { pipeline } from 'node:stream/promises';
 import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
 import { resolveConfiguredDir } from '../../common/resource-paths.util';
+import { assertUrlSafeForServerFetch } from '../../common/url-safety.util';
 import { AliLipSyncService } from '../../integrations/ai/ali-lip-sync.service';
 import {
   SpeechAiService,
@@ -34,6 +43,7 @@ import {
   type RenderFinalBody,
   type RenderSubtitleDto,
 } from './video-project-render.types';
+import { normalizeVoiceTuning } from './voice-tuning.util';
 
 type TimelineSource = 'asr-fallback' | 'local-estimate';
 type TtsMode = 'provider' | 'mock';
@@ -107,11 +117,17 @@ function nowIso(): string {
 }
 
 function getVideoSaveDir(config: ConfigService): string {
-  return resolveConfiguredDir(config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
+  return resolveConfiguredDir(
+    config.get<string>('VIDEO_SAVE_DIR'),
+    'download-video',
+  );
 }
 
 function getPreviewVideoSaveDir(config: ConfigService): string {
-  return resolveConfiguredDir(config.get<string>('PREVIEW_VIDEO_SAVE_DIR'), 'preview-videos');
+  return resolveConfiguredDir(
+    config.get<string>('PREVIEW_VIDEO_SAVE_DIR'),
+    'preview-videos',
+  );
 }
 
 function getUploadRoot(config: ConfigService): string {
@@ -125,6 +141,7 @@ function getUploadOutputDir(config: ConfigService): string {
 function sanitizeFilenameForDisk(name: string, fallback = 'video.mp4'): string {
   const base = path
     .basename(name)
+    // eslint-disable-next-line no-control-regex
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
     .trim();
   return base || fallback;
@@ -172,7 +189,9 @@ export class SubtitleWorkflowService {
     const mode = this.normalizeCutMode(body.mode);
     const cutConfig = this.resolveCutConfig(mode, body.config);
     await fs.mkdir(this.draftRootDir(), { recursive: true });
-    const tmpDir = await fs.mkdtemp(path.join(this.draftRootDir(), 'cut-detect-'));
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.draftRootDir(), 'cut-detect-'),
+    );
     try {
       const sourceVideo = await this.resolveRenderVideoSource(
         userId,
@@ -181,7 +200,11 @@ export class SubtitleWorkflowService {
       );
       const sourcePath = path.join(
         tmpDir,
-        this.draftMediaFileName('source-video', sourceVideo.originalname, '.mp4'),
+        this.draftMediaFileName(
+          'source-video',
+          sourceVideo.originalname,
+          '.mp4',
+        ),
       );
       await fs.writeFile(sourcePath, sourceVideo.buffer);
       const [durationSeconds, silences] = await Promise.all([
@@ -203,7 +226,9 @@ export class SubtitleWorkflowService {
         summary: this.summarizeCutPoints(cutPoints, originalDuration),
       };
     } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+      await fs
+        .rm(tmpDir, { recursive: true, force: true })
+        .catch(() => undefined);
     }
   }
 
@@ -242,26 +267,35 @@ export class SubtitleWorkflowService {
       this.resources.getAvatar(userId, body.avatarResourceId.trim()),
       this.resources.getVoice(userId, body.voiceResourceId.trim()),
       burnSubtitles && body.subtitleTemplateId?.trim()
-        ? this.resources.getSubtitleTemplate(userId, body.subtitleTemplateId.trim())
+        ? this.resources.getSubtitleTemplate(
+            userId,
+            body.subtitleTemplateId.trim(),
+          )
         : Promise.resolve(NO_SUBTITLE_TEMPLATE),
     ]);
     if (!avatar.originalVideoUrl?.trim()) {
       throw new BadRequestException('当前数字人视频没有绑定原始视频素材');
     }
 
-    const sourceVideo = await this.readVideoFromSourceRef(avatar.originalVideoUrl);
+    const sourceVideo = await this.readVideoFromSourceRef(
+      avatar.originalVideoUrl,
+    );
     this.aliLipSync.ensureConfigured();
+    const voiceTuning = normalizeVoiceTuning(body);
     const speech = await this.buildSpeechAudio(
       script,
       {
         id: voice.id,
         name: voice.name,
+        cloneStatus: voice.cloneStatus,
+        canUseForRender: voice.canUseForRender,
+        renderUnavailableReason: voice.renderUnavailableReason,
         provider: voice.provider,
         providerVoice: voice.providerVoice,
         providerModel: voice.providerModel,
         audioUrl: voice.audioUrl,
       },
-      body.voiceTuning,
+      voiceTuning,
     );
     if (speech.ttsMode === 'mock') {
       throw new BadRequestException('TTS 未生成真实音频，无法进入最终成片生成');
@@ -347,14 +381,20 @@ export class SubtitleWorkflowService {
     const cutConfig = this.resolveCutConfig(cutMode, body.cutConfig?.config);
     let cutPoints = this.normalizeIncomingCutPoints(body.cutConfig?.cutPoints);
     if (body.cutConfig?.enabled) {
-      const workingDuration = (await this.ffmpegAudio.probeFileDurationSeconds(workingVideoPath)) ?? 0;
+      const workingDuration =
+        (await this.ffmpegAudio.probeFileDurationSeconds(workingVideoPath)) ??
+        0;
       if (!cutPoints.length) {
         const silences = await this.ffmpegAudio.detectSilences({
           inputPath: workingVideoPath,
           noiseDb: cutConfig.silenceThreshold,
           minSilenceDuration: cutConfig.minSilenceDuration,
         });
-        cutPoints = this.buildCutPointsFromSilences(silences, cutConfig, workingDuration);
+        cutPoints = this.buildCutPointsFromSilences(
+          silences,
+          cutConfig,
+          workingDuration,
+        );
       }
       if (cutPoints.length) {
         const cutVideoPath = path.join(
@@ -407,10 +447,13 @@ export class SubtitleWorkflowService {
     }
     report(94);
 
-    const duration = (await this.ffmpegAudio.probeFileDurationSeconds(finalPath)) ?? 0;
+    const duration =
+      (await this.ffmpegAudio.probeFileDurationSeconds(finalPath)) ?? 0;
     const hints = ['成片已生成，可以下载使用'];
     if (body.backgroundMusic?.enabled) {
-      hints.push('背景音乐配置已记录，当前未绑定可混音的音乐素材时会跳过混音。');
+      hints.push(
+        '背景音乐配置已记录，当前未绑定可混音的音乐素材时会跳过混音。',
+      );
     }
     if (body.pipMaterials?.enabled) {
       hints.push('画中画素材配置已记录，当前未上传分镜素材时会跳过叠加。');
@@ -455,13 +498,19 @@ export class SubtitleWorkflowService {
       );
     }
 
-    const previewSeconds = Math.min(8, Math.max(3, Math.round(body.previewSeconds ?? 5)));
+    const previewSeconds = Math.min(
+      8,
+      Math.max(3, Math.round(body.previewSeconds ?? 5)),
+    );
     const subtitlesEnabled = body.subtitlesEnabled !== false;
     const [avatar, voice, subtitleTemplate] = await Promise.all([
       this.resources.getAvatar(userId, body.avatarResourceId.trim()),
       this.resources.getVoice(userId, body.voiceResourceId.trim()),
       subtitlesEnabled && body.subtitleTemplateId?.trim()
-        ? this.resources.getSubtitleTemplate(userId, body.subtitleTemplateId.trim())
+        ? this.resources.getSubtitleTemplate(
+            userId,
+            body.subtitleTemplateId.trim(),
+          )
         : Promise.resolve(NO_SUBTITLE_TEMPLATE),
     ]);
 
@@ -470,18 +519,29 @@ export class SubtitleWorkflowService {
     }
 
     const hints: string[] = [];
-    const sourceVideo = await this.readVideoFromSourceRef(avatar.originalVideoUrl);
+    const sourceVideo = await this.readVideoFromSourceRef(
+      avatar.originalVideoUrl,
+    );
     this.aliLipSync.ensureConfigured();
-    const speech = await this.buildSpeechAudio(script, {
-      id: voice.id,
-      name: voice.name,
-      provider: voice.provider,
-      providerVoice: voice.providerVoice,
-      providerModel: voice.providerModel,
-      audioUrl: voice.audioUrl,
-    }, body.voiceTuning);
+    const speech = await this.buildSpeechAudio(
+      script,
+      {
+        id: voice.id,
+        name: voice.name,
+        cloneStatus: voice.cloneStatus,
+        canUseForRender: voice.canUseForRender,
+        renderUnavailableReason: voice.renderUnavailableReason,
+        provider: voice.provider,
+        providerVoice: voice.providerVoice,
+        providerModel: voice.providerModel,
+        audioUrl: voice.audioUrl,
+      },
+      body.voiceTuning,
+    );
     if (speech.ttsMode === 'mock') {
-      throw new BadRequestException('TTS 未生成真实音频，无法进入 5 秒 VideoReTalk 口型预览');
+      throw new BadRequestException(
+        'TTS 未生成真实音频，无法进入 5 秒 VideoReTalk 口型预览',
+      );
       hints.push('当前未走通真实 TTS，已自动生成本地占位音轨用于联调。');
     } else {
       hints.push(`已按“${voice.name}”生成 TTS 音轨。`);
@@ -500,7 +560,9 @@ export class SubtitleWorkflowService {
     } else if (timeline.timelineSource === 'asr-fallback') {
       hints.push('TTS 未提供时间戳，已通过 ASR 对音频回填字幕时间轴。');
     } else {
-      hints.push('当前环境未接入可用时间戳服务，已用本地估时生成 subtitle.json。');
+      hints.push(
+        '当前环境未接入可用时间戳服务，已用本地估时生成 subtitle.json。',
+      );
     }
 
     const draftId = randomUUID();
@@ -539,14 +601,20 @@ export class SubtitleWorkflowService {
       });
       await fs.writeFile(muxedVideoPath, muxed.buffer);
     } catch (e) {
-      this.logger.warn(`Mux source video with TTS failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.logger.warn(
+        `Mux source video with TTS failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
       await fs.writeFile(muxedVideoPath, sourceVideo.buffer);
       hints.push('音轨替换失败，预览阶段已先回退到原始视频继续联调。');
     }
 
     const subtitleAssFileName = `subtitle_${Date.now()}_${randomUUID().slice(0, 8)}.ass`;
     const subtitleAssPath = path.join(draftDir, subtitleAssFileName);
-    await fs.writeFile(subtitleAssPath, this.buildAssScript(timeline.subtitleJson), 'utf8');
+    await fs.writeFile(
+      subtitleAssPath,
+      this.buildAssScript(timeline.subtitleJson),
+      'utf8',
+    );
 
     const previewFileName = this.outputFileName('subtitle-preview', '.mp4');
     const previewPath = path.join(this.outputDir(), previewFileName);
@@ -570,9 +638,13 @@ export class SubtitleWorkflowService {
         });
         hints.push('已生成 5 秒字幕预览，可先确认节奏、样式和断句。');
       } catch (e) {
-        this.logger.warn(`Burn preview subtitles failed: ${e instanceof Error ? e.message : String(e)}`);
+        this.logger.warn(
+          `Burn preview subtitles failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
         await fs.copyFile(muxedVideoPath, previewPath);
-        hints.push('字幕预览合成失败，已回退为 5 秒视频预览，请优先检查 FFmpeg 字幕滤镜。');
+        hints.push(
+          '字幕预览合成失败，已回退为 5 秒视频预览，请优先检查 FFmpeg 字幕滤镜。',
+        );
       }
     } else {
       await this.ffmpegAudio.clipVideo({
@@ -598,7 +670,8 @@ export class SubtitleWorkflowService {
       voiceLabel: voice.name,
       subtitleJson: timeline.subtitleJson,
       sourceVideoFileName,
-      sourceVideoMimeType: sourceVideo.mimetype || guessMimeFromFilename(sourceVideo.originalname),
+      sourceVideoMimeType:
+        sourceVideo.mimetype || guessMimeFromFilename(sourceVideo.originalname),
       speechAudioFileName,
       speechAudioMimeType: speech.mimeType,
       subtitlesEnabled,
@@ -669,7 +742,10 @@ export class SubtitleWorkflowService {
       if (!result.videoUrl?.trim()) {
         throw new Error('VideoReTalk 服务未返回预览视频地址');
       }
-      const videoPath = await this.persistResultVideoToDraft(result.videoUrl, params.draftDir);
+      const videoPath = await this.persistResultVideoToDraft(
+        result.videoUrl,
+        params.draftDir,
+      );
       return {
         videoPath,
         providerResponse: result.providerResponse,
@@ -722,7 +798,9 @@ export class SubtitleWorkflowService {
     if (this.aliLipSync.isConfigured()) {
       try {
         if (!speechAudioPath || !existsSync(speechAudioPath)) {
-          throw new BadRequestException('lip-sync audio input is missing from the draft');
+          throw new BadRequestException(
+            'lip-sync audio input is missing from the draft',
+          );
         }
         const durationPlan = await this.resolveFinalDurationPlan({
           sourceVideoPath,
@@ -761,7 +839,10 @@ export class SubtitleWorkflowService {
         if (!result.videoUrl?.trim()) {
           throw new Error('VideoReTalk 服务未返回视频地址');
         }
-        workingVideoPath = await this.persistResultVideoToDraft(result.videoUrl, draftDir);
+        workingVideoPath = await this.persistResultVideoToDraft(
+          result.videoUrl,
+          draftDir,
+        );
         fallback = false;
         if (durationPlan.shouldExtendVideo) {
           hints.push(
@@ -775,7 +856,9 @@ export class SubtitleWorkflowService {
         );
       }
     } else {
-      hints.push('当前环境未配置 GPU 对口型服务，已直接使用换音轨版本继续合成。');
+      hints.push(
+        '当前环境未配置 GPU 对口型服务，已直接使用换音轨版本继续合成。',
+      );
     }
 
     const finalFileName = this.outputFileName('subtitle-final', '.mp4');
@@ -794,9 +877,13 @@ export class SubtitleWorkflowService {
         });
         hints.push('已完成字幕、音频、视频的最终合成。');
       } catch (e) {
-        this.logger.warn(`Burn final subtitles failed: ${e instanceof Error ? e.message : String(e)}`);
+        this.logger.warn(
+          `Burn final subtitles failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
         await fs.copyFile(workingVideoPath, finalPath);
-        hints.push('最终字幕烧录失败，已回退输出无字幕视频，请检查 FFmpeg 字幕滤镜。');
+        hints.push(
+          '最终字幕烧录失败，已回退输出无字幕视频，请检查 FFmpeg 字幕滤镜。',
+        );
       }
     }
 
@@ -827,7 +914,9 @@ export class SubtitleWorkflowService {
       this.ffmpegAudio.probeFileDurationSeconds(params.sourceVideoPath),
     ]);
     const subtitleSeconds =
-      params.subtitleJson.durationMs > 0 ? params.subtitleJson.durationMs / 1000 : null;
+      params.subtitleJson.durationMs > 0
+        ? params.subtitleJson.durationMs / 1000
+        : null;
     const rawTargetSeconds = audioSeconds ?? subtitleSeconds ?? undefined;
     const targetSeconds =
       typeof rawTargetSeconds === 'number' && Number.isFinite(rawTargetSeconds)
@@ -866,7 +955,8 @@ export class SubtitleWorkflowService {
   }
 
   private normalizeCutMode(mode?: string): CutMode {
-    if (mode === 'light' || mode === 'strong' || mode === 'standard') return mode;
+    if (mode === 'light' || mode === 'strong' || mode === 'standard')
+      return mode;
     return 'standard';
   }
 
@@ -886,7 +976,11 @@ export class SubtitleWorkflowService {
         0.1,
         2,
       ),
-      keepPause: this.clampNumber(this.readNumber(config?.keepPause, base.keepPause), 0, 1),
+      keepPause: this.clampNumber(
+        this.readNumber(config?.keepPause, base.keepPause),
+        0,
+        1,
+      ),
     };
   }
 
@@ -899,15 +993,25 @@ export class SubtitleWorkflowService {
       .map((silence, index) => {
         const startTime = this.roundSeconds(silence.startTime);
         const endTime = this.roundSeconds(
-          originalDuration > 0 ? Math.min(silence.endTime, originalDuration) : silence.endTime,
+          originalDuration > 0
+            ? Math.min(silence.endTime, originalDuration)
+            : silence.endTime,
         );
         const duration = this.roundSeconds(Math.max(0, endTime - startTime));
-        const keepDuration = this.roundSeconds(Math.min(config.keepPause, duration));
+        const keepDuration = this.roundSeconds(
+          Math.min(config.keepPause, duration),
+        );
         const suggestCutStart = this.roundSeconds(startTime + keepDuration);
         const suggestCutEnd = endTime;
-        const cutDuration = this.roundSeconds(Math.max(0, suggestCutEnd - suggestCutStart));
+        const cutDuration = this.roundSeconds(
+          Math.max(0, suggestCutEnd - suggestCutStart),
+        );
         const confidence = this.clampNumber(
-          0.76 + Math.min(0.2, duration / Math.max(1, config.minSilenceDuration * 8)),
+          0.76 +
+            Math.min(
+              0.2,
+              duration / Math.max(1, config.minSilenceDuration * 8),
+            ),
           0.72,
           0.98,
         );
@@ -942,7 +1046,9 @@ export class SubtitleWorkflowService {
       totalCount: cutPoints.filter((cut) => cut.enabled).length,
       totalCutDuration,
       originalDuration: sourceDuration,
-      estimatedDuration: this.roundSeconds(Math.max(0, sourceDuration - totalCutDuration)),
+      estimatedDuration: this.roundSeconds(
+        Math.max(0, sourceDuration - totalCutDuration),
+      ),
     };
   }
 
@@ -954,10 +1060,13 @@ export class SubtitleWorkflowService {
       .map((cut, index) => {
         const startTime = this.readFiniteSeconds(cut.startTime);
         const endTime = this.readFiniteSeconds(cut.endTime);
-        if (startTime === null || endTime === null || endTime <= startTime) return null;
+        if (startTime === null || endTime === null || endTime <= startTime)
+          return null;
         const suggestCutStart =
-          this.readFiniteSeconds(cut.suggestCutStart) ?? startTime + (cut.keepDuration ?? 0);
-        const suggestCutEnd = this.readFiniteSeconds(cut.suggestCutEnd) ?? endTime;
+          this.readFiniteSeconds(cut.suggestCutStart) ??
+          startTime + (cut.keepDuration ?? 0);
+        const suggestCutEnd =
+          this.readFiniteSeconds(cut.suggestCutEnd) ?? endTime;
         if (suggestCutEnd <= suggestCutStart) return null;
         const duration = this.roundSeconds(endTime - startTime);
         const cutDuration = this.roundSeconds(suggestCutEnd - suggestCutStart);
@@ -972,7 +1081,11 @@ export class SubtitleWorkflowService {
           cutDuration,
           keepDuration: this.roundSeconds(Math.max(0, duration - cutDuration)),
           enabled: cut.enabled !== false,
-          confidence: this.clampNumber(this.readNumber(cut.confidence, 0.88), 0, 1),
+          confidence: this.clampNumber(
+            this.readNumber(cut.confidence, 0.88),
+            0,
+            1,
+          ),
         };
       })
       .filter((cut): cut is CutPointDto => Boolean(cut));
@@ -984,22 +1097,25 @@ export class SubtitleWorkflowService {
     styleJson: Record<string, unknown>,
   ): RenderSubtitleDto[] {
     const fromPayload: RenderSubtitleDto[] = Array.isArray(subtitles)
-      ? subtitles
-          .flatMap((item, index) => {
-            const text = this.sanitizeCueText(item.text || '');
-            const startTime = this.readFiniteSeconds(item.startTime);
-            const endTime = this.readFiniteSeconds(item.endTime);
-            if (!text || startTime === null || endTime === null) return [];
-            return [
-              {
-                id: item.id?.trim() || `sub_${String(index + 1).padStart(3, '0')}`,
-                startTime: this.roundSeconds(Math.max(0, startTime)),
-                endTime: this.roundSeconds(Math.max(startTime + 0.25, endTime)),
+      ? subtitles.flatMap((item, index) => {
+          const text = this.sanitizeCueText(item.text || '');
+          const startTime = this.readFiniteSeconds(item.startTime);
+          const endTime = this.readFiniteSeconds(item.endTime);
+          if (!text || startTime === null || endTime === null) return [];
+          return [
+            {
+              id:
+                item.id?.trim() || `sub_${String(index + 1).padStart(3, '0')}`,
+              startTime: this.roundSeconds(Math.max(0, startTime)),
+              endTime: this.roundSeconds(Math.max(startTime + 0.25, endTime)),
+              text,
+              highlightRanges: this.normalizeHighlightRanges(
+                item.highlightRanges,
                 text,
-                highlightRanges: this.normalizeHighlightRanges(item.highlightRanges, text),
-              },
-            ];
-          })
+              ),
+            },
+          ];
+        })
       : [];
 
     const sourceLength = this.normalizedTextLength(script);
@@ -1008,31 +1124,38 @@ export class SubtitleWorkflowService {
     );
     if (
       fromPayload.length > 0 &&
-      (payloadLength >= sourceLength * 0.9 || sourceLength - payloadLength <= 24)
+      (payloadLength >= sourceLength * 0.9 ||
+        sourceLength - payloadLength <= 24)
     ) {
       return fromPayload.sort((a, b) => a.startTime - b.startTime);
     }
 
-    const lineChars = this.clampNumber(this.readNumber(styleJson.lineChars, 14), 8, 18);
-    return this.normalizeCues(this.buildEstimatedSegments(script), script, styleJson).map(
-      (cue, index) => ({
-        id: `sub_${String(index + 1).padStart(3, '0')}`,
-        startTime: this.roundSeconds(cue.startMs / 1000),
-        endTime: this.roundSeconds(cue.endMs / 1000),
-        text: cue.text,
-        highlightRanges:
-          cue.text.length > lineChars
-            ? [
-                {
-                  start: 0,
-                  end: Math.min(4, cue.text.length),
-                  color: '#FFD94A',
-                  fontWeight: 900,
-                },
-              ]
-            : [],
-      }),
+    const lineChars = this.clampNumber(
+      this.readNumber(styleJson.lineChars, 14),
+      8,
+      18,
     );
+    return this.normalizeCues(
+      this.buildEstimatedSegments(script),
+      script,
+      styleJson,
+    ).map((cue, index) => ({
+      id: `sub_${String(index + 1).padStart(3, '0')}`,
+      startTime: this.roundSeconds(cue.startMs / 1000),
+      endTime: this.roundSeconds(cue.endMs / 1000),
+      text: cue.text,
+      highlightRanges:
+        cue.text.length > lineChars
+          ? [
+              {
+                start: 0,
+                end: Math.min(4, cue.text.length),
+                color: '#FFD94A',
+                fontWeight: 900,
+              },
+            ]
+          : [],
+    }));
   }
 
   private buildSubtitleJsonFromRenderSubtitles(params: {
@@ -1049,7 +1172,10 @@ export class SubtitleWorkflowService {
     );
     const cues = params.subtitles.map<SubtitleCueDto>((subtitle, index) => {
       const startMs = Math.max(0, Math.round(subtitle.startTime * 1000));
-      const endMs = Math.max(startMs + 250, Math.round(subtitle.endTime * 1000));
+      const endMs = Math.max(
+        startMs + 250,
+        Math.round(subtitle.endTime * 1000),
+      );
       return {
         id: subtitle.id || `cue-${index + 1}`,
         startMs,
@@ -1062,7 +1188,9 @@ export class SubtitleWorkflowService {
     return {
       version: 1,
       language: 'zh-CN',
-      durationMs: cues[cues.length - 1]?.endMs ?? Math.max(3_000, params.script.length * 220),
+      durationMs:
+        cues[cues.length - 1]?.endMs ??
+        Math.max(3_000, params.script.length * 220),
       generatedAt: nowIso(),
       source: {
         script: params.script,
@@ -1085,7 +1213,10 @@ export class SubtitleWorkflowService {
   ): RenderSubtitleDto[] {
     return subtitles.map((subtitle) => {
       const startTime = this.remapTimeSeconds(subtitle.startTime, cuts);
-      const endTime = Math.max(startTime + 0.25, this.remapTimeSeconds(subtitle.endTime, cuts));
+      const endTime = Math.max(
+        startTime + 0.25,
+        this.remapTimeSeconds(subtitle.endTime, cuts),
+      );
       return {
         ...subtitle,
         startTime: this.roundSeconds(startTime),
@@ -1110,16 +1241,32 @@ export class SubtitleWorkflowService {
     subtitles: RenderSubtitleDto[],
   ): string {
     const style = subtitleJson.template.styleJson || {};
-    const fontFamily = this.readString(style.fontFamily, 'Microsoft YaHei');
+    const fontFamily = this.readString(style.fontFamily, 'Noto Sans CJK SC');
     const fontSize = this.clampNumber(this.readNumber(style.size, 38), 24, 42);
-    const outline = this.clampNumber(this.readNumber(style.strokeWidth, 2.2), 1.2, 3.2);
-    const marginBottom = this.clampNumber(this.readNumber(style.marginBottom, 72), 42, 118);
-    const spacing = this.clampNumber(this.readNumber(style.letterSpacing, 0), 0, 2);
+    const outline = this.clampNumber(
+      this.readNumber(style.strokeWidth, 2.2),
+      1.2,
+      3.2,
+    );
+    const marginBottom = this.clampNumber(
+      this.readNumber(style.marginBottom, 72),
+      42,
+      118,
+    );
+    const spacing = this.clampNumber(
+      this.readNumber(style.letterSpacing, 0),
+      0,
+      2,
+    );
     const weight = this.readNumber(style.weight, 700);
     const position = this.readString(style.position, 'bottom');
-    const hasBackground = typeof style.background === 'string' && style.background.trim().length > 0;
+    const hasBackground =
+      typeof style.background === 'string' &&
+      style.background.trim().length > 0;
     const alignment = position === 'top' ? 8 : position === 'middle' ? 5 : 2;
-    const subtitleById = new Map(subtitles.map((subtitle) => [subtitle.id, subtitle]));
+    const subtitleById = new Map(
+      subtitles.map((subtitle) => [subtitle.id, subtitle]),
+    );
 
     const header = [
       '[Script Info]',
@@ -1138,7 +1285,10 @@ export class SubtitleWorkflowService {
         fontSize,
         this.toAssColor(this.readString(style.color, '#FFFFFF')),
         this.toAssColor(
-          this.readString(style.highlightColor, this.readString(style.color, '#FFFFFF')),
+          this.readString(
+            style.highlightColor,
+            this.readString(style.color, '#FFFFFF'),
+          ),
         ),
         this.toAssColor(this.readString(style.stroke, '#111827')),
         this.toAssColor(this.readString(style.background, '#00000000')),
@@ -1183,8 +1333,13 @@ export class SubtitleWorkflowService {
     const ranges = subtitle?.highlightRanges ?? [];
     if (!ranges.length) return this.escapeAssText(cue.lines.join('\\N'));
 
-    const normalColor = this.toAssOverrideColor(this.readString(style.color, '#FFFFFF'));
-    const defaultHighlightColor = this.readString(style.highlightColor, '#FFD94A');
+    const normalColor = this.toAssOverrideColor(
+      this.readString(style.color, '#FFFFFF'),
+    );
+    const defaultHighlightColor = this.readString(
+      style.highlightColor,
+      '#FFD94A',
+    );
     const sorted = ranges
       .map((range) => ({
         start: Math.max(0, Math.min(cue.text.length, Math.floor(range.start))),
@@ -1217,16 +1372,32 @@ export class SubtitleWorkflowService {
     if (!Array.isArray(ranges)) return [];
     return ranges
       .map((range) => ({
-        start: Math.max(0, Math.min(text.length, Math.floor(this.readNumber(range.start, 0)))),
-        end: Math.max(0, Math.min(text.length, Math.ceil(this.readNumber(range.end, 0)))),
-        color: typeof range.color === 'string' && range.color.trim() ? range.color.trim() : '#FFD94A',
-        fontWeight: this.clampNumber(this.readNumber(range.fontWeight, 900), 400, 900),
+        start: Math.max(
+          0,
+          Math.min(text.length, Math.floor(this.readNumber(range.start, 0))),
+        ),
+        end: Math.max(
+          0,
+          Math.min(text.length, Math.ceil(this.readNumber(range.end, 0))),
+        ),
+        color:
+          typeof range.color === 'string' && range.color.trim()
+            ? range.color.trim()
+            : '#FFD94A',
+        fontWeight: this.clampNumber(
+          this.readNumber(range.fontWeight, 900),
+          400,
+          900,
+        ),
       }))
       .filter((range) => range.end > range.start);
   }
 
   private escapeAssSegment(text: string): string {
-    return text.replace(/\r\n|\r|\n/g, '\\N').replace(/[{}]/g, '').trim();
+    return text
+      .replace(/\r\n|\r|\n/g, '\\N')
+      .replace(/[{}]/g, '')
+      .trim();
   }
 
   private toAssOverrideColor(input: string): string {
@@ -1248,6 +1419,9 @@ export class SubtitleWorkflowService {
     voice: {
       id: string;
       name: string;
+      cloneStatus: 'ready' | 'processing' | 'failed';
+      canUseForRender: boolean;
+      renderUnavailableReason: string | null;
       provider: string | null;
       providerVoice: string | null;
       providerModel: string | null;
@@ -1261,16 +1435,25 @@ export class SubtitleWorkflowService {
     ttsMode: TtsMode;
     styleHint?: string;
   }> {
+    if (!voice.canUseForRender) {
+      throw new BadRequestException(
+        voice.renderUnavailableReason || '当前音色暂不可用，请稍后重试',
+      );
+    }
+
     if (voice.provider === 'local-upload') {
-      throw new BadRequestException('当前音色未完成模型克隆，不能用于文本转语音，请重新上传清晰音频并完成克隆。');
-      const localAudio = await this.resources.readManagedVoiceSample(voice.audioUrl);
+      const localAudio = await this.resources.readManagedVoiceSample(
+        voice.audioUrl,
+      );
       if (!localAudio) {
-        throw new BadRequestException('未找到本地上传音频文件，请重新上传音色素材');
+        throw new BadRequestException(
+          '未找到本地上传音频文件，请重新上传音色素材',
+        );
       }
       return {
-        buffer: localAudio!.buffer,
-        mimeType: localAudio!.mimetype,
-        originalname: localAudio!.originalname,
+        buffer: localAudio.buffer,
+        mimeType: localAudio.mimetype,
+        originalname: localAudio.originalname,
         ttsMode: 'provider',
         styleHint:
           '当前使用本地上传音频，不会重新应用情绪/强度；如需动态配音，请选择 TTS 音色。',
@@ -1295,14 +1478,9 @@ export class SubtitleWorkflowService {
         styleHint: speech.styleHint,
       };
     } catch (e) {
-      throw new BadRequestException(`TTS 调用失败：${e instanceof Error ? e.message : String(e)}`);
-      this.logger.warn(`TTS fallback to mock audio: ${e instanceof Error ? e.message : String(e)}`);
-      return {
-        buffer: this.buildSilentWav(Math.max(2.8, Math.min(24, script.length * 0.22))),
-        mimeType: 'audio/wav',
-        originalname: 'tts-mock.wav',
-        ttsMode: 'mock',
-      };
+      throw new BadRequestException(
+        `TTS 调用失败：${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
@@ -1350,13 +1528,20 @@ export class SubtitleWorkflowService {
             );
           }
         } catch (e) {
-          this.logger.warn(`ASR fallback timeline failed: ${e instanceof Error ? e.message : String(e)}`);
+          this.logger.warn(
+            `ASR fallback timeline failed: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
       }
     }
 
-    const cues = this.normalizeCues(segments, script, subtitleTemplate.styleJson);
-    const durationMs = cues[cues.length - 1]?.endMs ?? Math.max(3_000, script.length * 220);
+    const cues = this.normalizeCues(
+      segments,
+      script,
+      subtitleTemplate.styleJson,
+    );
+    const durationMs =
+      cues[cues.length - 1]?.endMs ?? Math.max(3_000, script.length * 220);
 
     return {
       timelineSource,
@@ -1388,7 +1573,11 @@ export class SubtitleWorkflowService {
   ): SubtitleCueDto[] {
     const fallback = this.buildEstimatedSegments(script);
     const source = segments.length > 0 ? segments : fallback;
-    const lineChars = this.clampNumber(this.readNumber(styleJson.lineChars, 14), 8, 16);
+    const lineChars = this.clampNumber(
+      this.readNumber(styleJson.lineChars, 14),
+      8,
+      16,
+    );
     const maxCueChars = lineChars * 2;
     const cues: SubtitleCueDto[] = [];
 
@@ -1401,7 +1590,8 @@ export class SubtitleWorkflowService {
       const span = endMs - startMs;
 
       chunks.forEach((chunk, chunkIndex) => {
-        const chunkStartMs = startMs + Math.floor((span * chunkIndex) / chunks.length);
+        const chunkStartMs =
+          startMs + Math.floor((span * chunkIndex) / chunks.length);
         const chunkEndMs =
           chunkIndex === chunks.length - 1
             ? endMs
@@ -1434,10 +1624,14 @@ export class SubtitleWorkflowService {
       .split(/(?<=[。！？!?；;])|\n+/)
       .map((item) => item.trim())
       .filter(Boolean);
-    const source = chunks.length > 0 ? chunks : (script.match(/.{1,16}/g) ?? [script]);
+    const source =
+      chunks.length > 0 ? chunks : (script.match(/.{1,16}/g) ?? [script]);
     let cursor = 0;
     return source.map((text) => {
-      const duration = Math.max(1_000, Math.min(7_000, Math.round(text.length * 210)));
+      const duration = Math.max(
+        1_000,
+        Math.min(7_000, Math.round(text.length * 210)),
+      );
       const segment = {
         startMs: cursor,
         endMs: cursor + duration,
@@ -1448,12 +1642,18 @@ export class SubtitleWorkflowService {
     });
   }
 
-  private isTimelineTranscriptCompleteEnough(script: string, transcriptText: string): boolean {
+  private isTimelineTranscriptCompleteEnough(
+    script: string,
+    transcriptText: string,
+  ): boolean {
     const sourceLength = this.normalizedTextLength(script);
     const transcriptLength = this.normalizedTextLength(transcriptText);
     if (sourceLength <= 0) return true;
     if (transcriptLength <= 0) return false;
-    return transcriptLength >= sourceLength * 0.9 || sourceLength - transcriptLength <= 24;
+    return (
+      transcriptLength >= sourceLength * 0.9 ||
+      sourceLength - transcriptLength <= 24
+    );
   }
 
   private normalizedTextLength(value: string): number {
@@ -1489,9 +1689,7 @@ export class SubtitleWorkflowService {
   }
 
   private sanitizeCueText(text: string): string {
-    return this.sanitizeUserScript(text)
-      .replace(/\s+/g, ' ')
-      .trim();
+    return this.sanitizeUserScript(text).replace(/\s+/g, ' ').trim();
   }
 
   private sanitizeUserScript(value: string): string {
@@ -1510,7 +1708,9 @@ export class SubtitleWorkflowService {
       normalized.includes('模拟口播原文稿') ||
       normalized.includes('原视频链接占位') ||
       normalized.includes('真实链路') ||
-      (normalized.includes('FFmpeg') && normalized.includes('ASR') && normalized.includes('回填')) ||
+      (normalized.includes('FFmpeg') &&
+        normalized.includes('ASR') &&
+        normalized.includes('回填')) ||
       /^https?:\/\/\S+$/i.test(normalized)
     );
   }
@@ -1531,7 +1731,11 @@ export class SubtitleWorkflowService {
     return '.mp3';
   }
 
-  private draftMediaFileName(prefix: string, originalname: string, fallbackExt: string): string {
+  private draftMediaFileName(
+    prefix: string,
+    originalname: string,
+    fallbackExt: string,
+  ): string {
     const ext = path.extname(originalname || '').toLowerCase() || fallbackExt;
     const safeExt = /^\.[a-z0-9]{2,6}$/i.test(ext) ? ext : fallbackExt;
     return `${prefix}_${Date.now()}_${randomUUID().slice(0, 8)}${safeExt}`;
@@ -1539,14 +1743,28 @@ export class SubtitleWorkflowService {
 
   private buildAssScript(subtitleJson: SubtitleJsonDto): string {
     const style = subtitleJson.template.styleJson || {};
-    const fontFamily = this.readString(style.fontFamily, 'Microsoft YaHei');
+    const fontFamily = this.readString(style.fontFamily, 'Noto Sans CJK SC');
     const fontSize = this.clampNumber(this.readNumber(style.size, 38), 24, 42);
-    const outline = this.clampNumber(this.readNumber(style.strokeWidth, 2.2), 1.2, 3.2);
-    const marginBottom = this.clampNumber(this.readNumber(style.marginBottom, 72), 42, 118);
-    const spacing = this.clampNumber(this.readNumber(style.letterSpacing, 0), 0, 2);
+    const outline = this.clampNumber(
+      this.readNumber(style.strokeWidth, 2.2),
+      1.2,
+      3.2,
+    );
+    const marginBottom = this.clampNumber(
+      this.readNumber(style.marginBottom, 72),
+      42,
+      118,
+    );
+    const spacing = this.clampNumber(
+      this.readNumber(style.letterSpacing, 0),
+      0,
+      2,
+    );
     const weight = this.readNumber(style.weight, 700);
     const position = this.readString(style.position, 'bottom');
-    const hasBackground = typeof style.background === 'string' && style.background.trim().length > 0;
+    const hasBackground =
+      typeof style.background === 'string' &&
+      style.background.trim().length > 0;
     const alignment = position === 'top' ? 8 : position === 'middle' ? 5 : 2;
 
     const header = [
@@ -1566,7 +1784,10 @@ export class SubtitleWorkflowService {
         fontSize,
         this.toAssColor(this.readString(style.color, '#FFFFFF')),
         this.toAssColor(
-          this.readString(style.highlightColor, this.readString(style.color, '#FFFFFF')),
+          this.readString(
+            style.highlightColor,
+            this.readString(style.color, '#FFFFFF'),
+          ),
         ),
         this.toAssColor(this.readString(style.stroke, '#111827')),
         this.toAssColor(this.readString(style.background, '#00000000')),
@@ -1624,7 +1845,12 @@ export class SubtitleWorkflowService {
     return `&H${this.hexByte(alpha)}${this.hexByte(b)}${this.hexByte(g)}${this.hexByte(r)}&`;
   }
 
-  private parseColor(input: string): { r: number; g: number; b: number; a: number } {
+  private parseColor(input: string): {
+    r: number;
+    g: number;
+    b: number;
+    a: number;
+  } {
     const trimmed = input.trim();
     if (/^#([0-9a-f]{6}|[0-9a-f]{8})$/i.test(trimmed)) {
       const hex = trimmed.slice(1);
@@ -1652,7 +1878,10 @@ export class SubtitleWorkflowService {
         r: Math.max(0, Math.min(255, Number(rgbaMatch[1]))),
         g: Math.max(0, Math.min(255, Number(rgbaMatch[2]))),
         b: Math.max(0, Math.min(255, Number(rgbaMatch[3]))),
-        a: rgbaMatch[4] === undefined ? 1 : Math.max(0, Math.min(1, Number(rgbaMatch[4]))),
+        a:
+          rgbaMatch[4] === undefined
+            ? 1
+            : Math.max(0, Math.min(1, Number(rgbaMatch[4]))),
       };
     }
 
@@ -1660,7 +1889,10 @@ export class SubtitleWorkflowService {
   }
 
   private hexByte(value: number): string {
-    return Math.max(0, Math.min(255, value)).toString(16).toUpperCase().padStart(2, '0');
+    return Math.max(0, Math.min(255, value))
+      .toString(16)
+      .toUpperCase()
+      .padStart(2, '0');
   }
 
   private readNumber(value: unknown, fallback: number): number {
@@ -1672,7 +1904,11 @@ export class SubtitleWorkflowService {
     return Math.max(min, Math.min(max, value));
   }
 
-  private readString(value: unknown, fallback: string, fallback2?: string): string {
+  private readString(
+    value: unknown,
+    fallback: string,
+    fallback2?: string,
+  ): string {
     if (typeof value === 'string' && value.trim()) return value.trim();
     return fallback2 ?? fallback;
   }
@@ -1701,7 +1937,9 @@ export class SubtitleWorkflowService {
     return buffer;
   }
 
-  private async readVideoFromSourceRef(sourceRef: string): Promise<TranscribeMediaInput> {
+  private async readVideoFromSourceRef(
+    sourceRef: string,
+  ): Promise<TranscribeMediaInput> {
     const local = this.resolveSavedVideoPathMaybe(sourceRef);
     if (local) {
       const buffer = await fs.readFile(local);
@@ -1715,13 +1953,18 @@ export class SubtitleWorkflowService {
 
     const normalized = normalizeSourceVideoUrl(sourceRef) || sourceRef.trim();
     if (!/^https?:\/\//i.test(normalized)) {
-      throw new BadRequestException('数字人视频需要绑定可访问的原始视频地址，或本地保存文件名');
+      throw new BadRequestException(
+        '数字人视频需要绑定可访问的原始视频地址，或本地保存文件名',
+      );
     }
 
     if (normalized.toLowerCase().includes('douyin.com')) {
-      const dl = await this.videoMediaDownload.tryDownloadForTranscription(normalized);
+      const dl =
+        await this.videoMediaDownload.tryDownloadForTranscription(normalized);
       if (!dl.ok) {
-        throw new BadRequestException('抖音视频下载失败，请先确认 Cookie 与链接有效');
+        throw new BadRequestException(
+          '抖音视频下载失败，请先确认 Cookie 与链接有效',
+        );
       }
       return dl.media;
     }
@@ -1730,11 +1973,20 @@ export class SubtitleWorkflowService {
   }
 
   private async fetchRemoteVideo(url: string): Promise<TranscribeMediaInput> {
+    const remoteUrl = new URL(url);
+    assertUrlSafeForServerFetch(remoteUrl);
     const controller = new AbortController();
-    const timeoutMs = Number(this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(
+      this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 120_000,
+    );
+    const maxBytes = Number(
+      this.config.get('VIDEO_FETCH_MAX_BYTES') ??
+        this.config.get('TRANSCRIBE_MEDIA_MAX_BYTES') ??
+        200 * 1024 * 1024,
+    );
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await fetch(url, {
+      const res = await fetch(remoteUrl, {
         method: 'GET',
         redirect: 'follow',
         signal: controller.signal,
@@ -1742,7 +1994,18 @@ export class SubtitleWorkflowService {
       if (!res.ok) {
         throw new BadRequestException(`远程视频拉取失败：HTTP ${res.status}`);
       }
+      const contentLength = Number(res.headers.get('content-length') ?? 0);
+      if (contentLength > maxBytes) {
+        throw new BadRequestException(
+          `远程视频过大，最大允许 ${maxBytes} 字节`,
+        );
+      }
       const buffer = Buffer.from(await res.arrayBuffer());
+      if (buffer.length > maxBytes) {
+        throw new BadRequestException(
+          `远程视频过大，最大允许 ${maxBytes} 字节`,
+        );
+      }
       if (!buffer.length) {
         throw new BadRequestException('远程视频内容为空');
       }
@@ -1762,18 +2025,35 @@ export class SubtitleWorkflowService {
 
   private resolveSavedVideoPathMaybe(sourceRef: string): string | null {
     const trimmed = sourceRef.trim();
-    if (!trimmed || /^(https?:)?\/\//i.test(trimmed) || trimmed.startsWith('data:')) return null;
+    if (
+      !trimmed ||
+      /^(https?:)?\/\//i.test(trimmed) ||
+      trimmed.startsWith('data:')
+    )
+      return null;
     const base = path.basename(trimmed);
-    if (base !== trimmed || /[\\/]/.test(trimmed) || trimmed.includes('..')) return null;
+    if (base !== trimmed || /[\\/]/.test(trimmed) || trimmed.includes('..'))
+      return null;
     const dir = path.resolve(getVideoSaveDir(this.config));
     const full = path.resolve(path.join(dir, base));
     const relative = path.relative(dir, full);
-    if (relative.startsWith('..') || path.isAbsolute(relative) || !existsSync(full)) return null;
+    if (
+      relative.startsWith('..') ||
+      path.isAbsolute(relative) ||
+      !existsSync(full)
+    )
+      return null;
     return full;
   }
 
-  private async persistResultVideoToDraft(videoUrl: string, draftDir: string): Promise<string> {
-    const outPath = path.join(draftDir, `lip-synced_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`);
+  private async persistResultVideoToDraft(
+    videoUrl: string,
+    draftDir: string,
+  ): Promise<string> {
+    const outPath = path.join(
+      draftDir,
+      `lip-synced_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`,
+    );
     if (videoUrl.startsWith('data:')) {
       const match = videoUrl.match(/^data:([^;,]+)?(;base64)?,(.*)$/i);
       if (!match?.[3]) {
@@ -1784,16 +2064,35 @@ export class SubtitleWorkflowService {
       return outPath;
     }
 
-    const res = await fetch(videoUrl, {
+    const remoteUrl = new URL(videoUrl);
+    assertUrlSafeForServerFetch(remoteUrl);
+    const timeoutMs = Number(
+      this.config.get('LIP_SYNC_FETCH_TIMEOUT_MS') ?? 300_000,
+    );
+    const maxBytes = Number(
+      this.config.get('LIP_SYNC_RESULT_MAX_BYTES') ?? 500 * 1024 * 1024,
+    );
+    const res = await fetch(remoteUrl, {
       method: 'GET',
       redirect: 'follow',
-      signal: AbortSignal.timeout(Number(this.config.get('LIP_SYNC_FETCH_TIMEOUT_MS') ?? 300_000)),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) {
       throw new BadRequestException(`拉取对口型结果失败：HTTP ${res.status}`);
     }
-    const buffer = Buffer.from(await res.arrayBuffer());
-    await fs.writeFile(outPath, buffer);
+    const contentLength = Number(res.headers.get('content-length') ?? 0);
+    if (contentLength > maxBytes) {
+      throw new BadRequestException(
+        `对口型结果视频过大，最大允许 ${maxBytes} 字节`,
+      );
+    }
+    if (!res.body) {
+      throw new BadRequestException('对口型结果视频响应为空');
+    }
+    await pipeline(
+      Readable.fromWeb(res.body as unknown as NodeReadableStream<Uint8Array>),
+      createWriteStream(outPath),
+    );
     return outPath;
   }
 
@@ -1826,7 +2125,9 @@ export class SubtitleWorkflowService {
   }
 
   private toOutputUrl(fileName: string): string {
-    const configuredBase = this.config.get<string>('PUBLIC_UPLOAD_BASE_URL')?.trim();
+    const configuredBase = this.config
+      .get<string>('PUBLIC_UPLOAD_BASE_URL')
+      ?.trim();
     const base =
       configuredBase ||
       `http://localhost:${this.config.get<string>('PORT')?.trim() || process.env.PORT || '3000'}/uploads`;
@@ -1835,7 +2136,11 @@ export class SubtitleWorkflowService {
 
   private async saveDraftMeta(meta: DraftMeta): Promise<void> {
     await fs.mkdir(this.draftDir(meta.id), { recursive: true });
-    await fs.writeFile(this.metaPath(meta.id), JSON.stringify(meta, null, 2), 'utf8');
+    await fs.writeFile(
+      this.metaPath(meta.id),
+      JSON.stringify(meta, null, 2),
+      'utf8',
+    );
   }
 
   private async loadDraftMeta(draftId: string): Promise<DraftMeta> {

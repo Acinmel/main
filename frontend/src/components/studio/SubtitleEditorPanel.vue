@@ -50,7 +50,17 @@
       </div>
     </div>
 
-    <button class="render-btn" type="button" :disabled="rendering" @click="$emit('render')">
+    <p v-if="renderDisabledReason && !rendering" class="render-block-reason">
+      {{ renderDisabledReason }}
+    </p>
+
+    <button
+      class="render-btn"
+      type="button"
+      :disabled="renderBlocked"
+      :title="renderDisabledReason || undefined"
+      @click="$emit('render')"
+    >
       {{ rendering ? '正在生成成片...' : '立即剪辑' }}
     </button>
   </section>
@@ -64,6 +74,7 @@ const props = defineProps<{
   subtitles: SmartClipSubtitle[]
   enabled: boolean
   rendering: boolean
+  renderDisabledReason?: string
 }>()
 
 const emit = defineEmits<{
@@ -80,6 +91,7 @@ const emit = defineEmits<{
 const highlightKeywords = ['顺心事', '财不露白', '福不自炫', '从没错过', '招贴古人', '托您吉', '评论区聊聊']
 
 const editableSubtitles = computed(() => props.subtitles ?? [])
+const renderBlocked = computed(() => props.rendering || Boolean(props.renderDisabledReason))
 
 function buildPieces(text = '') {
   const pieces: Array<{ text: string; highlight: boolean }> = []
@@ -315,6 +327,18 @@ function updateSubtitleText(index: number, event: Event) {
 .highlight {
   color: var(--warning);
   text-shadow: 0 1px 0 rgba(217, 119, 6, 0.18);
+}
+
+.render-block-reason {
+  margin: 0 18px 10px;
+  padding: 10px 12px;
+  border: 1px solid #FED7AA;
+  border-radius: 12px;
+  color: #9A3412;
+  font-size: var(--font-small, 12px);
+  font-weight: 800;
+  line-height: 1.45;
+  background: #FFF7ED;
 }
 
 .render-btn {

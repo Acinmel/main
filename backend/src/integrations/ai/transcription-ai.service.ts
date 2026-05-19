@@ -1,8 +1,4 @@
-import {
-  BadRequestException,
-  Injectable,
-  Logger,
-} from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -10,6 +6,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 import { DEFAULT_TRANSCRIBE_MEDIA_MAX_BYTES } from '../../common/media.constants';
 import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import type {
@@ -73,10 +70,7 @@ interface DashScopeRealtimeTranscriptionJson {
   }>;
 }
 
-type AsrProvider =
-  | 'dashscope'
-  | 'openai-compatible'
-  | 'mock';
+type AsrProvider = 'dashscope' | 'openai-compatible' | 'mock';
 
 /**
  * 语音转写：唯一入口为百炼千问 ASR。
@@ -94,7 +88,9 @@ export class TranscriptionAiService {
     taskId: string;
     sourceVideoUrl: string;
   }): Promise<{ fullText: string; language: string }> {
-    const result = await this.transcribeFromSourceReference(params.sourceVideoUrl);
+    const result = await runAiLimited(this.config, () =>
+      this.transcribeFromSourceReference(params.sourceVideoUrl),
+    );
     return { fullText: result.fullText, language: result.language };
   }
 
@@ -105,7 +101,9 @@ export class TranscriptionAiService {
     size: number;
   }): Promise<TranscribeResultDto> {
     this.assertAcceptableMedia(file);
-    const result = await this.transcribeFromMedia(file);
+    const result = await runAiLimited(this.config, () =>
+      this.transcribeFromMedia(file),
+    );
     const transcriptId = this.transcriptStore.save({
       fullText: result.fullText,
       language: result.language,
@@ -122,7 +120,7 @@ export class TranscriptionAiService {
     };
   }
 
-  async checkHealth(): Promise<{
+  checkHealth(): Promise<{
     ok: boolean;
     transcribeUrlConfigured: boolean;
     healthUrl: string;
@@ -134,7 +132,7 @@ export class TranscriptionAiService {
     try {
       const provider = this.resolveProvider();
       if (provider.type === 'dashscope') {
-        return {
+        return Promise.resolve({
           ok: true,
           transcribeUrlConfigured: true,
           healthUrl: this.isRealtimeModel(provider.config.model)
@@ -144,32 +142,32 @@ export class TranscriptionAiService {
               : provider.config.chatCompletionsUrl,
           latencyMs: Date.now() - t0,
           provider: 'dashscope',
-        };
+        });
       }
       if (provider.type === 'openai-compatible') {
-        return {
+        return Promise.resolve({
           ok: true,
           transcribeUrlConfigured: true,
           healthUrl: provider.config.url,
           latencyMs: Date.now() - t0,
           provider: 'openai-compatible',
-        };
+        });
       }
-      return {
+      return Promise.resolve({
         ok: true,
         transcribeUrlConfigured: false,
         healthUrl: 'mock://transcription',
         latencyMs: Date.now() - t0,
         provider: 'mock',
-      };
+      });
     } catch (e) {
-      return {
+      return Promise.resolve({
         ok: false,
         transcribeUrlConfigured: false,
         healthUrl: '',
         latencyMs: Date.now() - t0,
         error: e instanceof Error ? e.message : String(e),
-      };
+      });
     }
   }
 
@@ -193,7 +191,10 @@ export class TranscriptionAiService {
             'FunASR 实时转写仅支持本地媒体文件，请改走上传转写或先保存视频后再转写。',
           );
         }
-        return this.transcribeLocalFileWithDashScopeRealtimeSdk(maybeLocal, provider.config);
+        return this.transcribeLocalFileWithDashScopeRealtimeSdk(
+          maybeLocal,
+          provider.config,
+        );
       }
       return this.transcribeWithQwenAsr(sourceRef, provider.config);
     }
@@ -215,7 +216,10 @@ export class TranscriptionAiService {
       if (this.isRealtimeModel(provider.config.model)) {
         return this.transcribeWithDashScopeRealtimeSdk(file, provider.config);
       }
-      return this.transcribeWithQwenAsr(this.toAudioDataUrl(file), provider.config);
+      return this.transcribeWithQwenAsr(
+        this.toAudioDataUrl(file),
+        provider.config,
+      );
     }
     if (provider.type === 'openai-compatible') {
       return this.transcribeWithOpenAiStyleApi(file, provider.config);
@@ -239,7 +243,10 @@ export class TranscriptionAiService {
       return { type: 'dashscope', config: this.getQwenAsrConfig() };
     }
     if (this.hasOpenAiCompatibleConfig()) {
-      return { type: 'openai-compatible', config: this.getOpenAiTranscribeConfig() };
+      return {
+        type: 'openai-compatible',
+        config: this.getOpenAiTranscribeConfig(),
+      };
     }
     if (this.isMockFallbackEnabled()) {
       return { type: 'mock' };
@@ -256,12 +263,15 @@ export class TranscriptionAiService {
   private hasOpenAiCompatibleConfig(): boolean {
     return Boolean(
       this.config.get<string>('ASR_API_KEY')?.trim() ||
-        this.config.get<string>('OPENAI_API_KEY')?.trim(),
+      this.config.get<string>('OPENAI_API_KEY')?.trim(),
     );
   }
 
   private isMockFallbackEnabled(): boolean {
-    const raw = this.config.get<string>('AI_MOCK_FALLBACK')?.trim().toLowerCase();
+    const raw = this.config
+      .get<string>('AI_MOCK_FALLBACK')
+      ?.trim()
+      .toLowerCase();
     if (raw === 'true' || raw === '1' || raw === 'on') return true;
     if (raw === 'false' || raw === '0' || raw === 'off') return false;
     return false;
@@ -350,7 +360,9 @@ export class TranscriptionAiService {
 
     const raw = await res.text();
     if (!res.ok) {
-      this.logger.warn(`OpenAI 兼容转写 API HTTP ${res.status}: ${raw.slice(0, 800)}`);
+      this.logger.warn(
+        `OpenAI 兼容转写 API HTTP ${res.status}: ${raw.slice(0, 800)}`,
+      );
       if (this.isMockFallbackEnabled()) {
         this.logger.warn('OpenAI 兼容转写返回错误，已回退本地 mock');
         return this.buildMockTranscript(file.originalname);
@@ -364,7 +376,9 @@ export class TranscriptionAiService {
     try {
       json = JSON.parse(raw) as OpenAiTranscriptionVerboseJson;
     } catch {
-      throw new BadRequestException('OpenAI 兼容转写 API 返回非 JSON，无法解析');
+      throw new BadRequestException(
+        'OpenAI 兼容转写 API 返回非 JSON，无法解析',
+      );
     }
 
     const fullText = json.text?.trim() ?? '';
@@ -493,17 +507,28 @@ export class TranscriptionAiService {
     language: string;
     segments: TranscriptSegmentDto[];
   }> {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-funasr-'));
-    const ext = this.resolveRealtimeAudioExtension(file.originalname, file.mimetype);
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-funasr-'),
+    );
+    const ext = this.resolveRealtimeAudioExtension(
+      file.originalname,
+      file.mimetype,
+    );
     const inputPath = path.join(tmpDir, `input${ext}`);
     try {
       await fs.writeFile(inputPath, file.buffer);
-      return await this.transcribeLocalFileWithDashScopeRealtimeSdk(inputPath, config, {
-        originalname: file.originalname,
-        mimetype: file.mimetype,
-      });
+      return await this.transcribeLocalFileWithDashScopeRealtimeSdk(
+        inputPath,
+        config,
+        {
+          originalname: file.originalname,
+          mimetype: file.mimetype,
+        },
+      );
     } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+      await fs
+        .rm(tmpDir, { recursive: true, force: true })
+        .catch(() => undefined);
     }
   }
 
@@ -527,7 +552,10 @@ export class TranscriptionAiService {
       '--model',
       config.model,
       '--format',
-      this.resolveRealtimeAudioFormat(meta?.originalname || filePath, meta?.mimetype || ''),
+      this.resolveRealtimeAudioFormat(
+        meta?.originalname || filePath,
+        meta?.mimetype || '',
+      ),
       '--sample-rate',
       String(this.getDashScopeRealtimeSampleRate()),
     ];
@@ -554,16 +582,26 @@ export class TranscriptionAiService {
       });
       return this.normalizeDashScopeRealtimeResult(stdout);
     } catch (e) {
-      const err = e as Error & { stdout?: string | Buffer; stderr?: string | Buffer };
+      const err = e as Error & {
+        stdout?: string | Buffer;
+        stderr?: string | Buffer;
+      };
       const stderr = err.stderr?.toString?.().trim() ?? '';
       const stdout = err.stdout?.toString?.().trim() ?? '';
-      const detail = this.extractDashScopeRealtimeError(stderr || stdout || err.message);
-      this.logger.error(
-        `FunASR 实时转写失败: ${detail}${stderr ? ` | stderr=${stderr.slice(0, 500)}` : ''}`,
+      const detail = this.extractDashScopeRealtimeError(
+        stderr || stdout || err.message,
       );
+      const logMessage = `FunASR 实时转写失败: ${detail}${stderr ? ` | stderr=${stderr.slice(0, 500)}` : ''}`;
+      if (this.isFunAsrEmptyTextFailure(detail)) {
+        this.logger.warn(logMessage);
+      } else {
+        this.logger.error(logMessage);
+      }
       if (this.isMockFallbackEnabled()) {
         this.logger.warn('FunASR 实时转写失败，已回退本地 mock');
-        return this.buildMockTranscript(meta?.originalname || path.basename(filePath));
+        return this.buildMockTranscript(
+          meta?.originalname || path.basename(filePath),
+        );
       }
       throw new BadRequestException(`FunASR 实时转写失败：${detail}`);
     }
@@ -586,12 +624,16 @@ export class TranscriptionAiService {
     }
     if (file.size > max) {
       const mb = Math.round(max / (1024 * 1024));
-      throw new BadRequestException(`文件过大（当前上限约 ${mb}MB），当前 ${file.size} 字节`);
+      throw new BadRequestException(
+        `文件过大（当前上限约 ${mb}MB），当前 ${file.size} 字节`,
+      );
     }
 
     const mt = (file.mimetype || '').toLowerCase();
     const name = (file.originalname || '').toLowerCase();
-    const extOk = /\.(flac|mp3|mp4|mpeg|mpga|m4a|ogg|wav|webm|mov|aac)$/i.test(name);
+    const extOk = /\.(flac|mp3|mp4|mpeg|mpga|m4a|ogg|wav|webm|mov|aac)$/i.test(
+      name,
+    );
     const mimeOk =
       mt.startsWith('audio/') ||
       mt.startsWith('video/') ||
@@ -704,7 +746,9 @@ export class TranscriptionAiService {
     config: ReturnType<TranscriptionAiService['getQwenAsrConfig']>,
   ): Promise<QwenAsrTaskJson> {
     const timeoutMs = Number(this.config.get('ASR_TIMEOUT_MS') ?? 600_000);
-    const pollIntervalMs = Number(this.config.get('QWEN_ASR_POLL_INTERVAL_MS') ?? 2_000);
+    const pollIntervalMs = Number(
+      this.config.get('QWEN_ASR_POLL_INTERVAL_MS') ?? 2_000,
+    );
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
@@ -722,7 +766,11 @@ export class TranscriptionAiService {
       );
       const status = task.output?.task_status?.toUpperCase();
       if (status === 'SUCCEEDED') return task;
-      if (status === 'FAILED' || status === 'CANCELED' || status === 'UNKNOWN') {
+      if (
+        status === 'FAILED' ||
+        status === 'CANCELED' ||
+        status === 'UNKNOWN'
+      ) {
         throw new BadRequestException(
           `千问 FileTrans ASR 任务失败（${status}）：${JSON.stringify(task).slice(0, 500)}`,
         );
@@ -732,7 +780,11 @@ export class TranscriptionAiService {
     throw new BadRequestException('千问 FileTrans ASR 转写超时，请稍后重试');
   }
 
-  private async fetchQwenJson<T>(url: string, init: RequestInit, label: string): Promise<T> {
+  private async fetchQwenJson<T>(
+    url: string,
+    init: RequestInit,
+    label: string,
+  ): Promise<T> {
     let res: Response;
     try {
       res = await fetch(url, init);
@@ -745,7 +797,9 @@ export class TranscriptionAiService {
     const raw = await res.text();
     if (!res.ok) {
       this.logger.warn(`${label} HTTP ${res.status}: ${raw.slice(0, 800)}`);
-      throw new BadRequestException(`${label}返回错误（${res.status}）：${raw.slice(0, 500)}`);
+      throw new BadRequestException(
+        `${label}返回错误（${res.status}）：${raw.slice(0, 500)}`,
+      );
     }
 
     try {
@@ -790,7 +844,9 @@ export class TranscriptionAiService {
 
   private isRealtimeModel(model: string): boolean {
     const normalized = model.toLowerCase();
-    return normalized.includes('fun-asr-realtime') || normalized.includes('funasr');
+    return (
+      normalized.includes('fun-asr-realtime') || normalized.includes('funasr')
+    );
   }
 
   private isFileTransModel(model: string): boolean {
@@ -798,7 +854,10 @@ export class TranscriptionAiService {
   }
 
   private getAsrEnableItn(): boolean {
-    const raw = this.config.get<string>('QWEN_ASR_ENABLE_ITN')?.trim().toLowerCase();
+    const raw = this.config
+      .get<string>('QWEN_ASR_ENABLE_ITN')
+      ?.trim()
+      .toLowerCase();
     if (raw === '1' || raw === 'true') return true;
     if (raw === '0' || raw === 'false') return false;
     return false;
@@ -810,7 +869,10 @@ export class TranscriptionAiService {
   }
 
   private getAsrEnableWords(): boolean {
-    const raw = this.config.get<string>('QWEN_ASR_ENABLE_WORDS')?.trim().toLowerCase();
+    const raw = this.config
+      .get<string>('QWEN_ASR_ENABLE_WORDS')
+      ?.trim()
+      .toLowerCase();
     if (raw === '1' || raw === 'true') return true;
     if (raw === '0' || raw === 'false') return false;
     return false;
@@ -851,13 +913,27 @@ export class TranscriptionAiService {
 
     const candidates = [
       path.join(process.cwd(), 'scripts', 'dashscope_funasr_transcribe.py'),
-      path.join(process.cwd(), 'backend', 'scripts', 'dashscope_funasr_transcribe.py'),
-      path.join(__dirname, '..', '..', '..', 'scripts', 'dashscope_funasr_transcribe.py'),
+      path.join(
+        process.cwd(),
+        'backend',
+        'scripts',
+        'dashscope_funasr_transcribe.py',
+      ),
+      path.join(
+        __dirname,
+        '..',
+        '..',
+        '..',
+        'scripts',
+        'dashscope_funasr_transcribe.py',
+      ),
     ];
     for (const candidate of candidates) {
       if (existsSync(candidate)) return candidate;
     }
-    throw new BadRequestException('未找到 FunASR Python 转写脚本，请检查 backend/scripts 目录。');
+    throw new BadRequestException(
+      '未找到 FunASR Python 转写脚本，请检查 backend/scripts 目录。',
+    );
   }
 
   private resolveAsrPythonCommand(): {
@@ -866,12 +942,18 @@ export class TranscriptionAiService {
   } {
     const fromEnv = this.config.get<string>('ASR_PYTHON_BIN')?.trim();
     if (fromEnv) {
-      return { command: fromEnv, prefixArgs: this.readCommandArgs('ASR_PYTHON_ARGS') };
+      return {
+        command: fromEnv,
+        prefixArgs: this.readCommandArgs('ASR_PYTHON_ARGS'),
+      };
     }
 
     const genericPython = this.config.get<string>('PYTHON_BIN')?.trim();
     if (genericPython) {
-      return { command: genericPython, prefixArgs: this.readCommandArgs('ASR_PYTHON_ARGS') };
+      return {
+        command: genericPython,
+        prefixArgs: this.readCommandArgs('ASR_PYTHON_ARGS'),
+      };
     }
 
     if (process.platform === 'win32') {
@@ -928,7 +1010,11 @@ export class TranscriptionAiService {
         code?: string;
         status_code?: number;
       };
-      const parts = [json.code, json.message, json.status_code?.toString()].filter(Boolean);
+      const parts = [
+        json.code,
+        json.message,
+        json.status_code?.toString(),
+      ].filter(Boolean);
       return parts.join(' | ') || raw;
     } catch {
       return raw;
@@ -940,8 +1026,14 @@ export class TranscriptionAiService {
     if (!trimmed || /^https?:\/\//i.test(trimmed) || /^data:/i.test(trimmed)) {
       return null;
     }
-    const saveDir = resolveConfiguredDir(this.config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
-    const candidates = [path.resolve(trimmed), path.resolve(path.join(saveDir, path.basename(trimmed)))];
+    const saveDir = resolveConfiguredDir(
+      this.config.get<string>('VIDEO_SAVE_DIR'),
+      'download-video',
+    );
+    const candidates = [
+      path.resolve(trimmed),
+      path.resolve(path.join(saveDir, path.basename(trimmed))),
+    ];
     for (const candidate of candidates) {
       if (existsSync(candidate)) {
         return candidate;
@@ -950,7 +1042,10 @@ export class TranscriptionAiService {
     return null;
   }
 
-  private resolveRealtimeAudioExtension(originalname: string, mimetype: string): string {
+  private resolveRealtimeAudioExtension(
+    originalname: string,
+    mimetype: string,
+  ): string {
     const ext = path.extname(originalname).toLowerCase();
     if (ext) return ext;
     const mime = this.guessAudioMime(originalname, mimetype);
@@ -962,8 +1057,14 @@ export class TranscriptionAiService {
     return '.wav';
   }
 
-  private resolveRealtimeAudioFormat(originalname: string, mimetype: string): string {
-    const ext = this.resolveRealtimeAudioExtension(originalname, mimetype).replace('.', '');
+  private resolveRealtimeAudioFormat(
+    originalname: string,
+    mimetype: string,
+  ): string {
+    const ext = this.resolveRealtimeAudioExtension(
+      originalname,
+      mimetype,
+    ).replace('.', '');
     const alias: Record<string, string> = {
       mpeg: 'mp3',
       mpga: 'mp3',
@@ -973,7 +1074,11 @@ export class TranscriptionAiService {
     return alias[ext] ?? (ext || 'wav');
   }
 
-  private toAudioDataUrl(file: { buffer: Buffer; originalname: string; mimetype: string }): string {
+  private toAudioDataUrl(file: {
+    buffer: Buffer;
+    originalname: string;
+    mimetype: string;
+  }): string {
     const mime = this.guessAudioMime(file.originalname, file.mimetype);
     return `data:${mime};base64,${file.buffer.toString('base64')}`;
   }
@@ -1010,6 +1115,22 @@ export class TranscriptionAiService {
       cursor += duration;
       return segment;
     });
+  }
+
+  private isFunAsrEmptyTextFailure(detail: string): boolean {
+    const normalized = detail.toLowerCase();
+    return (
+      normalized.includes('recognition returned empty text') ||
+      normalized.includes('empty text')
+    );
+  }
+
+  private runtimeTempDir(): string {
+    return path.resolve(
+      this.config.get<string>('TEMP_DIR')?.trim() ||
+        this.config.get<string>('TMP_DIR')?.trim() ||
+        os.tmpdir(),
+    );
   }
 
   private sleep(ms: number): Promise<void> {

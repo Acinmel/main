@@ -2,7 +2,10 @@ import { existsSync } from 'node:fs';
 import * as path from 'node:path';
 
 function looksLikeBackendRoot(dir: string): boolean {
-  return existsSync(path.join(dir, 'package.json')) && existsSync(path.join(dir, 'src'));
+  return (
+    existsSync(path.join(dir, 'package.json')) &&
+    existsSync(path.join(dir, 'src'))
+  );
 }
 
 export function resolveBackendRoot(): string {
@@ -23,7 +26,10 @@ export function resolveProjectDataDir(...segments: string[]): string {
   return path.join(resolveBackendRoot(), 'data', ...segments);
 }
 
-export function resolveConfiguredDir(value: string | undefined | null, ...fallbackSegments: string[]): string {
+export function resolveConfiguredDir(
+  value: string | undefined | null,
+  ...fallbackSegments: string[]
+): string {
   const trimmed = value?.trim();
   if (trimmed) return path.resolve(trimmed);
   return resolveProjectDataDir(...fallbackSegments);

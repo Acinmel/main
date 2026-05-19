@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Patch, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Query,
+  Req,
+} from '@nestjs/common';
 import type { Request } from 'express';
 import { TasksService } from '../tasks/tasks.service';
 
@@ -17,10 +25,16 @@ export class WorksController {
   constructor(private readonly tasks: TasksService) {}
 
   @Get()
-  async list(@Req() req: Request) {
+  async list(
+    @Req() req: Request,
+    @Query('page') pageRaw?: string,
+    @Query('limit') limitRaw?: string,
+  ) {
     const userId = req.userId!;
-    const items = await this.tasks.listSummaries(userId);
-    return { items };
+    const page = this.readPositiveInt(pageRaw, 1);
+    const limit = Math.min(100, this.readPositiveInt(limitRaw, 50));
+    const items = await this.tasks.listSummaries(userId, { page, limit });
+    return { items, page, limit };
   }
 
   /** 更新作品标题、备注（仅本人） */
@@ -35,5 +49,12 @@ export class WorksController {
       title: body.title,
       content: body.content,
     });
+  }
+
+  private readPositiveInt(value: string | undefined, fallback: number): number {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0
+      ? Math.floor(parsed)
+      : fallback;
   }
 }

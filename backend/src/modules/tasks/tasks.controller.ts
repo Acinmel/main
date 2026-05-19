@@ -65,9 +65,12 @@ export class TasksController {
     }
     const initialRaw = body.initialTranscript?.trim();
     if (initialRaw && initialRaw.length > 50_000) {
-      throw new BadRequestException('initialTranscript 过长（上限 50000 字符）');
+      throw new BadRequestException(
+        'initialTranscript 过长（上限 50000 字符）',
+      );
     }
-    const initial = initialRaw && initialRaw.length > 0 ? initialRaw : undefined;
+    const initial =
+      initialRaw && initialRaw.length > 0 ? initialRaw : undefined;
     const userId = req.userId!;
     const out = await this.tasks.createTask(userId, normalized, initial);
     void this.audit.log(userId, 'task_create', `task_id=${out.id}`, req);
@@ -132,6 +135,14 @@ export class TasksController {
     return this.tasks.startExtract(userId, id);
   }
 
+  @Post(':id/retry')
+  async retry(@Param('id') id: string, @Req() req: Request) {
+    const userId = req.userId!;
+    const out = await this.tasks.retryFailedTask(userId, id);
+    void this.audit.log(userId, 'task_retry', `task_id=${id}`, req);
+    return out;
+  }
+
   @Post(':id/rewrite/suggest')
   suggestRewrite(
     @Param('id') id: string,
@@ -159,8 +170,15 @@ export class TasksController {
     @Body() body: RenderOptionsDto,
     @Req() req: Request,
   ) {
-    if (!body?.mode || !body?.aspect || !body?.voiceStyleId || !body?.subtitleStyleId) {
-      throw new BadRequestException('mode/aspect/voiceStyleId/subtitleStyleId 均为必填');
+    if (
+      !body?.mode ||
+      !body?.aspect ||
+      !body?.voiceStyleId ||
+      !body?.subtitleStyleId
+    ) {
+      throw new BadRequestException(
+        'mode/aspect/voiceStyleId/subtitleStyleId 均为必填',
+      );
     }
     const userId = req.userId!;
     const out = await this.tasks.submitRender(userId, id, body);

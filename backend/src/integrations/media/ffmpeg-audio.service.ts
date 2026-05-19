@@ -7,9 +7,18 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
+import {
+  readPositiveInt,
+  runWithRuntimeLimit,
+} from '../../common/runtime-limits.util';
 
 const execFileAsync = promisify(execFile);
 const requireFromService = createRequire(__filename);
+type MediaExecOptions = {
+  timeout?: number;
+  maxBuffer?: number;
+  windowsHide?: boolean;
+};
 
 /** 与 VideoMediaDownloadService 下载结果一致 */
 export type TranscribeMediaInput = {
@@ -58,7 +67,9 @@ export class FfmpegAudioService {
 
     const bin = this.resolveFfmpegBinary();
 
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-'));
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-ffmpeg-'),
+    );
     const outAudio = path.join(tmpDir, 'for-transcription.wav');
 
     try {
@@ -73,7 +84,9 @@ export class FfmpegAudioService {
         this.logger.warn('FFmpeg 输出音轨过小，回退为原媒体直送 ASR');
         return this.ensureBufferFromDiskIfNeeded(media, opts);
       }
-      const base = path.basename(media.originalname, path.extname(media.originalname)) || 'audio';
+      const base =
+        path.basename(media.originalname, path.extname(media.originalname)) ||
+        'audio';
       return {
         buffer: audio,
         originalname: `${base}.wav`,
@@ -155,7 +168,7 @@ export class FfmpegAudioService {
       'video/webm': '.webm',
       'video/x-matroska': '.mkv',
     };
-    return mt ? map[mt] ?? null : null;
+    return mt ? (map[mt] ?? null) : null;
   }
 
   private extensionFromMedia(originalname?: string, mimetype?: string): string {
@@ -216,7 +229,10 @@ export class FfmpegAudioService {
     return exe;
   }
 
-  private async writeTempInput(dir: string, media: TranscribeMediaInput): Promise<string> {
+  private async writeTempInput(
+    dir: string,
+    media: TranscribeMediaInput,
+  ): Promise<string> {
     const ext = this.extensionFromMedia(media.originalname, media.mimetype);
     const p = path.join(dir, `input${ext}`);
     await fs.writeFile(p, media.buffer);
@@ -234,7 +250,9 @@ export class FfmpegAudioService {
 
   private resolveFfprobeStaticBinary(): string | null {
     try {
-      const mod = requireFromService('ffprobe-static') as { path?: string } | null;
+      const mod = requireFromService('ffprobe-static') as {
+        path?: string;
+      } | null;
       return mod?.path && existsSync(mod.path) ? mod.path : null;
     } catch {
       return null;
@@ -252,7 +270,7 @@ export class FfmpegAudioService {
   }> {
     const bin = this.resolveFfmpegBinary();
     try {
-      const { stdout } = await execFileAsync(bin, ['-version'], {
+      const { stdout } = await this.execMediaTool(bin, ['-version'], {
         timeout: 10_000,
         maxBuffer: 96 * 1024,
         windowsHide: true,
@@ -270,7 +288,9 @@ export class FfmpegAudioService {
     originalname: string;
     mimetype?: string;
   }): Promise<number | null> {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffprobe-'));
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-ffprobe-'),
+    );
     const inputPath = path.join(
       tmpDir,
       `input${this.extensionFromMedia(input.originalname, input.mimetype)}`,
@@ -287,7 +307,9 @@ export class FfmpegAudioService {
       );
       return null;
     } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+      await fs
+        .rm(tmpDir, { recursive: true, force: true })
+        .catch(() => undefined);
     }
   }
 
@@ -328,7 +350,7 @@ export class FfmpegAudioService {
 
     for (const args of attempts) {
       try {
-        const { stdout } = await execFileAsync(bin, args, {
+        const { stdout } = await this.execMediaTool(bin, args, {
           timeout: 20_000,
           maxBuffer: 2 * 1024 * 1024,
           windowsHide: true,
@@ -345,9 +367,7 @@ export class FfmpegAudioService {
 
     if (lastError) {
       this.logger.warn(
-        `FFprobe file duration failed for ${path.basename(inputPath)}: ${
-          lastError instanceof Error ? lastError.message : String(lastError)
-        }`,
+        `FFprobe file duration failed for ${path.basename(inputPath)}: ${this.stringifyUnknown(lastError)}`,
       );
     }
     return null;
@@ -355,7 +375,10 @@ export class FfmpegAudioService {
 
   private parseFirstPositiveDuration(output: unknown): number | null {
     const text = this.stringifyExecOutput(output);
-    const parts = text.split(/[\s,\r\n]+/).map((item) => item.trim()).filter(Boolean);
+    const parts = text
+      .split(/[\s,\r\n]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
     for (const part of parts) {
       if (/^(n\/a|nan|inf)$/i.test(part)) continue;
       const seconds = Number(part);
@@ -364,14 +387,20 @@ export class FfmpegAudioService {
     return null;
   }
 
-  private async probeDurationWithFfmpeg(inputPath: string): Promise<number | null> {
+  private async probeDurationWithFfmpeg(
+    inputPath: string,
+  ): Promise<number | null> {
     const bin = this.resolveFfmpegBinary();
     try {
-      await execFileAsync(bin, ['-nostdin', '-hide_banner', '-i', inputPath], {
-        timeout: 20_000,
-        maxBuffer: 2 * 1024 * 1024,
-        windowsHide: true,
-      });
+      await this.execMediaTool(
+        bin,
+        ['-nostdin', '-hide_banner', '-i', inputPath],
+        {
+          timeout: 20_000,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
     } catch (error) {
       const execError = error as { stdout?: unknown; stderr?: unknown };
       const output = `${this.stringifyExecOutput(execError.stdout)}\n${this.stringifyExecOutput(execError.stderr)}`;
@@ -381,7 +410,9 @@ export class FfmpegAudioService {
   }
 
   private parseFfmpegDuration(output: string): number | null {
-    const match = output.match(/Duration:\s*(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)/i);
+    const match = output.match(
+      /Duration:\s*(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)/i,
+    );
     if (!match) return null;
 
     const hours = Number(match[1]);
@@ -394,7 +425,24 @@ export class FfmpegAudioService {
   private stringifyExecOutput(output: unknown): string {
     if (!output) return '';
     if (Buffer.isBuffer(output)) return output.toString();
-    return typeof output === 'string' ? output : String(output);
+    if (typeof output === 'string') return output;
+    if (typeof output === 'number' || typeof output === 'boolean') {
+      return String(output);
+    }
+    return this.stringifyUnknown(output);
+  }
+
+  private stringifyUnknown(value: unknown): string {
+    if (value instanceof Error) return value.message;
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '[unserializable]';
+    }
   }
 
   async replaceVideoAudio(params: {
@@ -402,7 +450,9 @@ export class FfmpegAudioService {
     audio: { buffer: Buffer; originalname?: string };
   }): Promise<TranscribeMediaInput> {
     const bin = this.resolveFfmpegBinary();
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-mux-'));
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-ffmpeg-mux-'),
+    );
     const videoExt = path.extname(params.video.originalname) || '.mp4';
     const audioExt = path.extname(params.audio.originalname || '') || '.mp3';
     const inputVideo = path.join(tmpDir, `input-video${videoExt}`);
@@ -433,7 +483,8 @@ export class FfmpegAudioService {
         '-shortest',
         outputVideo,
       ];
-      await execFileAsync(bin, args, {
+      await this.execMediaTool(bin, args, {
+        timeout: this.ffmpegTimeoutMs(),
         maxBuffer: 32 * 1024 * 1024,
         windowsHide: true,
       });
@@ -445,7 +496,9 @@ export class FfmpegAudioService {
         size: buffer.length,
       };
     } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+      await fs
+        .rm(tmpDir, { recursive: true, force: true })
+        .catch(() => undefined);
     }
   }
 
@@ -480,7 +533,8 @@ export class FfmpegAudioService {
       args.push('-t', String(params.clipSeconds));
     }
     args.push(params.outputVideoPath);
-    await execFileAsync(bin, args, {
+    await this.execMediaTool(bin, args, {
+      timeout: this.ffmpegTimeoutMs(),
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
@@ -507,7 +561,8 @@ export class FfmpegAudioService {
       args.push('-t', String(params.clipSeconds));
     }
     args.push(params.outputVideoPath);
-    await execFileAsync(bin, args, {
+    await this.execMediaTool(bin, args, {
+      timeout: this.ffmpegTimeoutMs(),
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
@@ -535,7 +590,9 @@ export class FfmpegAudioService {
       '-loglevel',
       'error',
       '-y',
-      ...(normalizedTargetSeconds && !normalizedClipSeconds ? ['-stream_loop', '-1'] : []),
+      ...(normalizedTargetSeconds && !normalizedClipSeconds
+        ? ['-stream_loop', '-1']
+        : []),
       '-i',
       params.inputVideoPath,
     ];
@@ -558,7 +615,8 @@ export class FfmpegAudioService {
       '+faststart',
       params.outputVideoPath,
     );
-    await execFileAsync(bin, args, {
+    await this.execMediaTool(bin, args, {
+      timeout: this.ffmpegTimeoutMs(),
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
@@ -592,7 +650,8 @@ export class FfmpegAudioService {
       args.push('-t', String(params.clipSeconds));
     }
     args.push(params.outputAudioPath);
-    await execFileAsync(bin, args, {
+    await this.execMediaTool(bin, args, {
+      timeout: this.ffmpegTimeoutMs(),
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
@@ -615,7 +674,7 @@ export class FfmpegAudioService {
       'null',
       '-',
     ];
-    const { stdout, stderr } = await execFileAsync(bin, args, {
+    const { stdout, stderr } = await this.execMediaTool(bin, args, {
       timeout: 20 * 60_000,
       maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
@@ -665,7 +724,9 @@ export class FfmpegAudioService {
   }): Promise<void> {
     const duration = await this.probeFileDurationSeconds(params.inputVideoPath);
     if (!duration) {
-      throw new Error('Unable to probe video duration before applying cut points');
+      throw new Error(
+        'Unable to probe video duration before applying cut points',
+      );
     }
 
     const normalizedCuts = params.cuts
@@ -702,13 +763,18 @@ export class FfmpegAudioService {
     }
 
     const bin = this.resolveFfmpegBinary();
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'kb-ffmpeg-cut-'));
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-ffmpeg-cut-'),
+    );
     try {
       const segmentPaths: string[] = [];
       for (const [index, range] of keepRanges.entries()) {
-        const segmentPath = path.join(tmpDir, `segment-${String(index).padStart(3, '0')}.mp4`);
+        const segmentPath = path.join(
+          tmpDir,
+          `segment-${String(index).padStart(3, '0')}.mp4`,
+        );
         const segmentDuration = Math.max(0.05, range.endTime - range.startTime);
-        await execFileAsync(
+        await this.execMediaTool(
           bin,
           [
             '-nostdin',
@@ -754,11 +820,14 @@ export class FfmpegAudioService {
 
       const listPath = path.join(tmpDir, 'concat-list.txt');
       const listContent = segmentPaths
-        .map((segmentPath) => `file '${segmentPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`)
+        .map(
+          (segmentPath) =>
+            `file '${segmentPath.replace(/\\/g, '/').replace(/'/g, "'\\''")}'`,
+        )
         .join('\n');
       await fs.writeFile(listPath, listContent, 'utf8');
 
-      await execFileAsync(
+      await this.execMediaTool(
         bin,
         [
           '-nostdin',
@@ -785,7 +854,9 @@ export class FfmpegAudioService {
         },
       );
     } finally {
-      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+      await fs
+        .rm(tmpDir, { recursive: true, force: true })
+        .catch(() => undefined);
     }
   }
 
@@ -821,10 +892,46 @@ export class FfmpegAudioService {
       'wav',
       outputAudioPath,
     ];
-    await execFileAsync(ffmpegBin, args, {
+    await this.execMediaTool(ffmpegBin, args, {
+      timeout: this.ffmpegTimeoutMs(),
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
+  }
+
+  private async execMediaTool(
+    file: string,
+    args: string[],
+    options: MediaExecOptions,
+  ): Promise<Awaited<ReturnType<typeof execFileAsync>>> {
+    return runWithRuntimeLimit(
+      'ffmpeg',
+      {
+        concurrency: readPositiveInt(
+          this.config.get('FFMPEG_MAX_CONCURRENCY'),
+          2,
+        ),
+        queueLimit: readPositiveInt(this.config.get('FFMPEG_QUEUE_LIMIT'), 20),
+      },
+      () =>
+        execFileAsync(file, args, {
+          timeout: options.timeout ?? this.ffmpegTimeoutMs(),
+          maxBuffer: options.maxBuffer ?? 32 * 1024 * 1024,
+          windowsHide: options.windowsHide ?? true,
+        }),
+    );
+  }
+
+  private ffmpegTimeoutMs(): number {
+    return readPositiveInt(this.config.get('FFMPEG_TIMEOUT_MS'), 20 * 60_000);
+  }
+
+  private runtimeTempDir(): string {
+    return path.resolve(
+      this.config.get<string>('TEMP_DIR')?.trim() ||
+        this.config.get<string>('TMP_DIR')?.trim() ||
+        os.tmpdir(),
+    );
   }
 
   private clampSeconds(value: number, min: number, max: number): number {

@@ -169,6 +169,10 @@ async function submitLipSync() {
     const res = await createAliLipSyncVideo({
       file,
       durationSeconds: durationSeconds.value,
+    }, {
+      onUploadProgress: (percentage) => {
+        progress.value = Math.max(progress.value, Math.min(35, Math.round(percentage * 0.35)))
+      },
     })
     clearProgressTimer()
     progress.value = 100

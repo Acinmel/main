@@ -2,7 +2,9 @@ import { BadRequestException } from '@nestjs/common';
 import { assertUrlSafeForServerFetch } from './url-safety.util';
 
 function expectBlocked(url: string) {
-  expect(() => assertUrlSafeForServerFetch(new URL(url))).toThrow(BadRequestException);
+  expect(() => assertUrlSafeForServerFetch(new URL(url))).toThrow(
+    BadRequestException,
+  );
 }
 
 function expectAllowed(url: string) {

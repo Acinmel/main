@@ -144,6 +144,26 @@ cp deploy/docker.env.example .env
 nano .env   # 或 vim：至少修改 MYSQL_*、JWT_SECRET
 ```
 
+建议同时补齐这几个和媒体链路直接相关的变量：
+
+```bash
+PUBLIC_UPLOAD_BASE_URL=http://你的公网IP或域名:8080/uploads
+PUBLIC_BASE_URL=http://你的公网IP或域名:8080
+VOICE_PROVIDER_STREAM_SECRET=请替换为随机长字符串
+UPLOAD_DIR=/workspace/uploads
+USER_UPLOAD_RESOURCE_TTL_DAYS=7
+USER_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS=3600000
+```
+
+如果使用宿主机 Nginx / Caddy 做 80 或 443 反代，则 `PUBLIC_UPLOAD_BASE_URL` 应写成最终用户访问的正式域名，例如：
+
+```bash
+PUBLIC_UPLOAD_BASE_URL=https://你的域名/uploads
+PUBLIC_BASE_URL=https://你的域名
+```
+
+`PUBLIC_BASE_URL` 必须是后端可对外访问的站点根地址（不带 `/uploads`），用于语音样本签名流和 VideoReTalk 可回源 URL。
+
 将 **大模型、抖音 Cookie、千问 ASR（`DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` / `QWEN_ASR_MODEL` 等）** 按 `backend/.env.example` 的说明，把需要的变量**追加**到根目录 `.env` 或 `backend/.env` 中（本仓库 `docker-compose.yml` 通过 `env_file` 注入；若你新增了自定义键且 Compose 不会自动带入，再在 `api.environment` 中增加一行 `${VAR}` 映射）。
 
 **生产环境必须设置强随机 `JWT_SECRET`**，例如：

@@ -34,7 +34,9 @@ export class VideoMetaService {
       this.config.get<string>('VIDEO_FETCH_USER_AGENT')?.trim() ||
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
-    const timeoutMs = Number(this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 45_000);
+    const timeoutMs = Number(
+      this.config.get('VIDEO_FETCH_TIMEOUT_MS') ?? 45_000,
+    );
 
     let resolvedUrl = canonicalUrl;
     let html = '';
@@ -50,7 +52,7 @@ export class VideoMetaService {
 
       /** 抖音：若桌面 UA 未拿到有效 OG，再尝试移动端 UA（仍可能被风控，仅提高成功率） */
       const platformGuess = this.detectPlatform(resolvedUrl);
-      let metaProbe = this.safeParseHtmlMeta(html);
+      const metaProbe = this.safeParseHtmlMeta(html);
       if (
         platformGuess === 'douyin' &&
         !this.hasAnyMeta(metaProbe) &&
@@ -63,10 +65,7 @@ export class VideoMetaService {
           warnings.push(...second.warnings.map((w) => `[移动端重试] ${w}`));
           if (second.ok) {
             const m2 = this.safeParseHtmlMeta(second.html);
-            if (
-              second.html.length > html.length ||
-              this.hasAnyMeta(m2)
-            ) {
+            if (second.html.length > html.length || this.hasAnyMeta(m2)) {
               resolvedUrl = second.resolvedUrl;
               html = second.html;
               warnings.push('已使用移动端 UA 重试抓取');
@@ -101,12 +100,11 @@ export class VideoMetaService {
     const likeCount =
       platform === 'douyin'
         ? this.extractDouyinLikeCount(html)
-        : this.extractGenericLikeCount(html);
+        : this.extractGenericLikeCount();
     const playCount =
       platform === 'douyin' ? this.extractDouyinPlayCount(html) : null;
     const content = this.resolveVideoContent(html, platform, meta.description);
-    const tags =
-      platform === 'douyin' ? this.extractDouyinHashtags(html) : [];
+    const tags = platform === 'douyin' ? this.extractDouyinHashtags(html) : [];
     const videoAssetDetected = this.detectVideoAssetInPage(
       html,
       platform,
@@ -124,13 +122,13 @@ export class VideoMetaService {
 
     const hasUsefulMeta = Boolean(
       meta.title ||
-        content ||
-        meta.description ||
-        meta.coverImageUrl ||
-        meta.videoUrl ||
-        likeCount != null ||
-        playCount != null ||
-        tags.length > 0,
+      content ||
+      meta.description ||
+      meta.coverImageUrl ||
+      meta.videoUrl ||
+      likeCount != null ||
+      playCount != null ||
+      tags.length > 0,
     );
 
     return {
@@ -249,7 +247,7 @@ export class VideoMetaService {
   }
 
   /** 非抖音页：暂不猜获赞字段 */
-  private extractGenericLikeCount(_html: string): number | null {
+  private extractGenericLikeCount(): number | null {
     return null;
   }
 
@@ -329,7 +327,10 @@ export class VideoMetaService {
     );
   }
 
-  private buildBrowserHeaders(targetUrl: string, userAgent: string): Record<string, string> {
+  private buildBrowserHeaders(
+    targetUrl: string,
+    userAgent: string,
+  ): Record<string, string> {
     const headers: Record<string, string> = {
       'User-Agent': userAgent,
       Accept:

@@ -13,7 +13,7 @@ export async function pollUntil<T>(
   for (;;) {
     const value = await fn()
     if (predicate(value)) return value
-    if (Date.now() - start > timeoutMs) {
+    if (timeoutMs > 0 && Date.now() - start > timeoutMs) {
       throw new Error('轮询超时，请稍后重试或刷新页面')
     }
     await new Promise((r) => setTimeout(r, intervalMs))

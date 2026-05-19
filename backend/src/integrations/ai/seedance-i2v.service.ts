@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 
 /**
  * jiekou.ai Seedance 1.5 Pro 图生视频（异步）
@@ -84,10 +85,13 @@ export class SeedanceI2vService {
       duration: body.duration ?? num('SEEDANCE_I2V_DURATION', 5),
       watermark: body.watermark ?? bool('SEEDANCE_I2V_WATERMARK', true),
       resolution: body.resolution ?? str('SEEDANCE_I2V_RESOLUTION', '1080p'),
-      camera_fixed: body.camera_fixed ?? bool('SEEDANCE_I2V_CAMERA_FIXED', true),
-      generate_audio: body.generate_audio ?? bool('SEEDANCE_I2V_GENERATE_AUDIO', true),
+      camera_fixed:
+        body.camera_fixed ?? bool('SEEDANCE_I2V_CAMERA_FIXED', true),
+      generate_audio:
+        body.generate_audio ?? bool('SEEDANCE_I2V_GENERATE_AUDIO', true),
       execution_expires_after:
-        body.execution_expires_after ?? num('SEEDANCE_I2V_EXECUTION_EXPIRES_AFTER', 86400),
+        body.execution_expires_after ??
+        num('SEEDANCE_I2V_EXECUTION_EXPIRES_AFTER', 86400),
     };
 
     if (body.seed !== undefined) {
@@ -104,11 +108,15 @@ export class SeedanceI2vService {
     if (last) {
       payload.last_image = last;
     } else {
-      const fromEnv = this.config.get<string>('SEEDANCE_I2V_LAST_IMAGE')?.trim();
+      const fromEnv = this.config
+        .get<string>('SEEDANCE_I2V_LAST_IMAGE')
+        ?.trim();
       if (fromEnv) payload.last_image = fromEnv;
     }
 
-    const tier = body.service_tier?.trim() ?? this.config.get<string>('SEEDANCE_I2V_SERVICE_TIER')?.trim();
+    const tier =
+      body.service_tier?.trim() ??
+      this.config.get<string>('SEEDANCE_I2V_SERVICE_TIER')?.trim();
     if (tier) payload.service_tier = tier;
 
     return payload;
@@ -117,7 +125,9 @@ export class SeedanceI2vService {
   /**
    * 提交异步任务；返回 HTTP 状态与解析后的 JSON（具体含 task_id 等以控制台文档为准）。
    */
-  async submitAsync(body: SeedanceI2vSubmitBody): Promise<{ status: number; data: unknown }> {
+  async submitAsync(
+    body: SeedanceI2vSubmitBody,
+  ): Promise<{ status: number; data: unknown }> {
     const apiKey = this.resolveApiKey();
     if (!apiKey) {
       throw new BadRequestException(
@@ -126,22 +136,26 @@ export class SeedanceI2vService {
     }
 
     const url = this.getDefaultApiUrl();
-    const timeoutMs = Number(this.config.get('SEEDANCE_I2V_HTTP_TIMEOUT_MS') ?? 120_000);
+    const timeoutMs = Number(
+      this.config.get('SEEDANCE_I2V_HTTP_TIMEOUT_MS') ?? 120_000,
+    );
     const payload = this.buildPayload(body);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
+      const res = await runAiLimited(this.config, () =>
+        fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        }),
+      );
 
       let data: unknown;
       const text = await res.text();
@@ -152,7 +166,9 @@ export class SeedanceI2vService {
       }
 
       if (!res.ok) {
-        this.logger.warn(`Seedance i2v HTTP ${res.status}: ${text.slice(0, 500)}`);
+        this.logger.warn(
+          `Seedance i2v HTTP ${res.status}: ${text.slice(0, 500)}`,
+        );
       }
 
       return { status: res.status, data };

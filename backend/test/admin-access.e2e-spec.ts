@@ -9,6 +9,12 @@ import { App } from 'supertest/types';
 import { configureHttpApp } from '../src/app.config';
 import { AppModule } from '../src/app.module';
 
+function readToken(body: unknown): string {
+  if (!body || typeof body !== 'object') return '';
+  const token = (body as { token?: unknown }).token;
+  return typeof token === 'string' ? token : '';
+}
+
 /** 后台 /v1/admin/* 仅固定管理员邮箱可访问，使用独立 SQLite 文件避免污染本地 data/app.db。 */
 describe('Admin access (e2e)', () => {
   let app: INestApplication<App>;
@@ -56,7 +62,7 @@ describe('Admin access (e2e)', () => {
       .send({ email, password })
       .expect(201);
 
-    const token = reg.body.token as string;
+    const token = readToken(reg.body);
     expect(token).toBeTruthy();
 
     await request(app.getHttpServer())
@@ -73,7 +79,7 @@ describe('Admin access (e2e)', () => {
       .send({ email: '447519854@qq.com', password })
       .expect(201);
 
-    const token = reg.body.token as string;
+    const token = readToken(reg.body);
     expect(token).toBeTruthy();
 
     await request(app.getHttpServer())

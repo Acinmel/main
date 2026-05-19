@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { runAiLimited } from '../../common/ai-concurrency.util';
 import { resolveConfiguredDir } from '../../common/resource-paths.util';
 
 export interface AliLipSyncResult {
@@ -64,11 +65,10 @@ type DashScopeUploadPolicy = {
   max_file_size_mb?: number;
 };
 
-function getVideoSaveDir(config: ConfigService): string {
-  return resolveConfiguredDir(config.get<string>('VIDEO_SAVE_DIR'), 'download-video');
-}
-
-function getLipSyncPublicDir(config: ConfigService, kind: 'videos' | 'audios'): string {
+function getLipSyncPublicDir(
+  config: ConfigService,
+  kind: 'videos' | 'audios',
+): string {
   const root = resolveConfiguredDir(
     config.get<string>('LIP_SYNC_PUBLIC_MEDIA_DIR'),
     'lip-sync-public',
@@ -117,19 +117,27 @@ export class AliLipSyncService {
     const reasons: string[] = [];
     const publicBaseUrlUsable = Boolean(
       cfg.publicBaseUrl &&
-        this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl),
+      this.isUsablePublicBaseUrl(cfg.publicBaseUrl, cfg.allowPrivatePublicUrl),
     );
 
     if (cfg.provider === 'aliyun-videoretalk') {
       if (!cfg.apiKey) reasons.push('缺少 DASHSCOPE_API_KEY/LIP_SYNC_API_KEY');
       if (!cfg.tempUploadEnabled && !cfg.publicBaseUrl) {
-        reasons.push('缺少 PUBLIC_BASE_URL 或 LIP_SYNC_PUBLIC_BASE_URL，云端无法拉取视频和音频');
+        reasons.push(
+          '缺少 PUBLIC_BASE_URL 或 LIP_SYNC_PUBLIC_BASE_URL，云端无法拉取视频和音频',
+        );
       } else if (!cfg.tempUploadEnabled && !publicBaseUrlUsable) {
-        reasons.push('PUBLIC_BASE_URL 必须是公网 HTTP(S) 域名，不能是 localhost/内网地址');
+        reasons.push(
+          'PUBLIC_BASE_URL 必须是公网 HTTP(S) 域名，不能是 localhost/内网地址',
+        );
       }
     } else {
-      if (!cfg.apiUrl) reasons.push('缺少 LIP_SYNC_API_URL/ALI_LIP_SYNC_API_URL');
-      if (!cfg.apiKey) reasons.push('缺少 LIP_SYNC_API_KEY/ALI_LIP_SYNC_API_KEY/DASHSCOPE_API_KEY');
+      if (!cfg.apiUrl)
+        reasons.push('缺少 LIP_SYNC_API_URL/ALI_LIP_SYNC_API_URL');
+      if (!cfg.apiKey)
+        reasons.push(
+          '缺少 LIP_SYNC_API_KEY/ALI_LIP_SYNC_API_KEY/DASHSCOPE_API_KEY',
+        );
     }
 
     return {
@@ -180,14 +188,16 @@ export class AliLipSyncService {
     videoExtension?: boolean;
   }): Promise<AliLipSyncResult> {
     const cfg = this.resolveConfig();
-    if (cfg.provider === 'aliyun-videoretalk') {
-      return this.submitAliyunVideoRetalk(cfg, params);
-    }
-    return this.submitGenericForm(cfg, {
-      buffer: params.video.buffer,
-      filename: params.video.filename,
-      mimeType: params.video.mimeType,
-      durationSeconds: params.durationSeconds,
+    return runAiLimited(this.config, () => {
+      if (cfg.provider === 'aliyun-videoretalk') {
+        return this.submitAliyunVideoRetalk(cfg, params);
+      }
+      return this.submitGenericForm(cfg, {
+        buffer: params.video.buffer,
+        filename: params.video.filename,
+        mimeType: params.video.mimeType,
+        durationSeconds: params.durationSeconds,
+      });
     });
   }
 
@@ -201,10 +211,14 @@ export class AliLipSyncService {
     },
   ): Promise<AliLipSyncResult> {
     if (!cfg.apiKey) {
-      throw new BadRequestException('DASHSCOPE_API_KEY is required for Aliyun VideoRetalk');
+      throw new BadRequestException(
+        'DASHSCOPE_API_KEY is required for Aliyun VideoRetalk',
+      );
     }
     if (!params.audio?.buffer?.length) {
-      throw new BadRequestException('Aliyun VideoRetalk requires both video and audio inputs');
+      throw new BadRequestException(
+        'Aliyun VideoRetalk requires both video and audio inputs',
+      );
     }
     if (!cfg.tempUploadEnabled && !cfg.publicBaseUrl) {
       throw new BadRequestException(
@@ -220,10 +234,13 @@ export class AliLipSyncService {
       );
     }
 
-    const { videoUrl, audioUrl, inputMode } = await this.prepareAliyunInputUrls(cfg, {
-      video: params.video,
-      audio: params.audio,
-    });
+    const { videoUrl, audioUrl, inputMode } = await this.prepareAliyunInputUrls(
+      cfg,
+      {
+        video: params.video,
+        audio: params.audio,
+      },
+    );
     const payload = {
       model: cfg.model,
       input: {
@@ -233,7 +250,9 @@ export class AliLipSyncService {
       },
       parameters: {
         video_extension: params.videoExtension ?? cfg.videoExtension,
-        ...(cfg.queryFaceThreshold ? { query_face_threshold: cfg.queryFaceThreshold } : {}),
+        ...(cfg.queryFaceThreshold
+          ? { query_face_threshold: cfg.queryFaceThreshold }
+          : {}),
       },
     };
 
@@ -255,15 +274,19 @@ export class AliLipSyncService {
       submitResponse.output && typeof submitResponse.output === 'object'
         ? (submitResponse.output as Record<string, unknown>)
         : {};
-    const taskId = this.readString(submitOutput.task_id) || this.readString(submitResponse.task_id);
+    const taskId =
+      this.readString(submitOutput.task_id) ||
+      this.readString(submitResponse.task_id);
     if (!taskId) {
       throw new Error('Aliyun VideoRetalk did not return output.task_id');
     }
 
     const resultResponse = await this.pollAliyunTask(cfg, taskId);
-    const videoResultUrl = this.pickVideoUrl(resultResponse as Record<string, unknown>);
+    const videoResultUrl = this.pickVideoUrl(resultResponse);
     if (!videoResultUrl) {
-      throw new Error('Aliyun VideoRetalk succeeded but did not return output.video_url');
+      throw new Error(
+        'Aliyun VideoRetalk succeeded but did not return output.video_url',
+      );
     }
 
     return {
@@ -289,10 +312,14 @@ export class AliLipSyncService {
     },
   ): Promise<AliLipSyncResult> {
     if (!cfg.apiUrl) {
-      throw new BadRequestException('LIP_SYNC_API_URL / ALI_LIP_SYNC_API_URL is not configured');
+      throw new BadRequestException(
+        'LIP_SYNC_API_URL / ALI_LIP_SYNC_API_URL is not configured',
+      );
     }
     if (!cfg.apiKey) {
-      throw new BadRequestException('LIP_SYNC_API_KEY / ALI_LIP_SYNC_API_KEY / DASHSCOPE_API_KEY is not configured');
+      throw new BadRequestException(
+        'LIP_SYNC_API_KEY / ALI_LIP_SYNC_API_KEY / DASHSCOPE_API_KEY is not configured',
+      );
     }
 
     const videoBytes = new Uint8Array(params.buffer.byteLength);
@@ -305,7 +332,10 @@ export class AliLipSyncService {
       params.filename || 'input.mp4',
     );
     if (params.durationSeconds !== undefined) {
-      form.append(cfg.durationFieldName, String(Math.round(params.durationSeconds * 100) / 100));
+      form.append(
+        cfg.durationFieldName,
+        String(Math.round(params.durationSeconds * 100) / 100),
+      );
     }
 
     const res = await fetch(cfg.apiUrl, {
@@ -323,7 +353,10 @@ export class AliLipSyncService {
       throw new Error(`HTTP ${res.status} ${text.slice(0, 800)}`);
     }
 
-    if (contentType.startsWith('video/') || contentType === 'application/octet-stream') {
+    if (
+      contentType.startsWith('video/') ||
+      contentType === 'application/octet-stream'
+    ) {
       const arr = await res.arrayBuffer();
       const base64 = Buffer.from(arr).toString('base64');
       const mime = contentType.startsWith('video/') ? contentType : 'video/mp4';
@@ -362,7 +395,7 @@ export class AliLipSyncService {
         },
         signal: AbortSignal.timeout(cfg.timeoutMs),
       });
-      lastResponse = json as Record<string, unknown>;
+      lastResponse = json;
 
       const output =
         json && typeof json === 'object' && 'output' in json
@@ -388,18 +421,25 @@ export class AliLipSyncService {
     );
   }
 
-  private async fetchJson(url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  private async fetchJson(
+    url: string,
+    init: RequestInit,
+  ): Promise<Record<string, unknown>> {
     const res = await fetch(url, init);
     const text = await res.text();
     let json: Record<string, unknown>;
     try {
       json = text ? (JSON.parse(text) as Record<string, unknown>) : {};
     } catch {
-      throw new Error(`Provider returned non-JSON response: ${text.slice(0, 800)}`);
+      throw new Error(
+        `Provider returned non-JSON response: ${text.slice(0, 800)}`,
+      );
     }
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}: ${JSON.stringify(json).slice(0, 1200)}`);
+      throw new Error(
+        `HTTP ${res.status}: ${JSON.stringify(json).slice(0, 1200)}`,
+      );
     }
     return json;
   }
@@ -421,7 +461,11 @@ export class AliLipSyncService {
   private async prepareAliyunInputUrls(
     cfg: ResolvedLipSyncConfig,
     media: { video: MediaPayload; audio: MediaPayload },
-  ): Promise<{ videoUrl: string; audioUrl: string; inputMode: 'dashscope-temp-upload' | 'public-url' }> {
+  ): Promise<{
+    videoUrl: string;
+    audioUrl: string;
+    inputMode: 'dashscope-temp-upload' | 'public-url';
+  }> {
     if (cfg.tempUploadEnabled) {
       const policy = await this.getDashScopeUploadPolicy(cfg);
       const [videoUrl, audioUrl] = await Promise.all([
@@ -484,10 +528,16 @@ export class AliLipSyncService {
       );
     }
 
-    const ext = safeExtFromMedia(media, media.mimeType.startsWith('video/') ? '.mp4' : '.wav');
+    const ext = safeExtFromMedia(
+      media,
+      media.mimeType.startsWith('video/') ? '.mp4' : '.wav',
+    );
     const safeBase =
       path
-        .basename(media.filename || `media${ext}`, path.extname(media.filename || ''))
+        .basename(
+          media.filename || `media${ext}`,
+          path.extname(media.filename || ''),
+        )
         .replace(/[^\w.-]+/g, '_')
         .slice(0, 80) || 'media';
     const fileName = `${Date.now()}_${randomUUID().slice(0, 10)}_${safeBase}${ext}`;
@@ -514,7 +564,9 @@ export class AliLipSyncService {
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
-      throw new Error(`DashScope temporary file upload failed: HTTP ${res.status} ${text.slice(0, 800)}`);
+      throw new Error(
+        `DashScope temporary file upload failed: HTTP ${res.status} ${text.slice(0, 800)}`,
+      );
     }
     return `oss://${key}`;
   }
@@ -530,7 +582,10 @@ export class AliLipSyncService {
       this.config.get<string>('DASHSCOPE_ASR_BASE_URL')?.trim() ||
       'https://dashscope.aliyuncs.com/api/v1';
     const normalizedDashScopeBase = dashScopeBase.replace(/\/+$/, '');
-    const pollMaxMs = readNumber(this.config.get('ALI_VIDEORETALK_POLL_MAX_MS'), 900_000);
+    const pollMaxMs = readNumber(
+      this.config.get('ALI_VIDEORETALK_POLL_MAX_MS'),
+      900_000,
+    );
     const queryFaceThreshold = readNumber(
       this.config.get('ALI_VIDEORETALK_QUERY_FACE_THRESHOLD'),
       Number.NaN,
@@ -552,13 +607,19 @@ export class AliLipSyncService {
         this.config.get<string>('ALI_LIP_SYNC_API_KEY')?.trim() ||
         this.config.get<string>('DASHSCOPE_API_KEY')?.trim() ||
         '',
-      model: this.config.get<string>('ALI_VIDEORETALK_MODEL')?.trim() || 'videoretalk',
+      model:
+        this.config.get<string>('ALI_VIDEORETALK_MODEL')?.trim() ||
+        'videoretalk',
       timeoutMs: readNumber(
-        this.config.get('LIP_SYNC_TIMEOUT_MS') ?? this.config.get('ALI_LIP_SYNC_TIMEOUT_MS'),
+        this.config.get('LIP_SYNC_TIMEOUT_MS') ??
+          this.config.get('ALI_LIP_SYNC_TIMEOUT_MS'),
         120_000,
       ),
       pollMaxMs,
-      pollIntervalMs: readNumber(this.config.get('ALI_VIDEORETALK_POLL_INTERVAL_MS'), 3_000),
+      pollIntervalMs: readNumber(
+        this.config.get('ALI_VIDEORETALK_POLL_INTERVAL_MS'),
+        3_000,
+      ),
       publicBaseUrl:
         this.config.get<string>('LIP_SYNC_PUBLIC_BASE_URL')?.trim() ||
         this.config.get<string>('PUBLIC_BASE_URL')?.trim() ||
@@ -584,7 +645,10 @@ export class AliLipSyncService {
         this.config.get<string>('LIP_SYNC_DURATION_FIELD')?.trim() ||
         this.config.get<string>('ALI_LIP_SYNC_DURATION_FIELD')?.trim() ||
         'duration_seconds',
-      videoExtension: readBool(this.config.get<string>('ALI_VIDEORETALK_VIDEO_EXTENSION'), false),
+      videoExtension: readBool(
+        this.config.get<string>('ALI_VIDEORETALK_VIDEO_EXTENSION'),
+        false,
+      ),
       queryFaceThreshold: Number.isFinite(queryFaceThreshold)
         ? Math.max(120, Math.min(200, Math.round(queryFaceThreshold)))
         : undefined,
@@ -597,7 +661,8 @@ export class AliLipSyncService {
       this.config.get<string>('ALI_LIP_SYNC_PROVIDER')?.trim() ||
       '';
     if (/^(generic|generic-form|custom)$/i.test(raw)) return 'generic-form';
-    if (/^(aliyun|aliyun-videoretalk|videoretalk)$/i.test(raw)) return 'aliyun-videoretalk';
+    if (/^(aliyun|aliyun-videoretalk|videoretalk)$/i.test(raw))
+      return 'aliyun-videoretalk';
     return genericApiUrl ? 'generic-form' : 'aliyun-videoretalk';
   }
 
@@ -607,8 +672,10 @@ export class AliLipSyncService {
       if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
       if (allowPrivate) return true;
       const host = u.hostname.toLowerCase();
-      if (host === 'localhost' || host === '::1' || host.endsWith('.local')) return false;
-      if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return false;
+      if (host === 'localhost' || host === '::1' || host.endsWith('.local'))
+        return false;
+      if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host))
+        return false;
       const match = host.match(/^172\.(\d+)\./);
       if (match) {
         const n = Number(match[1]);
@@ -625,7 +692,13 @@ export class AliLipSyncService {
   }
 
   private pickVideoUrl(json: Record<string, unknown>): string | null {
-    const directKeys = ['videoUrl', 'video_url', 'url', 'outputVideoUrl', 'output_video_url'];
+    const directKeys = [
+      'videoUrl',
+      'video_url',
+      'url',
+      'outputVideoUrl',
+      'output_video_url',
+    ];
     for (const key of directKeys) {
       const v = json[key];
       if (typeof v === 'string' && v.trim()) return v.trim();

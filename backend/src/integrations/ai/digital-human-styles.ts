@@ -70,7 +70,9 @@ export const DIGITAL_HUMAN_STYLES: readonly DigitalHumanStyleDef[] = [
 
 const byId = new Map(DIGITAL_HUMAN_STYLES.map((s) => [s.id, s]));
 
-export function getDigitalHumanStyleOrThrow(styleId: string): DigitalHumanStyleDef {
+export function getDigitalHumanStyleOrThrow(
+  styleId: string,
+): DigitalHumanStyleDef {
   const s = byId.get(styleId.trim());
   if (!s) {
     throw new BadRequestException(
@@ -80,6 +82,9 @@ export function getDigitalHumanStyleOrThrow(styleId: string): DigitalHumanStyleD
   return s;
 }
 
-export function listDigitalHumanStylesPublic(): { id: string; label: string }[] {
+export function listDigitalHumanStylesPublic(): {
+  id: string;
+  label: string;
+}[] {
   return DIGITAL_HUMAN_STYLES.map((s) => ({ id: s.id, label: s.label }));
 }
