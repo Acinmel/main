@@ -10,6 +10,14 @@ function logout() {
   user.clearSession()
   void router.push({ name: 'login' })
 }
+
+function goLogin() {
+  void router.push({ name: 'login', query: { redirect: '/account-pending' } })
+}
+
+function goRegister() {
+  void router.push({ name: 'register' })
+}
 </script>
 
 <template>
@@ -23,6 +31,8 @@ function logout() {
           审核完成后请重新登录或刷新页面。如有疑问请联系管理员。
         </n-text>
         <n-button type="primary" block @click="logout">退出登录</n-button>
+        <n-button secondary block @click="goLogin">重新登录</n-button>
+        <n-button secondary block @click="goRegister">注册新账号</n-button>
       </n-space>
     </n-card>
   </div>

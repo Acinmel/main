@@ -8,7 +8,12 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  createHash,
+  createHmac,
+  randomUUID,
+  timingSafeEqual,
+} from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -23,7 +28,9 @@ import type {
   CursorPage,
   ResourceRow,
   ResourceScope,
+  SignedUploadUrlDto,
   SubtitleTemplateResourceDto,
+  UploadPurpose,
   VoiceResourceDto,
 } from './resources.types';
 
@@ -32,6 +39,15 @@ type ResourceTable =
   | 'voice_resources'
   | 'subtitle_template_resources';
 type HttpByteRange = { start: number; end: number };
+type OssClient = {
+  put: (...args: unknown[]) => Promise<unknown>;
+  get: (...args: unknown[]) => Promise<unknown>;
+  getStream?: (...args: unknown[]) => Promise<unknown>;
+  head?: (...args: unknown[]) => Promise<unknown>;
+  getObjectMeta?: (...args: unknown[]) => Promise<unknown>;
+  delete: (...args: unknown[]) => Promise<unknown>;
+  signatureUrl: (name: string, options?: Record<string, unknown>) => string;
+};
 
 const PAGE_LIMIT_MAX = 40;
 const AVATAR_UPLOAD_PREFIX = 'avatar-upload';
@@ -49,6 +65,98 @@ const VOICE_SAMPLE_DURATION_TOLERANCE_SECONDS = 0.5;
 const DEFAULT_UPLOAD_RESOURCE_TTL_DAYS = 7;
 const DEFAULT_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const UPLOAD_RESOURCE_CLEANUP_BATCH_SIZE = 80;
+const AVATAR_VIDEO_PREVIEW_TTL_SECONDS = 2 * 60 * 60;
+const DEFAULT_SIGNED_UPLOAD_TTL_SECONDS = 15 * 60;
+const MAX_SIGNED_UPLOAD_TTL_SECONDS = 60 * 60;
+const UPLOAD_ID_PREFIX = 'upload_';
+const SIGNED_UPLOAD_PURPOSES: readonly UploadPurpose[] = [
+  'source-video',
+  'cover',
+  'audio',
+  'result',
+  'title-asset',
+] as const;
+const SIGNED_UPLOAD_RULES: Record<
+  UploadPurpose,
+  {
+    maxBytes: number;
+    allowedMimeTypes: readonly string[];
+    extensionByMime: Record<string, string>;
+  }
+> = {
+  'source-video': {
+    maxBytes: 1024 * 1024 * 1024,
+    allowedMimeTypes: [
+      'video/mp4',
+      'video/quicktime',
+      'video/webm',
+      'video/x-matroska',
+      'video/m4v',
+    ],
+    extensionByMime: {
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+      'video/webm': '.webm',
+      'video/x-matroska': '.mkv',
+      'video/m4v': '.m4v',
+    },
+  },
+  cover: {
+    maxBytes: 20 * 1024 * 1024,
+    allowedMimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+    extensionByMime: {
+      'image/jpeg': '.jpg',
+      'image/png': '.png',
+      'image/webp': '.webp',
+    },
+  },
+  audio: {
+    maxBytes: 50 * 1024 * 1024,
+    allowedMimeTypes: [
+      'audio/mpeg',
+      'audio/wav',
+      'audio/x-wav',
+      'audio/mp4',
+      'audio/aac',
+      'audio/ogg',
+      'audio/flac',
+      'audio/webm',
+    ],
+    extensionByMime: {
+      'audio/mpeg': '.mp3',
+      'audio/wav': '.wav',
+      'audio/x-wav': '.wav',
+      'audio/mp4': '.m4a',
+      'audio/aac': '.aac',
+      'audio/ogg': '.ogg',
+      'audio/flac': '.flac',
+      'audio/webm': '.webm',
+    },
+  },
+  result: {
+    maxBytes: 2 * 1024 * 1024 * 1024,
+    allowedMimeTypes: ['video/mp4', 'video/quicktime'],
+    extensionByMime: {
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+    },
+  },
+  'title-asset': {
+    maxBytes: 300 * 1024 * 1024,
+    allowedMimeTypes: [
+      'video/webm',
+      'video/mp4',
+      'video/quicktime',
+      'image/png',
+    ],
+    extensionByMime: {
+      'video/webm': '.webm',
+      'video/mp4': '.mp4',
+      'video/quicktime': '.mov',
+      'image/png': '.png',
+    },
+  },
+};
 const RETIRED_RECOMMENDED_VOICE_IDS = [
   'rec-voice-female',
   'rec-voice-male',
@@ -141,12 +249,7 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
   private seedPromise: Promise<void> | null = null;
   private cleanupTimer: NodeJS.Timeout | null = null;
   private cleanupRunning = false;
-  private voiceSampleOssClient: {
-    put: (...args: unknown[]) => Promise<unknown>;
-    get: (...args: unknown[]) => Promise<unknown>;
-    getStream?: (...args: unknown[]) => Promise<unknown>;
-    delete: (...args: unknown[]) => Promise<unknown>;
-  } | null = null;
+  private voiceSampleOssClient: OssClient | null = null;
 
   constructor(
     private readonly db: DatabaseService,
@@ -156,6 +259,18 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
+    // Legacy seed helpers kept for rollback compatibility; mark as intentionally retained.
+    void RECOMMENDED_DESIGNED_VOICES;
+    void this.hasLocalVoiceSample;
+    void this.voiceSampleStreamUrl;
+
+    void this.ensureSeeded().catch((error) => {
+      this.logger.error(
+        `seed recommended resources failed on startup: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
     void this.runExpiredUploadCleanup('startup');
     const intervalMs = this.getCleanupIntervalMs();
     if (intervalMs > 0) {
@@ -177,8 +292,13 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     userId: string,
     opts: { scope: ResourceScope; cursor?: string; limit?: number },
   ) {
-    await this.ensureSeeded();
-    const page = await this.listRows('avatar_resources', userId, opts);
+    const page =
+      opts.scope === 'recommended'
+        ? { items: [], hasMore: false, nextCursor: null }
+        : await this.listRows('avatar_resources', userId, {
+            ...opts,
+            scope: 'mine',
+          });
     return {
       ...page,
       items: page.items.map((row) => this.toAvatar(row, userId)),
@@ -190,10 +310,21 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     opts: { scope: ResourceScope; cursor?: string; limit?: number },
   ) {
     await this.ensureSeeded();
-    const page = await this.listRows('voice_resources', userId, opts);
+    const page =
+      opts.scope === 'recommended'
+        ? { items: [], hasMore: false, nextCursor: null }
+        : await this.listRows('voice_resources', userId, {
+            ...opts,
+            scope: 'mine',
+          });
+    const items = await Promise.all(
+      page.items.map(async (row) =>
+        this.applyVoiceSampleIntegrity(userId, row, this.toVoice(row, userId)),
+      ),
+    );
     return {
       ...page,
-      items: page.items.map((row) => this.toVoice(row, userId)),
+      items,
     };
   }
 
@@ -242,6 +373,7 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       }
       if (!stat.isFile()) continue;
       seen.add(fileName);
+      const signed = this.createSignedAvatarVideoPreviewUrls(userId, fileName);
       result.push({
         avatarId: row.id,
         avatarName: row.name,
@@ -249,19 +381,90 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         fileSize: stat.size,
         mimeType: this.guessVideoMime(fileName),
         mtime: new Date(stat.mtimeMs).toISOString(),
-        previewUrl: `/api/v1/resources/avatar-video-files/${encodeURIComponent(fileName)}/stream`,
-        metadataUrl: `/api/v1/resources/avatar-video-files/${encodeURIComponent(fileName)}/metadata`,
+        previewUrl: signed.previewUrl,
+        metadataUrl: signed.metadataUrl,
       });
       if (result.length >= limit) break;
     }
     return result;
   }
 
+  async createSignedUploadUrl(
+    userId: string,
+    body: Record<string, unknown>,
+  ): Promise<SignedUploadUrlDto> {
+    const purpose = this.parseSignedUploadPurpose(body.purpose);
+    const contentType = this.normalizeUploadContentType(body.contentType);
+    const fileSize = this.parseSignedUploadFileSize(body.fileSize);
+    const rules = SIGNED_UPLOAD_RULES[purpose];
+    if (!rules.allowedMimeTypes.includes(contentType)) {
+      throw new BadRequestException(
+        `contentType not allowed for purpose=${purpose}`,
+      );
+    }
+    if (fileSize > rules.maxBytes) {
+      throw new BadRequestException(
+        `fileSize exceeds limit for purpose=${purpose}`,
+      );
+    }
+
+    const originalFileName = this.optionalString(body.fileName);
+    const ext = this.resolveSignedUploadExtension(
+      contentType,
+      originalFileName,
+      rules.extensionByMime,
+    );
+    const now = nowIso();
+    const uploadId = `${UPLOAD_ID_PREFIX}${randomUUID()}`;
+    const objectKey = this.buildSignedUploadObjectKey(
+      userId,
+      purpose,
+      uploadId,
+      ext,
+    );
+    const ttlSeconds = this.signedUploadTtlSeconds();
+    const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
+    const uploadUrl = this.getVoiceSampleOssClient().signatureUrl(objectKey, {
+      method: 'PUT',
+      expires: ttlSeconds,
+      'Content-Type': contentType,
+    });
+
+    await this.db.execute(
+      `INSERT INTO oss_upload_grants
+       (id, user_id, purpose, object_key, mime_type, file_size, status, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        uploadId,
+        userId,
+        purpose,
+        objectKey,
+        contentType,
+        fileSize,
+        'pending',
+        expiresAt,
+        now,
+        now,
+      ],
+    );
+
+    return {
+      uploadId,
+      purpose,
+      objectKey,
+      uploadUrl,
+      method: 'PUT',
+      requiredHeaders: {
+        'Content-Type': contentType,
+      },
+      expiresAt,
+    };
+  }
+
   async getAvatar(userId: string, id: string) {
-    await this.ensureSeeded();
     const row = await this.findRow('avatar_resources', id);
     if (!row) throw new NotFoundException('视频资源不存在');
-    if (row.user_id && row.user_id !== userId) {
+    if (row.user_id !== userId) {
       throw new ForbiddenException('只能使用自己的视频资源');
     }
     return this.toAvatar(row, userId);
@@ -307,14 +510,22 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         this.optionalString(body.coverUrl) || this.placeholder('avatar'),
       source_video_url: originalVideoUrl,
       style_id: this.optionalString(body.styleId) || 'custom',
+      video_cover_url:
+        this.optionalString(body.videoCoverUrl) ||
+        this.optionalString(body.coverUrl),
+      video_duration_seconds: this.optionalNumber(body.videoDurationSeconds),
+      model_type: this.optionalString(body.modelType) || 'default',
+      asset_status:
+        this.optionalString(body.assetStatus)?.toUpperCase() || 'COMPLETED',
+      video_oss_key: this.optionalString(body.videoOssKey),
       expires_at: this.expiresAtFrom(now),
       created_at: now,
       updated_at: now,
     };
     await this.db.execute(
       `INSERT INTO avatar_resources
-       (id, user_id, name, is_recommended, cover_url, source_video_url, style_id, expires_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, name, is_recommended, cover_url, source_video_url, style_id, video_cover_url, video_duration_seconds, model_type, asset_status, video_oss_key, expires_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.id,
         row.user_id,
@@ -323,12 +534,50 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         row.cover_url,
         row.source_video_url,
         row.style_id,
+        row.video_cover_url,
+        row.video_duration_seconds,
+        row.model_type,
+        row.asset_status,
+        row.video_oss_key,
         row.expires_at,
         row.created_at,
         row.updated_at,
       ],
     );
     return this.toAvatar(row, userId);
+  }
+
+  async createDigitalHumanAsset(userId: string, body: Record<string, unknown>) {
+    const sourceVideoUrl =
+      this.optionalString(body.videoPath) ||
+      this.optionalString(body.originalVideoUrl);
+    const videoOssKey =
+      this.optionalString(body.videoOssKey) || this.optionalString(body.ossKey);
+    const normalized: Record<string, unknown> = {
+      ...body,
+      originalVideoUrl: sourceVideoUrl,
+      coverUrl:
+        this.optionalString(body.coverUrl) ||
+        this.optionalString(body.videoCoverUrl),
+      videoCoverUrl:
+        this.optionalString(body.videoCoverUrl) ||
+        this.optionalString(body.coverUrl),
+      videoDurationSeconds: this.optionalNumber(body.videoDurationSeconds),
+      modelType: this.optionalString(body.modelType) || 'default',
+      assetStatus:
+        this.optionalString(body.status) ||
+        this.optionalString(body.assetStatus) ||
+        'COMPLETED',
+      videoOssKey,
+      styleId: this.optionalString(body.styleId) || 'uploaded-video',
+      __allowUploadSourceBypass: Boolean(videoOssKey),
+    };
+    if (!normalized.originalVideoUrl && !normalized.videoOssKey) {
+      throw new BadRequestException(
+        'videoPath/originalVideoUrl/videoOssKey 至少需要一个',
+      );
+    }
+    return this.createAvatar(userId, normalized);
   }
 
   async createAvatarFromUpload(
@@ -521,27 +770,42 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
   }
 
   async createSubtitleTemplate(userId: string, body: Record<string, unknown>) {
-    this.assertMutableResourceTable('subtitle_template_resources');
     const now = nowIso();
-    const styleJson = this.stylePayload(body.styleJson);
+    const styleJson = this.stylePayload(
+      this.styleConfigToStyleJson(body.styleConfig) ?? body.styleJson,
+    );
+    const styleConfig = this.styleConfigPayload(body.styleConfig, styleJson);
+    const fallbackCover = this.buildTemplatePreviewFallbackUrl(
+      'custom',
+      'cover',
+    );
+    const fallbackPreview = this.buildTemplatePreviewFallbackUrl(
+      'custom',
+      'preview',
+    );
     const row: ResourceRow = {
       id: randomUUID(),
       user_id: userId,
       name: trimName(body.name, '我的字幕模板'),
       is_recommended: 0,
-      cover_url:
-        this.optionalString(body.coverUrl) || this.placeholder('subtitle'),
-      preview_url:
-        this.optionalString(body.previewCoverUrl) ||
-        this.placeholder('subtitle-alt'),
+      cover_url: this.sanitizeTemplateAssetUrl(
+        this.optionalString(body.coverUrl),
+        fallbackCover,
+      ),
+      preview_url: this.sanitizeTemplateAssetUrl(
+        this.optionalString(body.previewCoverUrl),
+        fallbackPreview,
+      ),
       style_json: JSON.stringify(styleJson),
+      style_config_json: JSON.stringify(styleConfig),
+      base_template_id: this.optionalString(body.baseTemplateId),
       created_at: now,
       updated_at: now,
     };
     await this.db.execute(
       `INSERT INTO subtitle_template_resources
-       (id, user_id, name, is_recommended, cover_url, preview_url, style_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, name, is_recommended, cover_url, preview_url, style_json, style_config_json, base_template_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.id,
         row.user_id,
@@ -550,6 +814,8 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         row.cover_url,
         row.preview_url,
         row.style_json,
+        row.style_config_json,
+        row.base_template_id,
         row.created_at,
         row.updated_at,
       ],
@@ -558,23 +824,40 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
   }
 
   async copySubtitleTemplate(userId: string, id: string) {
-    this.assertMutableResourceTable('subtitle_template_resources');
     const row = await this.findRow('subtitle_template_resources', id);
+    if (row?.user_id && row.user_id !== userId) {
+      throw new ForbiddenException('鍙兘澶嶅埗鑷繁鎴栧叕鐗堢殑瀛楀箷妯℃澘');
+    }
     if (!row) throw new NotFoundException('字幕模板不存在');
     const now = nowIso();
+    const styleJson = this.parseStyle(row.style_json);
+    const styleConfig = this.styleConfigPayload(
+      this.parseStyle(row.style_config_json),
+      styleJson,
+    );
+    const fallbackCover = this.buildTemplatePreviewFallbackUrl(id, 'cover');
+    const fallbackPreview = this.buildTemplatePreviewFallbackUrl(id, 'preview');
     const next: ResourceRow = {
       ...row,
       id: randomUUID(),
       user_id: userId,
       name: `${row.name} 副本`.slice(0, 80),
       is_recommended: 0,
+      cover_url: this.sanitizeTemplateAssetUrl(row.cover_url, fallbackCover),
+      preview_url: this.sanitizeTemplateAssetUrl(
+        row.preview_url || row.cover_url,
+        fallbackPreview,
+      ),
+      style_json: JSON.stringify(styleJson),
+      style_config_json: JSON.stringify(styleConfig),
+      base_template_id: row.base_template_id || row.id,
       created_at: now,
       updated_at: now,
     };
     await this.db.execute(
       `INSERT INTO subtitle_template_resources
-       (id, user_id, name, is_recommended, cover_url, preview_url, style_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, user_id, name, is_recommended, cover_url, preview_url, style_json, style_config_json, base_template_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         next.id,
         next.user_id,
@@ -583,6 +866,8 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         next.cover_url,
         next.preview_url,
         next.style_json,
+        next.style_config_json,
+        next.base_template_id,
         next.created_at,
         next.updated_at,
       ],
@@ -595,34 +880,68 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     id: string,
     body: Record<string, unknown>,
   ) {
-    this.assertMutableResourceTable('subtitle_template_resources');
     const row = await this.assertOwned(
       'subtitle_template_resources',
       userId,
       id,
     );
     const name = trimName(body.name, row.name);
-    const styleJson =
-      body.styleJson &&
+    const existingStyleJson = this.parseStyle(row.style_json);
+    const existingStyleConfig = this.styleConfigPayload(
+      this.parseStyle(row.style_config_json),
+      existingStyleJson,
+    );
+    const incomingStyleConfig =
+      body.styleConfig &&
+      typeof body.styleConfig === 'object' &&
+      !Array.isArray(body.styleConfig)
+        ? (body.styleConfig as Record<string, unknown>)
+        : null;
+    const incomingStyleJson =
+      this.styleConfigToStyleJson(incomingStyleConfig) ??
+      (body.styleJson &&
       typeof body.styleJson === 'object' &&
       !Array.isArray(body.styleJson)
-        ? JSON.stringify(body.styleJson)
-        : row.style_json || '{}';
+        ? (body.styleJson as Record<string, unknown>)
+        : null);
+    const nextStyleJson = this.stylePayload(
+      incomingStyleJson ?? existingStyleJson,
+    );
+    const nextStyleConfig = this.styleConfigPayload(
+      incomingStyleConfig ?? existingStyleConfig,
+      nextStyleJson,
+    );
+    const styleJson = JSON.stringify(nextStyleJson);
+    const styleConfigJson = JSON.stringify(nextStyleConfig);
+    const fallbackCover = this.buildTemplatePreviewFallbackUrl(id, 'cover');
+    const fallbackPreview = this.buildTemplatePreviewFallbackUrl(id, 'preview');
     const coverUrl =
-      this.optionalString(body.coverUrl) ||
-      row.cover_url ||
-      this.placeholder('subtitle');
+      this.sanitizeTemplateAssetUrl(
+        this.optionalString(body.coverUrl) || row.cover_url,
+        fallbackCover,
+      ) || fallbackCover;
     const previewUrl =
-      this.optionalString(body.previewCoverUrl) ||
-      row.preview_url ||
-      row.cover_url ||
-      this.placeholder('subtitle-alt');
+      this.sanitizeTemplateAssetUrl(
+        this.optionalString(body.previewCoverUrl) ||
+          row.preview_url ||
+          row.cover_url,
+        fallbackPreview,
+      ) || fallbackPreview;
     const updatedAt = nowIso();
     await this.db.execute(
       `UPDATE subtitle_template_resources
-       SET name = ?, cover_url = ?, preview_url = ?, style_json = ?, updated_at = ?
+       SET name = ?, cover_url = ?, preview_url = ?, style_json = ?, style_config_json = ?, updated_at = ?
        WHERE id = ? AND user_id = ?`,
-      [name, coverUrl, previewUrl, styleJson, updatedAt, id, userId],
+      [
+        name,
+        coverUrl,
+        previewUrl,
+        styleJson,
+        styleConfigJson,
+        updatedAt,
+        id,
+        userId,
+      ],
     );
     return this.toSubtitle(
       {
@@ -631,10 +950,50 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         cover_url: coverUrl,
         preview_url: previewUrl,
         style_json: styleJson,
+        style_config_json: styleConfigJson,
         updated_at: updatedAt,
       },
       userId,
     );
+  }
+
+  async deleteSubtitleTemplate(userId: string, id: string) {
+    const row = await this.assertOwned(
+      'subtitle_template_resources',
+      userId,
+      id,
+    );
+    await this.db.execute(
+      `DELETE FROM subtitle_template_resources WHERE id = ? AND user_id = ?`,
+      [id, userId],
+    );
+    await this.cleanupOwnedLocalAsset('subtitle_template_resources', row);
+    return { deletedIds: [id] };
+  }
+
+  async deleteSubtitleTemplates(userId: string, ids: unknown) {
+    const idList = Array.isArray(ids)
+      ? ids.filter(
+          (id): id is string => typeof id === 'string' && id.length > 0,
+        )
+      : [];
+    if (!idList.length) throw new BadRequestException('ids 涓嶈兘涓虹┖');
+    const deleted: string[] = [];
+    for (const id of idList) {
+      const row = await this.findOwnedRow(
+        'subtitle_template_resources',
+        userId,
+        id,
+      );
+      if (!row) continue;
+      await this.db.execute(
+        `DELETE FROM subtitle_template_resources WHERE id = ? AND user_id = ?`,
+        [id, userId],
+      );
+      await this.cleanupOwnedLocalAsset('subtitle_template_resources', row);
+      deleted.push(id);
+    }
+    return { deletedIds: deleted };
   }
 
   async rename(
@@ -866,6 +1225,34 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async openSignedAvatarVideoStreamOrThrow(
+    fileName: string,
+    token?: string,
+    expires?: string,
+    rangeHeader?: string,
+  ): Promise<{
+    stream: Readable;
+    originalname: string;
+    mimetype: string;
+    contentLength: number;
+    totalSize: number;
+    range?: HttpByteRange;
+    rangeNotSatisfiable?: boolean;
+  }> {
+    const { userId, fileName: safeFileName } =
+      await this.assertSignedAvatarVideoToken(
+        fileName,
+        token,
+        expires,
+        'stream',
+      );
+    return this.openOwnedAvatarVideoStreamOrThrow(
+      userId,
+      safeFileName,
+      rangeHeader,
+    );
+  }
+
   async getOwnedAvatarVideoMetadataOrThrow(
     userId: string,
     fileName: string,
@@ -891,12 +1278,26 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         fileSize: stat.size,
         mimeType: this.guessVideoMime(base),
         mtime: new Date(stat.mtimeMs).toISOString(),
-        previewUrl: `/api/v1/resources/avatar-video-files/${encodeURIComponent(base)}/stream`,
-        metadataUrl: `/api/v1/resources/avatar-video-files/${encodeURIComponent(base)}/metadata`,
+        ...this.createSignedAvatarVideoPreviewUrls(userId, base),
       };
     } catch {
       throw new NotFoundException('avatar upload video not found');
     }
+  }
+
+  async getSignedAvatarVideoMetadataOrThrow(
+    fileName: string,
+    token?: string,
+    expires?: string,
+  ): Promise<AvatarSavedVideoDto> {
+    const { userId, fileName: safeFileName } =
+      await this.assertSignedAvatarVideoToken(
+        fileName,
+        token,
+        expires,
+        'metadata',
+      );
+    return this.getOwnedAvatarVideoMetadataOrThrow(userId, safeFileName);
   }
 
   private resolveSavedVideoPathOrThrow(fileName: string): string {
@@ -994,15 +1395,6 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       `SELECT * FROM ${table} WHERE id = ?`,
       [id],
     );
-  }
-
-  private async deleteRetiredRecommendedVoices() {
-    for (const id of RETIRED_RECOMMENDED_VOICE_IDS) {
-      await this.db.execute(
-        `DELETE FROM voice_resources WHERE id = ? AND user_id IS NULL AND is_recommended = 1`,
-        [id],
-      );
-    }
   }
 
   private async runExpiredUploadCleanup(reason: 'startup' | 'interval') {
@@ -1114,6 +1506,7 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
 
   private toAvatar(row: ResourceRow, userId: string): AvatarResourceDto {
     const renderState = this.resolveAvatarRenderState(row.source_video_url);
+    const preview = this.resolveAvatarPreviewUrls(row, userId);
     return {
       id: row.id,
       name: row.name,
@@ -1121,10 +1514,20 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       recommended: row.is_recommended === 1,
       coverUrl: row.cover_url || this.placeholder('avatar'),
       originalVideoUrl: row.source_video_url || null,
+      previewUrl: preview.previewUrl,
+      metadataUrl: preview.metadataUrl,
       renderMode: 'source-video',
       canUseForRender: renderState.canUseForRender,
       renderUnavailableReason: renderState.renderUnavailableReason,
       styleId: row.style_id || null,
+      videoCoverUrl: row.video_cover_url || row.cover_url || null,
+      videoDurationSeconds:
+        typeof row.video_duration_seconds === 'number'
+          ? row.video_duration_seconds
+          : null,
+      modelType: row.model_type || null,
+      assetStatus: row.asset_status || null,
+      videoOssKey: row.video_oss_key || null,
       expiresAt: row.expires_at || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -1157,6 +1560,7 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       owner: row.user_id === userId ? 'mine' : 'recommended',
       recommended: row.is_recommended === 1,
       audioUrl: audioUrl || this.placeholderAudio(),
+      sampleMissing: false,
       cloneStatus: status,
       renderMode,
       canUseForRender,
@@ -1173,6 +1577,46 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       expiresAt: row.expires_at || null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
+    };
+  }
+
+  private async applyVoiceSampleIntegrity(
+    userId: string,
+    row: ResourceRow,
+    voice: VoiceResourceDto,
+  ): Promise<VoiceResourceDto> {
+    if (row.user_id !== userId || row.is_recommended === 1) {
+      return voice;
+    }
+    const fileName = this.extractManagedVoiceSampleName(row.audio_url);
+    if (!fileName) {
+      return voice;
+    }
+    const exists = await this.managedVoiceSampleExists(fileName);
+    if (exists) {
+      return voice;
+    }
+    if (voice.supportsDynamicTts) {
+      return {
+        ...voice,
+        audioUrl: this.placeholderAudio(),
+        sampleMissing: true,
+        canUseForRender: voice.cloneStatus === 'ready',
+        renderUnavailableReason:
+          voice.cloneStatus === 'ready' ? null : voice.renderUnavailableReason,
+      };
+    }
+
+    const unavailableReason = 'voice sample file not found';
+    return {
+      ...voice,
+      audioUrl: this.placeholderAudio(),
+      sampleMissing: true,
+      canUseForRender: false,
+      renderUnavailableReason:
+        voice.cloneStatus === 'ready'
+          ? unavailableReason
+          : (voice.renderUnavailableReason ?? unavailableReason),
     };
   }
 
@@ -1212,15 +1656,34 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     row: ResourceRow,
     userId: string,
   ): SubtitleTemplateResourceDto {
+    const styleJson = this.parseStyle(row.style_json);
+    const fallbackCover = this.buildTemplatePreviewFallbackUrl(row.id, 'cover');
+    const fallbackPreview = this.buildTemplatePreviewFallbackUrl(
+      row.id,
+      'preview',
+    );
+    const coverUrl = this.sanitizeTemplateAssetUrl(
+      row.cover_url,
+      fallbackCover,
+    );
+    const previewCoverUrl = this.sanitizeTemplateAssetUrl(
+      row.preview_url || row.cover_url,
+      fallbackPreview,
+    );
     return {
       id: row.id,
       name: row.name,
       owner: row.user_id === userId ? 'mine' : 'recommended',
       recommended: row.is_recommended === 1,
-      coverUrl: row.cover_url || this.placeholder('subtitle'),
-      previewCoverUrl:
-        row.preview_url || row.cover_url || this.placeholder('subtitle-alt'),
-      styleJson: this.parseStyle(row.style_json),
+      editable: row.user_id === userId,
+      baseTemplateId: this.optionalString(row.base_template_id),
+      coverUrl,
+      previewCoverUrl,
+      styleJson,
+      styleConfig: this.styleConfigPayload(
+        this.parseStyle(row.style_config_json),
+        styleJson,
+      ),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -1256,8 +1719,6 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
         [id, name, this.placeholder('avatar'), null, styleId, now, now],
       );
     }
-    await this.deleteRetiredRecommendedVoices();
-    await this.upsertRecommendedDesignedVoices(now);
     const subtitles: [string, string, Record<string, unknown>][] = [
       [
         'rec-subtitle-minimal',
@@ -1293,48 +1754,6 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       );
     }
     await this.upsertRecommendedSubtitleTemplates(now);
-  }
-
-  private async upsertRecommendedDesignedVoices(now: string) {
-    for (const item of RECOMMENDED_DESIGNED_VOICES) {
-      const audioUrl = (await this.hasLocalVoiceSample(item.fileName))
-        ? this.voiceSampleStreamUrl(item.fileName)
-        : this.placeholderAudio();
-      const existing = await this.findRow('voice_resources', item.id);
-      if (existing) {
-        await this.db.execute(
-          `UPDATE voice_resources
-           SET user_id = NULL, name = ?, is_recommended = 1, audio_url = ?, clone_status = 'ready',
-               provider = 'aliyun-qwen-vd', provider_voice = ?, provider_model = ?,
-               sample_duration_ms = NULL, clone_error = NULL, updated_at = ?
-           WHERE id = ?`,
-          [
-            item.name,
-            audioUrl,
-            item.providerVoice,
-            item.providerModel,
-            now,
-            item.id,
-          ],
-        );
-        continue;
-      }
-
-      await this.db.execute(
-        `INSERT INTO voice_resources
-         (id, user_id, name, is_recommended, audio_url, clone_status, provider, provider_voice, provider_model, sample_duration_ms, clone_error, created_at, updated_at)
-         VALUES (?, NULL, ?, 1, ?, 'ready', 'aliyun-qwen-vd', ?, ?, NULL, NULL, ?, ?)`,
-        [
-          item.id,
-          item.name,
-          audioUrl,
-          item.providerVoice,
-          item.providerModel,
-          now,
-          now,
-        ],
-      );
-    }
   }
 
   private async hasLocalVoiceSample(fileName: string): Promise<boolean> {
@@ -1515,6 +1934,406 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
           previewText: ['暗底更像成片样式', '适合情绪感更强的画面'],
         }),
       },
+      {
+        id: 'rec-subtitle-a-classic-white-yellow',
+        name: 'A 经典白黄',
+        style: {
+          theme: 'classic-white-yellow',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 44,
+          color: '#FFFFFF',
+          highlightColor: '#FFD400',
+          stroke: '#000000',
+          strokeWidth: 2.2,
+          background: '#000000BF',
+          weight: 800,
+          lineChars: 14,
+          marginBottom: 76,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'A 经典白黄',
+          accent: '#FFD400',
+          background: '#111827',
+          panel: '#1F2937',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#000000BF',
+          badge: 'A',
+          previewText: ['最通用字幕配色', '适合口播与知识分享'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'A 经典白黄',
+          accent: '#F59E0B',
+          background: '#0F172A',
+          panel: '#1E293B',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#000000BF',
+          badge: 'Classic',
+          previewText: ['关键词黄色高亮', '暗底场景可读性稳定'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-b-white-green-tech',
+        name: 'B 白绿科技',
+        style: {
+          theme: 'white-green-tech',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 44,
+          color: '#FFFFFF',
+          highlightColor: '#00FF66',
+          stroke: '#000000',
+          strokeWidth: 2.2,
+          background: '#00FF6673',
+          weight: 800,
+          lineChars: 14,
+          marginBottom: 76,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'B 白绿科技',
+          accent: '#00FF66',
+          background: '#0B1325',
+          panel: '#10203A',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#00FF6673',
+          badge: 'B',
+          previewText: ['白绿高科技感', '适合 AI 与工具类视频'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'B 白绿科技',
+          accent: '#10B981',
+          background: '#101827',
+          panel: '#0F2A28',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#00FF6673',
+          badge: 'Tech',
+          previewText: ['高亮信息更醒目', '科技评测风格友好'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-c-white-red-impact',
+        name: 'C 白红冲击',
+        style: {
+          theme: 'white-red-impact',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 45,
+          color: '#FFFFFF',
+          highlightColor: '#FF3B30',
+          stroke: '#000000',
+          strokeWidth: 2.3,
+          background: '#FF3B3073',
+          weight: 820,
+          lineChars: 13,
+          marginBottom: 74,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'C 白红冲击',
+          accent: '#FF3B30',
+          background: '#1F172A',
+          panel: '#3B1828',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#FF3B3073',
+          badge: 'C',
+          previewText: ['爆点信息高冲击', '适合警示与强情绪文案'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'C 白红冲击',
+          accent: '#EF4444',
+          background: '#111827',
+          panel: '#2B1A1A',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#FF3B3073',
+          badge: 'Impact',
+          previewText: ['红色高亮抓眼球', '营销节奏更强烈'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-d-black-yellow-alert',
+        name: 'D 黑黄醒目',
+        style: {
+          theme: 'black-yellow-alert',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 43,
+          color: '#111111',
+          highlightColor: '#FFCC00',
+          stroke: '#FFFFFF',
+          strokeWidth: 2,
+          background: '#00000059',
+          weight: 780,
+          lineChars: 14,
+          marginBottom: 72,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'D 黑黄醒目',
+          accent: '#FFCC00',
+          background: '#F8FAFC',
+          panel: '#E2E8F0',
+          subtitleColor: '#111111',
+          subtitleStroke: '#FFFFFF',
+          subtitleBackground: '#00000059',
+          badge: 'D',
+          previewText: ['浅底画面更清楚', '采访与室内口播更稳'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'D 黑黄醒目',
+          accent: '#EAB308',
+          background: '#F1F5F9',
+          panel: '#E5E7EB',
+          subtitleColor: '#111111',
+          subtitleStroke: '#FFFFFF',
+          subtitleBackground: '#00000059',
+          badge: 'Light',
+          previewText: ['黑字主体可读性高', '黄色重点信息突出'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-e-white-blue-pro',
+        name: 'E 白蓝专业',
+        style: {
+          theme: 'white-blue-pro',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 44,
+          color: '#FFFFFF',
+          highlightColor: '#2F80ED',
+          stroke: '#000000',
+          strokeWidth: 2.2,
+          background: '#2F80ED73',
+          weight: 780,
+          lineChars: 14,
+          marginBottom: 76,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'E 白蓝专业',
+          accent: '#2F80ED',
+          background: '#0F172A',
+          panel: '#1E3A8A',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#2F80ED73',
+          badge: 'E',
+          previewText: ['专业感蓝色高亮', '适合商业财经课程类'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'E 白蓝专业',
+          accent: '#60A5FA',
+          background: '#111827',
+          panel: '#1D4ED8',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#2F80ED73',
+          badge: 'Pro',
+          previewText: ['信息层级更清晰', 'SaaS 演示常用风格'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-f-white-orange-commerce',
+        name: 'F 白橙带货',
+        style: {
+          theme: 'white-orange-commerce',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 45,
+          color: '#FFFFFF',
+          highlightColor: '#FF7A00',
+          stroke: '#000000',
+          strokeWidth: 2.3,
+          background: '#FF7A0073',
+          weight: 820,
+          lineChars: 13,
+          marginBottom: 74,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'F 白橙带货',
+          accent: '#FF7A00',
+          background: '#1F2937',
+          panel: '#7C2D12',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#FF7A0073',
+          badge: 'F',
+          previewText: ['橙色重点转化感强', '电商直播切片更合适'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'F 白橙带货',
+          accent: '#F97316',
+          background: '#111827',
+          panel: '#9A3412',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#FF7A0073',
+          badge: 'Shop',
+          previewText: ['节奏快且抓眼球', '适合种草转化内容'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-g-ivory-gold-brand',
+        name: 'G 米白金色',
+        style: {
+          theme: 'ivory-gold-brand',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 44,
+          color: '#FFF7E6',
+          highlightColor: '#F5C542',
+          stroke: '#1A1A1A',
+          strokeWidth: 2.1,
+          background: '#000000A6',
+          weight: 760,
+          lineChars: 14,
+          marginBottom: 78,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'G 米白金色',
+          accent: '#F5C542',
+          background: '#2B2113',
+          panel: '#3F2E1E',
+          subtitleColor: '#FFF7E6',
+          subtitleStroke: '#1A1A1A',
+          subtitleBackground: '#000000A6',
+          badge: 'G',
+          previewText: ['米白金色更高级', '品牌文旅宣传更匹配'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'G 米白金色',
+          accent: '#D4A017',
+          background: '#1F1A12',
+          panel: '#3A2D1F',
+          subtitleColor: '#FFF7E6',
+          subtitleStroke: '#1A1A1A',
+          subtitleBackground: '#000000A6',
+          badge: 'Gold',
+          previewText: ['质感风格更稳重', '适合高级感叙事内容'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-h-white-purple-trend',
+        name: 'H 白紫潮流',
+        style: {
+          theme: 'white-purple-trend',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 44,
+          color: '#FFFFFF',
+          highlightColor: '#A855F7',
+          stroke: '#000000',
+          strokeWidth: 2.2,
+          background: '#A855F773',
+          weight: 800,
+          lineChars: 14,
+          marginBottom: 76,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'H 白紫潮流',
+          accent: '#A855F7',
+          background: '#1E1B4B',
+          panel: '#312E81',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#A855F773',
+          badge: 'H',
+          previewText: ['紫色高亮更年轻', '适合创作者与 AI 内容'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'H 白紫潮流',
+          accent: '#C084FC',
+          background: '#111827',
+          panel: '#4C1D95',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#000000',
+          subtitleBackground: '#A855F773',
+          badge: 'Trend',
+          previewText: ['潮流视觉辨识度高', '中短视频口播常用'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-i-cyan-white-fresh',
+        name: 'I 青白清爽',
+        style: {
+          theme: 'cyan-white-fresh',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 43,
+          color: '#EFFFFF',
+          highlightColor: '#00D5FF',
+          stroke: '#003344',
+          strokeWidth: 2.1,
+          background: '#00D5FF59',
+          weight: 760,
+          lineChars: 14,
+          marginBottom: 76,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'I 青白清爽',
+          accent: '#00D5FF',
+          background: '#0F172A',
+          panel: '#0C4A6E',
+          subtitleColor: '#EFFFFF',
+          subtitleStroke: '#003344',
+          subtitleBackground: '#00D5FF59',
+          badge: 'I',
+          previewText: ['青白配色更清爽', '教程与测评内容更自然'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'I 青白清爽',
+          accent: '#22D3EE',
+          background: '#0B132B',
+          panel: '#155E75',
+          subtitleColor: '#EFFFFF',
+          subtitleStroke: '#003344',
+          subtitleBackground: '#00D5FF59',
+          badge: 'Fresh',
+          previewText: ['浅科技感不刺眼', '中性场景可读性稳定'],
+        }),
+      },
+      {
+        id: 'rec-subtitle-j-white-pink-lifestyle',
+        name: 'J 白粉小红书',
+        style: {
+          theme: 'white-pink-lifestyle',
+          fontFamily: 'Noto Sans CJK SC',
+          size: 44,
+          color: '#FFFFFF',
+          highlightColor: '#FF4FA3',
+          stroke: '#2A0A18',
+          strokeWidth: 2,
+          background: '#FF4FA366',
+          weight: 780,
+          lineChars: 14,
+          marginBottom: 74,
+          position: 'bottom',
+        },
+        coverUrl: this.subtitleTemplatePreview({
+          title: 'J 白粉小红书',
+          accent: '#FF4FA3',
+          background: '#FFE4EF',
+          panel: '#FBCFE8',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#2A0A18',
+          subtitleBackground: '#FF4FA366',
+          badge: 'J',
+          previewText: ['白粉风格更生活化', '女性向内容更匹配'],
+        }),
+        previewUrl: this.subtitleTemplatePreview({
+          title: 'J 白粉小红书',
+          accent: '#EC4899',
+          background: '#FCE7F3',
+          panel: '#F9A8D4',
+          subtitleColor: '#FFFFFF',
+          subtitleStroke: '#2A0A18',
+          subtitleBackground: '#FF4FA366',
+          badge: 'Life',
+          previewText: ['小红书视觉感更强', '生活方式内容更友好'],
+        }),
+      },
     ];
 
     for (const item of templates) {
@@ -1560,52 +2379,128 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     badge: string;
     previewText: [string, string];
   }): string {
-    const svg = `
-      <svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500">
-        <defs>
-          <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="${params.background}" />
-            <stop offset="100%" stop-color="${params.panel}" />
-          </linearGradient>
-          <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stop-color="${params.accent}" />
-            <stop offset="100%" stop-color="#ffffff" stop-opacity="0.2" />
-          </linearGradient>
-        </defs>
-        <rect width="800" height="500" rx="36" fill="url(#bg)" />
-        <circle cx="654" cy="88" r="116" fill="${params.accent}" fill-opacity="0.16" />
-        <circle cx="132" cy="402" r="96" fill="${params.accent}" fill-opacity="0.12" />
-        <rect x="54" y="54" width="214" height="42" rx="21" fill="url(#accent)" />
-        <text x="86" y="82" fill="#0f172a" font-size="22" font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif" font-weight="700">${params.badge}</text>
-        <text x="58" y="144" fill="#0f172a" font-size="44" font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif" font-weight="800">${params.title}</text>
-        <text x="58" y="188" fill="#47607b" font-size="20" font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif">Subtitle Template Demo</text>
-        <rect x="76" y="322" width="648" height="118" rx="30" fill="${params.subtitleBackground}" />
-        <text x="400" y="374"
-              fill="${params.subtitleColor}"
-              stroke="${params.subtitleStroke}"
-              stroke-width="3"
-              paint-order="stroke"
-              text-anchor="middle"
-              font-size="40"
-              font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif"
-              font-weight="700">${params.previewText[0]}</text>
-        <text x="400" y="418"
-              fill="${params.subtitleColor}"
-              stroke="${params.subtitleStroke}"
-              stroke-width="3"
-              paint-order="stroke"
-              text-anchor="middle"
-              font-size="30"
-              font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif"
-              font-weight="600">${params.previewText[1]}</text>
-      </svg>
-    `.trim();
-    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+    const key = createHash('sha1')
+      .update(JSON.stringify(params))
+      .digest('hex')
+      .slice(0, 16);
+    return this.buildTemplatePreviewFallbackUrl(key, 'cover');
+  }
+
+  private buildTemplatePreviewFallbackUrl(
+    templateId: string,
+    variant: 'cover' | 'preview',
+  ): string {
+    const base = this.resolveTemplatePreviewBaseUrl();
+    const safeId = templateId
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-');
+    return `${base}/subtitle-template-${safeId}-${variant}.png`;
+  }
+
+  private resolveTemplatePreviewBaseUrl(): string {
+    const configured =
+      this.config.get<string>('PUBLIC_TEMPLATE_PREVIEW_BASE_URL')?.trim() ||
+      this.config.get<string>('TEMPLATE_PREVIEW_BASE_URL')?.trim() ||
+      '/template-previews';
+    return configured.replace(/\/+$/, '');
+  }
+
+  private sanitizeTemplateAssetUrl(
+    value: string | null | undefined,
+    fallback: string,
+  ): string {
+    const text = value?.trim();
+    if (!text) return fallback;
+    const normalized = text.toLowerCase();
+    if (
+      normalized.startsWith('data:') ||
+      normalized.startsWith('javascript:') ||
+      normalized.startsWith('blob:')
+    ) {
+      return fallback;
+    }
+    if (text.length > 2000) {
+      return fallback;
+    }
+    return text;
   }
 
   private optionalNumber(value: unknown): number | null {
     const num = Number(value);
     return Number.isFinite(num) ? num : null;
+  }
+
+  private parseSignedUploadPurpose(value: unknown): UploadPurpose {
+    if (typeof value !== 'string') {
+      throw new BadRequestException('purpose is required');
+    }
+    const normalized = value.trim() as UploadPurpose;
+    if (!SIGNED_UPLOAD_PURPOSES.includes(normalized)) {
+      throw new BadRequestException('purpose is invalid');
+    }
+    return normalized;
+  }
+
+  private normalizeUploadContentType(value: unknown): string {
+    if (typeof value !== 'string' || !value.trim()) {
+      throw new BadRequestException('contentType is required');
+    }
+    return value.split(';', 1)[0].trim().toLowerCase();
+  }
+
+  private parseSignedUploadFileSize(value: unknown): number {
+    const fileSize = Number(value);
+    if (!Number.isInteger(fileSize) || fileSize <= 0) {
+      throw new BadRequestException('fileSize must be a positive integer');
+    }
+    return fileSize;
+  }
+
+  private resolveSignedUploadExtension(
+    contentType: string,
+    fileName: string | null,
+    extensionByMime: Record<string, string>,
+  ): string {
+    const defaultExt = extensionByMime[contentType];
+    if (!defaultExt) {
+      throw new BadRequestException('contentType is invalid');
+    }
+    if (!fileName) return defaultExt;
+    const ext = path.extname(fileName).toLowerCase();
+    if (!ext) return defaultExt;
+    const allowed = new Set(Object.values(extensionByMime));
+    if (!allowed.has(ext)) {
+      throw new BadRequestException(
+        'fileName extension does not match purpose',
+      );
+    }
+    return ext;
+  }
+
+  private buildSignedUploadObjectKey(
+    userId: string,
+    purpose: UploadPurpose,
+    uploadId: string,
+    ext: string,
+  ): string {
+    const prefix =
+      this.config.get<string>('ALI_OSS_UPLOAD_PREFIX')?.trim() ||
+      this.config.get<string>('OSS_UPLOAD_PREFIX')?.trim() ||
+      'runtime-assets';
+    const normalizedPrefix = prefix.replace(/^\/+|\/+$/g, '');
+    const date = new Date().toISOString().slice(0, 10);
+    return `${normalizedPrefix}/${purpose}/${userId}/${date}/${uploadId}${ext}`;
+  }
+
+  private signedUploadTtlSeconds(): number {
+    const raw = Number(
+      this.config.get<string>('OSS_SIGNED_UPLOAD_TTL_SECONDS'),
+    );
+    if (!Number.isFinite(raw) || raw <= 0) {
+      return DEFAULT_SIGNED_UPLOAD_TTL_SECONDS;
+    }
+    return Math.min(Math.floor(raw), MAX_SIGNED_UPLOAD_TTL_SECONDS);
   }
 
   private voiceCloneStatus(value: unknown): 'ready' | 'processing' | 'failed' {
@@ -1730,20 +2625,34 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  private async removeVoiceSampleByUrl(
-    audioUrl?: string | null,
-  ): Promise<void> {
-    const fileName = this.extractManagedVoiceSampleName(audioUrl);
-    if (!fileName) return;
+  private async managedVoiceSampleExists(fileName: string): Promise<boolean> {
+    const safeName = this.assertSafeBasename(fileName);
     if (this.isVoiceSampleOssEnabled()) {
-      const key = this.voiceSampleOssObjectKey(fileName);
-      await this.getVoiceSampleOssClient()
-        .delete(key)
-        .catch(() => undefined);
-      return;
+      const key = this.voiceSampleOssObjectKey(safeName);
+      const client = this.getVoiceSampleOssClient();
+      try {
+        if (typeof client.head === 'function') {
+          await client.head(key);
+          return true;
+        }
+        if (typeof client.getObjectMeta === 'function') {
+          await client.getObjectMeta(key);
+          return true;
+        }
+        const object = await this.getVoiceSampleStreamObjectFromOss(safeName);
+        const stream = (object as { stream?: Readable }).stream;
+        stream?.destroy?.();
+        return true;
+      } catch {
+        return false;
+      }
     }
-    const full = this.resolveVoiceSamplePathOrThrow(fileName);
-    await fs.rm(full, { force: true }).catch(() => undefined);
+    try {
+      const stat = await fs.stat(this.resolveVoiceSamplePathOrThrow(safeName));
+      return stat.isFile();
+    } catch {
+      return false;
+    }
   }
 
   private async assertAvatarVideoSourceOwnership(
@@ -1854,13 +2763,6 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       return this.placeholderAudio();
     }
     return url;
-  }
-
-  private async normalizeLegacyVoiceAudioUrls(): Promise<void> {
-    await this.db.execute(
-      `UPDATE voice_resources SET audio_url = NULL WHERE audio_url = ?`,
-      [LEGACY_PLACEHOLDER_AUDIO_URL],
-    );
   }
 
   private assertAvatarVideoFile(file: {
@@ -2015,12 +2917,7 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const OSS = require('ali-oss') as new (
       options: Record<string, unknown>,
-    ) => {
-      put: (...args: unknown[]) => Promise<unknown>;
-      get: (...args: unknown[]) => Promise<unknown>;
-      getStream?: (...args: unknown[]) => Promise<unknown>;
-      delete: (...args: unknown[]) => Promise<unknown>;
-    };
+    ) => OssClient;
     const accessKeyId = this.config
       .get<string>('ALI_OSS_ACCESS_KEY_ID')
       ?.trim();
@@ -2042,6 +2939,9 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
       ...(endpoint ? { endpoint } : {}),
       ...(region ? { region } : {}),
     });
+    if (typeof this.voiceSampleOssClient.signatureUrl !== 'function') {
+      throw new BadRequestException('ali-oss signatureUrl is not available');
+    }
     return this.voiceSampleOssClient;
   }
 
@@ -2115,6 +3015,140 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     return decoded.startsWith(VOICE_UPLOAD_PREFIX) ? decoded : null;
   }
 
+  private avatarVideoPreviewSecret(): string {
+    return (
+      this.config.get<string>('AVATAR_VIDEO_STREAM_SECRET')?.trim() ||
+      this.config.get<string>('VOICE_PROVIDER_STREAM_SECRET')?.trim() ||
+      this.config.get<string>('JWT_SECRET')?.trim() ||
+      ''
+    );
+  }
+
+  private avatarVideoPreviewTtlSeconds(): number {
+    const raw = Number(
+      this.config.get<string>('AVATAR_VIDEO_STREAM_TTL_SECONDS') ?? '',
+    );
+    if (Number.isFinite(raw) && raw > 0) {
+      return Math.min(Math.floor(raw), 24 * 60 * 60);
+    }
+    return AVATAR_VIDEO_PREVIEW_TTL_SECONDS;
+  }
+
+  private signAvatarVideoPreviewToken(
+    userId: string,
+    fileName: string,
+    expires: string,
+    purpose: 'stream' | 'metadata',
+    secret: string,
+  ): string {
+    return createHmac('sha256', secret)
+      .update(`${purpose}:${userId}:${fileName}:${expires}`)
+      .digest('hex');
+  }
+
+  private createSignedAvatarVideoPreviewUrls(
+    userId: string,
+    fileName: string,
+  ): {
+    previewUrl: string;
+    metadataUrl: string;
+  } {
+    const safeFileName = this.assertSafeBasename(fileName);
+    const encoded = encodeURIComponent(safeFileName);
+    const secret = this.avatarVideoPreviewSecret();
+    const expires = String(
+      Date.now() + this.avatarVideoPreviewTtlSeconds() * 1000,
+    );
+    const streamToken = this.signAvatarVideoPreviewToken(
+      userId,
+      safeFileName,
+      expires,
+      'stream',
+      secret,
+    );
+    const metadataToken = this.signAvatarVideoPreviewToken(
+      userId,
+      safeFileName,
+      expires,
+      'metadata',
+      secret,
+    );
+    return {
+      previewUrl: `/api/v1/resources/avatar-video-files/${encoded}/preview-stream?expires=${encodeURIComponent(expires)}&token=${streamToken}`,
+      metadataUrl: `/api/v1/resources/avatar-video-files/${encoded}/preview-metadata?expires=${encodeURIComponent(expires)}&token=${metadataToken}`,
+    };
+  }
+
+  private async assertSignedAvatarVideoToken(
+    fileName: string,
+    token: string | undefined,
+    expires: string | undefined,
+    purpose: 'stream' | 'metadata',
+  ): Promise<{ userId: string; fileName: string }> {
+    const safeFileName = this.assertSafeBasename(fileName);
+    const secret = this.avatarVideoPreviewSecret();
+    if (!secret || !token || !expires) {
+      throw new ForbiddenException('avatar preview token invalid');
+    }
+    if (!this.isStrictSha256HexToken(token)) {
+      throw new ForbiddenException('avatar preview token invalid');
+    }
+    const expiresMs = Number(expires);
+    if (!Number.isFinite(expiresMs) || expiresMs < Date.now()) {
+      throw new ForbiddenException('avatar preview token expired');
+    }
+
+    const rows = await this.db.queryAll<{ id: string }>(
+      `SELECT user_id AS id FROM avatar_resources
+       WHERE source_video_url = ? AND is_recommended = 0 AND user_id IS NOT NULL`,
+      [safeFileName],
+    );
+    for (const row of rows) {
+      if (!row.id) continue;
+      const expected = this.signAvatarVideoPreviewToken(
+        row.id,
+        safeFileName,
+        expires,
+        purpose,
+        secret,
+      );
+      if (!this.isStrictSha256HexToken(expected)) {
+        continue;
+      }
+      const actualBuffer = Buffer.from(token, 'hex');
+      const expectedBuffer = Buffer.from(expected, 'hex');
+      if (
+        actualBuffer.length === expectedBuffer.length &&
+        timingSafeEqual(actualBuffer, expectedBuffer)
+      ) {
+        return { userId: row.id, fileName: safeFileName };
+      }
+    }
+    throw new ForbiddenException('avatar preview token invalid');
+  }
+
+  private resolveAvatarPreviewUrls(
+    row: ResourceRow,
+    userId: string,
+  ): { previewUrl: string | null; metadataUrl: string | null } {
+    const source = row.source_video_url?.trim();
+    if (!source) {
+      return { previewUrl: null, metadataUrl: null };
+    }
+    if (
+      row.user_id === userId &&
+      source.startsWith(`${AVATAR_UPLOAD_PREFIX}_`) &&
+      !/^https?:\/\//i.test(source) &&
+      !/^data:/i.test(source)
+    ) {
+      return this.createSignedAvatarVideoPreviewUrls(userId, source);
+    }
+    if (/^https?:\/\//i.test(source) || /^data:/i.test(source)) {
+      return { previewUrl: source, metadataUrl: null };
+    }
+    return { previewUrl: null, metadataUrl: null };
+  }
+
   private buildProviderVoiceSampleUrl(audioUrl?: string | null): string | null {
     const fileName = this.extractManagedVoiceSampleName(audioUrl);
     const baseUrl = this.config.get<string>('PUBLIC_BASE_URL')?.trim();
@@ -2156,11 +3190,17 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     if (!secret || !token || !expires) {
       throw new ForbiddenException('音频样本访问令牌无效');
     }
+    if (!this.isStrictSha256HexToken(token)) {
+      throw new ForbiddenException('闊抽鏍锋湰璁块棶浠ょ墝鏃犳晥');
+    }
     const expiresMs = Number(expires);
     if (!Number.isFinite(expiresMs) || expiresMs < Date.now()) {
       throw new ForbiddenException('音频样本访问令牌已过期');
     }
     const expected = this.signProviderVoiceSample(fileName, expires, secret);
+    if (!this.isStrictSha256HexToken(expected)) {
+      throw new ForbiddenException('闊抽鏍锋湰璁块棶浠ょ墝鏃犳晥');
+    }
     const actualBuffer = Buffer.from(token, 'hex');
     const expectedBuffer = Buffer.from(expected, 'hex');
     if (
@@ -2169,6 +3209,10 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     ) {
       throw new ForbiddenException('音频样本访问令牌无效');
     }
+  }
+
+  private isStrictSha256HexToken(token: string): boolean {
+    return /^[0-9a-fA-F]{64}$/.test(token);
   }
 
   private extractManagedAvatarVideoName(
@@ -2185,6 +3229,55 @@ export class ResourcesService implements OnModuleInit, OnModuleDestroy {
     return value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : { color: '#ffffff', stroke: '#111827', size: 42 };
+  }
+
+  private styleConfigToStyleJson(
+    value: unknown,
+  ): Record<string, unknown> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return null;
+    }
+    const subtitle = (value as Record<string, unknown>).subtitle;
+    if (!subtitle || typeof subtitle !== 'object' || Array.isArray(subtitle)) {
+      return null;
+    }
+    const style = (subtitle as Record<string, unknown>).style;
+    if (!style || typeof style !== 'object' || Array.isArray(style)) {
+      return null;
+    }
+    return style as Record<string, unknown>;
+  }
+
+  private styleConfigPayload(
+    value: unknown,
+    fallbackStyleJson: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const styleJson = this.stylePayload(
+      this.styleConfigToStyleJson(value) ?? fallbackStyleJson,
+    );
+    const config =
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? ({ ...(value as Record<string, unknown>) } as Record<string, unknown>)
+        : {};
+    const subtitleValue = config.subtitle;
+    const subtitle =
+      subtitleValue &&
+      typeof subtitleValue === 'object' &&
+      !Array.isArray(subtitleValue)
+        ? ({ ...(subtitleValue as Record<string, unknown>) } as Record<
+            string,
+            unknown
+          >)
+        : {};
+    subtitle.style = styleJson;
+    config.subtitle = subtitle;
+    if (
+      typeof config.aspectRatio !== 'string' ||
+      config.aspectRatio.trim().length === 0
+    ) {
+      config.aspectRatio = '9:16';
+    }
+    return config;
   }
 
   private parseStyle(value?: string | null): Record<string, unknown> {

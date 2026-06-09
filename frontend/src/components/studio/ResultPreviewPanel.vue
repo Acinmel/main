@@ -8,13 +8,40 @@
       <div class="result-actions">
         <button class="danger-btn" type="button" @click="$emit('delete-video')">删除视频</button>
         <button class="outline-btn" type="button" @click="$emit('change-video')">更换视频</button>
-        <a v-if="finalVideoUrl" class="download-btn" :href="finalVideoUrl" download>下载</a>
+        <button v-if="currentVideoUrl && mediaError" class="outline-btn" type="button" @click="retryVideo">重试</button>
+        <a v-if="currentVideoUrl" class="download-btn" :href="currentVideoUrl" download>下载</a>
         <button v-else class="download-btn" type="button" disabled>下载</button>
       </div>
     </header>
 
     <div class="phone-wrap">
-      <video v-if="finalVideoUrl" class="preview-video" :src="finalVideoUrl" controls playsinline preload="metadata" />
+      <div v-if="currentVideoUrl" class="preview-stage">
+        <video
+          v-if="!mediaError"
+          :key="videoKey"
+          class="preview-video"
+          :class="{ 'preview-video--loading': mediaLoading && !mediaReady }"
+          :src="currentVideoUrl"
+          :poster="coverUrl || undefined"
+          controls
+          playsinline
+          preload="metadata"
+          @loadstart="onLoadStart"
+          @loadedmetadata="onLoaded"
+          @canplay="onLoaded"
+          @error="onVideoError"
+        />
+        <div v-if="mediaLoading && !mediaReady && !mediaError" class="preview-overlay">
+          <span class="loading-ring" aria-hidden="true" />
+          <p>视频加载中...</p>
+        </div>
+        <div v-if="mediaError" class="preview-error">
+          <img v-if="coverUrl" :src="coverUrl" alt="" />
+          <div v-else class="avatar-word">avatar</div>
+          <p>视频加载失败，请重试。</p>
+          <button type="button" @click="retryVideo">刷新播放链接</button>
+        </div>
+      </div>
       <div v-else class="preview-placeholder">
         <img v-if="coverUrl" :src="coverUrl" alt="生成结果封面" />
         <div v-else class="avatar-word">avatar</div>
@@ -26,21 +53,66 @@
       </div>
     </div>
 
-    <p class="result-note">{{ finalVideoUrl ? '成片已生成，可以下载使用。' : '先确认文案、数字人和音色。' }}</p>
+    <p class="result-note">{{ currentVideoUrl ? '成片已生成，可以下载使用。' : '先确认文案、数字人和音色。' }}</p>
   </aside>
 </template>
 
 <script setup lang="ts">
-defineProps<{
+import { computed, ref, watch } from "vue";
+
+const props = defineProps<{
   finalVideoUrl?: string | null
   coverUrl?: string
   hint?: string
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
   (event: 'delete-video'): void
   (event: 'change-video'): void
+  (event: 'refresh-video'): void
 }>()
+
+const currentVideoUrl = computed(() => props.finalVideoUrl?.trim() ?? "")
+const mediaLoading = ref(false)
+const mediaReady = ref(false)
+const mediaError = ref(false)
+const videoKey = ref(0)
+
+watch(
+  currentVideoUrl,
+  (url) => {
+    mediaLoading.value = Boolean(url)
+    mediaReady.value = false
+    mediaError.value = false
+    videoKey.value += 1
+  },
+  { immediate: true },
+)
+
+function onLoadStart() {
+  mediaLoading.value = true
+  mediaError.value = false
+}
+
+function onLoaded() {
+  mediaLoading.value = false
+  mediaReady.value = true
+}
+
+function onVideoError() {
+  mediaLoading.value = false
+  mediaReady.value = false
+  mediaError.value = true
+}
+
+function retryVideo() {
+  if (!currentVideoUrl.value) return
+  mediaLoading.value = true
+  mediaReady.value = false
+  mediaError.value = false
+  videoKey.value += 1
+  emit('refresh-video')
+}
 </script>
 
 <style scoped>
@@ -142,6 +214,7 @@ defineEmits<{
   margin: 0 auto;
 }
 
+.preview-stage,
 .preview-video,
 .preview-placeholder {
   width: 100%;
@@ -152,8 +225,82 @@ defineEmits<{
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.12);
 }
 
+.preview-stage {
+  position: relative;
+}
+
 .preview-video {
+  display: block;
+  height: 100%;
   object-fit: cover;
+}
+
+.preview-video--loading {
+  opacity: 0.72;
+}
+
+.preview-overlay,
+.preview-error {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  text-align: center;
+}
+
+.preview-overlay {
+  color: #fff;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.18), rgba(15, 23, 42, 0.5));
+}
+
+.loading-ring {
+  width: 34px;
+  height: 34px;
+  border: 3px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #fff;
+  border-radius: 999px;
+  animation: preview-spin 0.8s linear infinite;
+}
+
+.preview-overlay p,
+.preview-error p {
+  margin: 10px 0 0;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.5;
+  text-shadow: 0 3px 10px rgba(0, 0, 0, 0.36);
+}
+
+.preview-error {
+  overflow: hidden;
+  color: #fff;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.2), rgba(15, 23, 42, 0.72));
+}
+
+.preview-error img {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: saturate(0.8) brightness(0.68);
+}
+
+.preview-error button {
+  height: 32px;
+  margin-top: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.68);
+  border-radius: 10px;
+  padding: 0 14px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
 }
 
 .preview-placeholder {
@@ -233,6 +380,12 @@ defineEmits<{
   color: var(--text-sub);
   font-size: var(--font-small, 12px);
   font-weight: 800;
+}
+
+@keyframes preview-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1500px) {

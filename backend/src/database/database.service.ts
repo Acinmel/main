@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Pool } from 'mysql2/promise';
@@ -164,6 +165,9 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         id TEXT PRIMARY KEY NOT NULL,
         email TEXT NOT NULL UNIQUE,
         password_hash TEXT NOT NULL,
+        phone_number TEXT,
+        id_card_hash TEXT,
+        id_card_last4 TEXT,
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS digital_human_templates (
@@ -220,6 +224,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         cover_url TEXT,
         source_video_url TEXT,
         style_id TEXT,
+        video_cover_url TEXT,
+        video_duration_seconds REAL,
+        model_type TEXT,
+        asset_status TEXT NOT NULL DEFAULT 'COMPLETED',
+        video_oss_key TEXT,
         expires_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -252,6 +261,23 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_voice_resources_user_updated ON voice_resources(user_id, updated_at, id);
       CREATE INDEX IF NOT EXISTS idx_voice_resources_rec_updated ON voice_resources(is_recommended, updated_at, id);
 
+      CREATE TABLE IF NOT EXISTS oss_upload_grants (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_oss_upload_grants_user_updated ON oss_upload_grants(user_id, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_oss_upload_grants_expires ON oss_upload_grants(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_oss_upload_grants_status_updated ON oss_upload_grants(status, updated_at);
+
       CREATE TABLE IF NOT EXISTS subtitle_template_resources (
         id TEXT PRIMARY KEY NOT NULL,
         user_id TEXT,
@@ -260,6 +286,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         cover_url TEXT,
         preview_url TEXT,
         style_json TEXT NOT NULL,
+        style_config_json TEXT,
+        base_template_id TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -304,6 +332,98 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         UNIQUE(user_id, file_name),
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       );
+      CREATE TABLE IF NOT EXISTS video_scripts (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        script_text TEXT NOT NULL,
+        subtitle_template_id TEXT NOT NULL,
+        highlights_json TEXT NOT NULL DEFAULT '[]',
+        visual_style_json TEXT NOT NULL DEFAULT '{}',
+        marks_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(user_id, video_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS video_title_asset (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        mark_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        template_id TEXT NOT NULL,
+        theme_id TEXT NOT NULL,
+        start_time REAL NOT NULL DEFAULT 0,
+        end_time REAL NOT NULL DEFAULT 0,
+        duration REAL NOT NULL DEFAULT 1.8,
+        position TEXT NOT NULL DEFAULT 'center',
+        layout_json TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        transparent_asset_url TEXT NULL,
+        preview_url TEXT NULL,
+        error_message TEXT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS audio_assets (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT NULL,
+        name TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        storage_provider TEXT NOT NULL,
+        object_key TEXT NULL,
+        storage_path TEXT NULL,
+        audio_url TEXT NULL,
+        mime_type TEXT NULL,
+        size_bytes INTEGER NULL,
+        duration_seconds REAL NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT NULL,
+        subtitle_track_id TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS subtitle_tracks (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT NULL,
+        audio_asset_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        language TEXT NULL,
+        duration_seconds REAL NULL,
+        cues_json TEXT NULL,
+        words_json TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS digital_human_video_assets (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT NULL,
+        avatar_resource_id TEXT NOT NULL,
+        audio_asset_id TEXT NULL,
+        render_mode TEXT NULL,
+        source_task_id TEXT NULL,
+        video_url TEXT NULL,
+        video_path TEXT NULL,
+        duration_seconds REAL NULL,
+        metadata_json TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE SET NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_user_action ON audit_logs(user_id, action);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
@@ -312,6 +432,17 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_recent_extractions_user_updated ON recent_extractions(user_id, updated_at, id);
       CREATE INDEX IF NOT EXISTS idx_saved_videos_user_updated ON saved_videos(user_id, updated_at, id);
       CREATE INDEX IF NOT EXISTS idx_saved_videos_user_created ON saved_videos(user_id, created_at, id);
+      CREATE INDEX IF NOT EXISTS idx_video_scripts_user_updated ON video_scripts(user_id, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_user_video ON video_title_asset(user_id, video_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_mark ON video_title_asset(user_id, video_id, mark_id);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_status ON video_title_asset(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_active_time ON video_title_asset(user_id, video_id, is_active, start_time);
+      CREATE INDEX IF NOT EXISTS idx_audio_assets_user_project_updated ON audio_assets(user_id, project_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_audio_assets_user_updated ON audio_assets(user_id, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_subtitle_tracks_user_project ON subtitle_tracks(user_id, project_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_subtitle_tracks_audio_asset ON subtitle_tracks(audio_asset_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_dvh_assets_user_project_updated ON digital_human_video_assets(user_id, project_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_dvh_assets_source_task ON digital_human_video_assets(source_task_id, updated_at);
       CREATE INDEX IF NOT EXISTS idx_users_created ON users(created_at);
       CREATE INDEX IF NOT EXISTS idx_dh_templates_updated ON digital_human_templates(updated_at);
     `);
@@ -330,6 +461,15 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       db.exec(
         `ALTER TABLE users ADD COLUMN account_status TEXT NOT NULL DEFAULT 'active'`,
       );
+    }
+    if (!names.has('phone_number')) {
+      db.exec(`ALTER TABLE users ADD COLUMN phone_number TEXT`);
+    }
+    if (!names.has('id_card_hash')) {
+      db.exec(`ALTER TABLE users ADD COLUMN id_card_hash TEXT`);
+    }
+    if (!names.has('id_card_last4')) {
+      db.exec(`ALTER TABLE users ADD COLUMN id_card_last4 TEXT`);
     }
 
     const voiceCols = db
@@ -361,9 +501,46 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     if (!avatarNames.has('expires_at')) {
       db.exec(`ALTER TABLE avatar_resources ADD COLUMN expires_at TEXT`);
     }
+    if (!avatarNames.has('video_cover_url')) {
+      db.exec(`ALTER TABLE avatar_resources ADD COLUMN video_cover_url TEXT`);
+    }
+    if (!avatarNames.has('video_duration_seconds')) {
+      db.exec(
+        `ALTER TABLE avatar_resources ADD COLUMN video_duration_seconds REAL`,
+      );
+    }
+    if (!avatarNames.has('model_type')) {
+      db.exec(`ALTER TABLE avatar_resources ADD COLUMN model_type TEXT`);
+    }
+    if (!avatarNames.has('asset_status')) {
+      db.exec(
+        `ALTER TABLE avatar_resources ADD COLUMN asset_status TEXT NOT NULL DEFAULT 'COMPLETED'`,
+      );
+    }
+    if (!avatarNames.has('video_oss_key')) {
+      db.exec(`ALTER TABLE avatar_resources ADD COLUMN video_oss_key TEXT`);
+    }
     if (!voiceNames.has('expires_at')) {
       db.exec(`ALTER TABLE voice_resources ADD COLUMN expires_at TEXT`);
     }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS oss_upload_grants (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        object_key TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        file_size INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'pending',
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_oss_upload_grants_user_updated ON oss_upload_grants(user_id, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_oss_upload_grants_expires ON oss_upload_grants(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_oss_upload_grants_status_updated ON oss_upload_grants(status, updated_at);
+    `);
     const subtitleCols = db
       .prepare(`PRAGMA table_info(subtitle_template_resources)`)
       .all() as { name: string }[];
@@ -383,6 +560,146 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `ALTER TABLE subtitle_template_resources ADD COLUMN style_json TEXT NOT NULL DEFAULT '{}'`,
       );
     }
+    if (!subtitleNames.has('style_config_json')) {
+      db.exec(
+        `ALTER TABLE subtitle_template_resources ADD COLUMN style_config_json TEXT`,
+      );
+    }
+    if (!subtitleNames.has('base_template_id')) {
+      db.exec(
+        `ALTER TABLE subtitle_template_resources ADD COLUMN base_template_id TEXT`,
+      );
+    }
+    const videoScriptCols = db
+      .prepare(`PRAGMA table_info(video_scripts)`)
+      .all() as { name: string }[];
+    const videoScriptNames = new Set(videoScriptCols.map((c) => c.name));
+    if (!videoScriptNames.has('marks_json')) {
+      db.exec(
+        `ALTER TABLE video_scripts ADD COLUMN marks_json TEXT NOT NULL DEFAULT '[]'`,
+      );
+    }
+    if (!videoScriptNames.has('visual_style_json')) {
+      db.exec(
+        `ALTER TABLE video_scripts ADD COLUMN visual_style_json TEXT NOT NULL DEFAULT '{}'`,
+      );
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS video_title_asset (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        video_id TEXT NOT NULL,
+        mark_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        template_id TEXT NOT NULL,
+        theme_id TEXT NOT NULL,
+        start_time REAL NOT NULL DEFAULT 0,
+        end_time REAL NOT NULL DEFAULT 0,
+        duration REAL NOT NULL DEFAULT 1.8,
+        position TEXT NOT NULL DEFAULT 'center',
+        layout_json TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        transparent_asset_url TEXT NULL,
+        preview_url TEXT NULL,
+        error_message TEXT NULL,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    `);
+    const titleAssetCols = db
+      .prepare(`PRAGMA table_info(video_title_asset)`)
+      .all() as { name: string }[];
+    const titleAssetNames = new Set(titleAssetCols.map((c) => c.name));
+    if (!titleAssetNames.has('layout_json')) {
+      db.exec(`ALTER TABLE video_title_asset ADD COLUMN layout_json TEXT`);
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS audio_assets (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT NULL,
+        name TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        storage_provider TEXT NOT NULL,
+        object_key TEXT NULL,
+        storage_path TEXT NULL,
+        audio_url TEXT NULL,
+        mime_type TEXT NULL,
+        size_bytes INTEGER NULL,
+        duration_seconds REAL NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT NULL,
+        subtitle_track_id TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS subtitle_tracks (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT NULL,
+        audio_asset_id TEXT NOT NULL,
+        source TEXT NOT NULL,
+        language TEXT NULL,
+        duration_seconds REAL NULL,
+        cues_json TEXT NULL,
+        words_json TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS digital_human_video_assets (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT NULL,
+        avatar_resource_id TEXT NOT NULL,
+        audio_asset_id TEXT NULL,
+        render_mode TEXT NULL,
+        source_task_id TEXT NULL,
+        video_url TEXT NULL,
+        video_path TEXT NULL,
+        duration_seconds REAL NULL,
+        metadata_json TEXT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        error_message TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE SET NULL
+      );
+      CREATE TABLE IF NOT EXISTS video_projects (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        archived_at TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+      CREATE TABLE IF NOT EXISTS video_project_stage_states (
+        id TEXT PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        script_hash TEXT NULL,
+        audio_asset_id TEXT NULL,
+        subtitle_track_id TEXT NULL,
+        avatar_resource_id TEXT NULL,
+        render_mode TEXT NULL,
+        lipsync_task_id TEXT NULL,
+        digital_human_video_asset_id TEXT NULL,
+        video_url TEXT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(user_id, project_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    `);
     db.exec(
       `CREATE INDEX IF NOT EXISTS idx_avatar_resources_expires ON avatar_resources(expires_at)`,
     );
@@ -391,6 +708,7 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     );
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_users_created ON users(created_at);
+      CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
       CREATE INDEX IF NOT EXISTS idx_user_works_user_updated ON user_works(user_id, updated_at, id);
       CREATE INDEX IF NOT EXISTS idx_user_works_updated ON user_works(updated_at, id);
       CREATE INDEX IF NOT EXISTS idx_dh_templates_updated ON digital_human_templates(updated_at);
@@ -405,7 +723,39 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       CREATE INDEX IF NOT EXISTS idx_task_statuses_user_updated ON task_statuses(user_id, updated_at, id);
       CREATE INDEX IF NOT EXISTS idx_task_statuses_status_updated ON task_statuses(status, updated_at);
       CREATE INDEX IF NOT EXISTS idx_task_statuses_expires ON task_statuses(expires_at);
+      CREATE INDEX IF NOT EXISTS idx_video_scripts_user_updated ON video_scripts(user_id, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_user_video ON video_title_asset(user_id, video_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_mark ON video_title_asset(user_id, video_id, mark_id);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_status ON video_title_asset(status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_video_title_asset_active_time ON video_title_asset(user_id, video_id, is_active, start_time);
+      CREATE INDEX IF NOT EXISTS idx_audio_assets_user_project_updated ON audio_assets(user_id, project_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_audio_assets_user_updated ON audio_assets(user_id, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_subtitle_tracks_user_project ON subtitle_tracks(user_id, project_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_subtitle_tracks_audio_asset ON subtitle_tracks(audio_asset_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_dvh_assets_user_project_updated ON digital_human_video_assets(user_id, project_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_dvh_assets_source_task ON digital_human_video_assets(source_task_id, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_dvh_assets_reuse_lookup ON digital_human_video_assets(user_id, project_id, avatar_resource_id, audio_asset_id, render_mode, status, updated_at);
+      CREATE INDEX IF NOT EXISTS idx_video_projects_user_status_updated ON video_projects(user_id, status, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_video_projects_user_updated ON video_projects(user_id, updated_at, id);
+      CREATE INDEX IF NOT EXISTS idx_video_project_stage_states_user_project ON video_project_stage_states(user_id, project_id, updated_at);
     `);
+
+    const dvhCols = db
+      .prepare(`PRAGMA table_info(digital_human_video_assets)`)
+      .all() as { name: string }[];
+    const dvhNames = new Set(dvhCols.map((c) => c.name));
+    if (!dvhNames.has('render_mode')) {
+      db.exec(
+        `ALTER TABLE digital_human_video_assets ADD COLUMN render_mode TEXT`,
+      );
+    }
+    if (!dvhNames.has('metadata_json')) {
+      db.exec(
+        `ALTER TABLE digital_human_video_assets ADD COLUMN metadata_json TEXT`,
+      );
+    }
+
+    this.backfillRecommendedSubtitleTemplateUrlsSqlite();
   }
 
   private async migrateMysql(): Promise<void> {
@@ -415,8 +765,12 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         id VARCHAR(36) NOT NULL PRIMARY KEY,
         email VARCHAR(255) NOT NULL,
         password_hash VARCHAR(255) NOT NULL,
+        phone_number VARCHAR(32) NULL,
+        id_card_hash VARCHAR(255) NULL,
+        id_card_last4 VARCHAR(8) NULL,
         created_at VARCHAR(64) NOT NULL,
         UNIQUE KEY uq_users_email (email),
+        INDEX idx_users_phone (phone_number),
         INDEX idx_users_created (created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
@@ -480,6 +834,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         cover_url LONGTEXT NULL,
         source_video_url LONGTEXT NULL,
         style_id VARCHAR(128) NULL,
+        video_cover_url LONGTEXT NULL,
+        video_duration_seconds DOUBLE NULL,
+        model_type VARCHAR(64) NULL,
+        asset_status VARCHAR(32) NOT NULL DEFAULT 'COMPLETED',
+        video_oss_key LONGTEXT NULL,
         expires_at VARCHAR(64) NULL,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL,
@@ -516,6 +875,24 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     await pool.query(`
+      CREATE TABLE IF NOT EXISTS oss_upload_grants (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        purpose VARCHAR(32) NOT NULL,
+        object_key LONGTEXT NOT NULL,
+        mime_type VARCHAR(128) NOT NULL,
+        file_size BIGINT NOT NULL DEFAULT 0,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        expires_at VARCHAR(64) NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_oss_upload_grants_user_updated (user_id, updated_at, id),
+        INDEX idx_oss_upload_grants_expires (expires_at),
+        INDEX idx_oss_upload_grants_status_updated (status, updated_at),
+        CONSTRAINT fk_oss_upload_grants_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
       CREATE TABLE IF NOT EXISTS subtitle_template_resources (
         id VARCHAR(36) NOT NULL PRIMARY KEY,
         user_id VARCHAR(36) NULL,
@@ -524,6 +901,8 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         cover_url LONGTEXT NULL,
         preview_url LONGTEXT NULL,
         style_json LONGTEXT NOT NULL,
+        style_config_json LONGTEXT NULL,
+        base_template_id VARCHAR(36) NULL,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL,
         INDEX idx_subtitle_template_resources_user (user_id),
@@ -566,6 +945,154 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         INDEX idx_saved_videos_user_updated (user_id, updated_at, id),
         INDEX idx_saved_videos_user_created (user_id, created_at, id),
         CONSTRAINT fk_saved_videos_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS video_scripts (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        video_id VARCHAR(128) NOT NULL,
+        script_text LONGTEXT NOT NULL,
+        subtitle_template_id VARCHAR(128) NOT NULL,
+        highlights_json LONGTEXT NOT NULL,
+        visual_style_json LONGTEXT NOT NULL,
+        marks_json LONGTEXT NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        UNIQUE KEY uq_video_scripts_user_video (user_id, video_id),
+        INDEX idx_video_scripts_user_updated (user_id, updated_at, id),
+        CONSTRAINT fk_video_scripts_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS video_title_asset (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        video_id VARCHAR(128) NOT NULL,
+        mark_id VARCHAR(128) NOT NULL,
+        text LONGTEXT NOT NULL,
+        template_id VARCHAR(64) NOT NULL,
+        theme_id VARCHAR(64) NOT NULL,
+        start_time DOUBLE NOT NULL DEFAULT 0,
+        end_time DOUBLE NOT NULL DEFAULT 0,
+        duration DOUBLE NOT NULL DEFAULT 1.8,
+        position VARCHAR(32) NOT NULL DEFAULT 'center',
+        layout_json LONGTEXT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        transparent_asset_url LONGTEXT NULL,
+        preview_url LONGTEXT NULL,
+        error_message LONGTEXT NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_video_title_asset_user_video (user_id, video_id, updated_at),
+        INDEX idx_video_title_asset_mark (user_id, video_id, mark_id),
+        INDEX idx_video_title_asset_status (status, updated_at),
+        INDEX idx_video_title_asset_active_time (user_id, video_id, is_active, start_time),
+        CONSTRAINT fk_video_title_asset_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audio_assets (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        project_id VARCHAR(128) NULL,
+        name VARCHAR(255) NOT NULL,
+        source_type VARCHAR(32) NOT NULL,
+        storage_provider VARCHAR(32) NOT NULL,
+        object_key LONGTEXT NULL,
+        storage_path LONGTEXT NULL,
+        audio_url LONGTEXT NULL,
+        mime_type VARCHAR(128) NULL,
+        size_bytes BIGINT NULL,
+        duration_seconds DOUBLE NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        error_message LONGTEXT NULL,
+        subtitle_track_id VARCHAR(128) NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_audio_assets_user_project_updated (user_id, project_id, updated_at),
+        INDEX idx_audio_assets_user_updated (user_id, updated_at, id),
+        CONSTRAINT fk_audio_assets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS subtitle_tracks (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        project_id VARCHAR(128) NULL,
+        audio_asset_id VARCHAR(128) NOT NULL,
+        source VARCHAR(32) NOT NULL,
+        language VARCHAR(32) NULL,
+        duration_seconds DOUBLE NULL,
+        cues_json LONGTEXT NULL,
+        words_json LONGTEXT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        error_message LONGTEXT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_subtitle_tracks_user_project (user_id, project_id, updated_at),
+        INDEX idx_subtitle_tracks_audio_asset (audio_asset_id, updated_at),
+        CONSTRAINT fk_subtitle_tracks_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_subtitle_tracks_audio_asset FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS digital_human_video_assets (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        project_id VARCHAR(128) NULL,
+        avatar_resource_id VARCHAR(128) NOT NULL,
+        audio_asset_id VARCHAR(128) NULL,
+        render_mode VARCHAR(32) NULL,
+        source_task_id VARCHAR(128) NULL,
+        video_url LONGTEXT NULL,
+        video_path LONGTEXT NULL,
+        duration_seconds DOUBLE NULL,
+        metadata_json LONGTEXT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        error_message LONGTEXT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_dvh_assets_user_project_updated (user_id, project_id, updated_at),
+        INDEX idx_dvh_assets_source_task (source_task_id, updated_at),
+        INDEX idx_dvh_assets_reuse_lookup (user_id, project_id, avatar_resource_id, audio_asset_id, render_mode, status, updated_at),
+        CONSTRAINT fk_dvh_assets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_dvh_assets_audio_asset FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS video_projects (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'active',
+        archived_at VARCHAR(64) NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_video_projects_user_status_updated (user_id, status, updated_at, id),
+        INDEX idx_video_projects_user_updated (user_id, updated_at, id),
+        CONSTRAINT fk_video_projects_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS video_project_stage_states (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        project_id VARCHAR(128) NOT NULL,
+        script_hash VARCHAR(128) NULL,
+        audio_asset_id VARCHAR(128) NULL,
+        subtitle_track_id VARCHAR(128) NULL,
+        avatar_resource_id VARCHAR(128) NULL,
+        render_mode VARCHAR(32) NULL,
+        lipsync_task_id VARCHAR(128) NULL,
+        digital_human_video_asset_id VARCHAR(128) NULL,
+        video_url LONGTEXT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        UNIQUE KEY uq_video_project_stage_states_user_project (user_id, project_id),
+        INDEX idx_video_project_stage_states_user_project (user_id, project_id, updated_at),
+        CONSTRAINT fk_video_project_stage_states_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
   }
@@ -652,6 +1179,21 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `ALTER TABLE users ADD COLUMN account_status VARCHAR(16) NOT NULL DEFAULT 'active'`,
       );
     }
+    if (!(await hasCol('users', 'phone_number'))) {
+      await pool.query(
+        `ALTER TABLE users ADD COLUMN phone_number VARCHAR(32) NULL`,
+      );
+    }
+    if (!(await hasCol('users', 'id_card_hash'))) {
+      await pool.query(
+        `ALTER TABLE users ADD COLUMN id_card_hash VARCHAR(255) NULL`,
+      );
+    }
+    if (!(await hasCol('users', 'id_card_last4'))) {
+      await pool.query(
+        `ALTER TABLE users ADD COLUMN id_card_last4 VARCHAR(8) NULL`,
+      );
+    }
     if (!(await hasCol('voice_resources', 'provider'))) {
       await pool.query(
         `ALTER TABLE voice_resources ADD COLUMN provider VARCHAR(64) NULL`,
@@ -682,9 +1224,148 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `ALTER TABLE avatar_resources ADD COLUMN expires_at VARCHAR(64) NULL`,
       );
     }
+    if (!(await hasCol('avatar_resources', 'video_cover_url'))) {
+      await pool.query(
+        `ALTER TABLE avatar_resources ADD COLUMN video_cover_url LONGTEXT NULL`,
+      );
+    }
+    if (!(await hasCol('avatar_resources', 'video_duration_seconds'))) {
+      await pool.query(
+        `ALTER TABLE avatar_resources ADD COLUMN video_duration_seconds DOUBLE NULL`,
+      );
+    }
+    if (!(await hasCol('avatar_resources', 'model_type'))) {
+      await pool.query(
+        `ALTER TABLE avatar_resources ADD COLUMN model_type VARCHAR(64) NULL`,
+      );
+    }
+    if (!(await hasCol('avatar_resources', 'asset_status'))) {
+      await pool.query(
+        `ALTER TABLE avatar_resources ADD COLUMN asset_status VARCHAR(32) NOT NULL DEFAULT 'COMPLETED'`,
+      );
+    }
+    if (!(await hasCol('avatar_resources', 'video_oss_key'))) {
+      await pool.query(
+        `ALTER TABLE avatar_resources ADD COLUMN video_oss_key LONGTEXT NULL`,
+      );
+    }
     if (!(await hasCol('voice_resources', 'expires_at'))) {
       await pool.query(
         `ALTER TABLE voice_resources ADD COLUMN expires_at VARCHAR(64) NULL`,
+      );
+    }
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS oss_upload_grants (
+        id VARCHAR(64) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        purpose VARCHAR(32) NOT NULL,
+        object_key LONGTEXT NOT NULL,
+        mime_type VARCHAR(128) NOT NULL,
+        file_size BIGINT NOT NULL DEFAULT 0,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        expires_at VARCHAR(64) NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_oss_upload_grants_user_updated (user_id, updated_at, id),
+        INDEX idx_oss_upload_grants_expires (expires_at),
+        INDEX idx_oss_upload_grants_status_updated (status, updated_at),
+        CONSTRAINT fk_oss_upload_grants_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS audio_assets (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        project_id VARCHAR(128) NULL,
+        name VARCHAR(255) NOT NULL,
+        source_type VARCHAR(32) NOT NULL,
+        storage_provider VARCHAR(32) NOT NULL,
+        object_key LONGTEXT NULL,
+        storage_path LONGTEXT NULL,
+        audio_url LONGTEXT NULL,
+        mime_type VARCHAR(128) NULL,
+        size_bytes BIGINT NULL,
+        duration_seconds DOUBLE NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        error_message LONGTEXT NULL,
+        subtitle_track_id VARCHAR(128) NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_audio_assets_user_project_updated (user_id, project_id, updated_at),
+        INDEX idx_audio_assets_user_updated (user_id, updated_at, id),
+        CONSTRAINT fk_audio_assets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS subtitle_tracks (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        project_id VARCHAR(128) NULL,
+        audio_asset_id VARCHAR(128) NOT NULL,
+        source VARCHAR(32) NOT NULL,
+        language VARCHAR(32) NULL,
+        duration_seconds DOUBLE NULL,
+        cues_json LONGTEXT NULL,
+        words_json LONGTEXT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        error_message LONGTEXT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_subtitle_tracks_user_project (user_id, project_id, updated_at),
+        INDEX idx_subtitle_tracks_audio_asset (audio_asset_id, updated_at),
+        CONSTRAINT fk_subtitle_tracks_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_subtitle_tracks_audio_asset FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS digital_human_video_assets (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        project_id VARCHAR(128) NULL,
+        avatar_resource_id VARCHAR(128) NOT NULL,
+        audio_asset_id VARCHAR(128) NULL,
+        source_task_id VARCHAR(128) NULL,
+        video_url LONGTEXT NULL,
+        video_path LONGTEXT NULL,
+        duration_seconds DOUBLE NULL,
+        metadata_json LONGTEXT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        error_message LONGTEXT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_dvh_assets_user_project_updated (user_id, project_id, updated_at),
+        INDEX idx_dvh_assets_source_task (source_task_id, updated_at),
+        CONSTRAINT fk_dvh_assets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_dvh_assets_audio_asset FOREIGN KEY (audio_asset_id) REFERENCES audio_assets(id) ON DELETE SET NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await ensureLongTextColumn('oss_upload_grants', 'object_key', false);
+    await ensureLongTextColumn('audio_assets', 'object_key', true);
+    await ensureLongTextColumn('audio_assets', 'storage_path', true);
+    await ensureLongTextColumn('audio_assets', 'audio_url', true);
+    await ensureLongTextColumn('audio_assets', 'error_message', true);
+    await ensureLongTextColumn('subtitle_tracks', 'cues_json', true);
+    await ensureLongTextColumn('subtitle_tracks', 'words_json', true);
+    await ensureLongTextColumn('subtitle_tracks', 'error_message', true);
+    await ensureLongTextColumn('digital_human_video_assets', 'video_url', true);
+    await ensureLongTextColumn(
+      'digital_human_video_assets',
+      'video_path',
+      true,
+    );
+    await ensureLongTextColumn(
+      'digital_human_video_assets',
+      'error_message',
+      true,
+    );
+    await ensureLongTextColumn(
+      'digital_human_video_assets',
+      'metadata_json',
+      true,
+    );
+    if (!(await hasCol('digital_human_video_assets', 'render_mode'))) {
+      await pool.query(
+        `ALTER TABLE digital_human_video_assets ADD COLUMN render_mode VARCHAR(32) NULL`,
       );
     }
     await ensureLongTextColumn(
@@ -702,6 +1383,16 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         `ALTER TABLE subtitle_template_resources ADD COLUMN style_json LONGTEXT NULL`,
       );
     }
+    if (!(await hasCol('subtitle_template_resources', 'style_config_json'))) {
+      await pool.query(
+        `ALTER TABLE subtitle_template_resources ADD COLUMN style_config_json LONGTEXT NULL`,
+      );
+    }
+    if (!(await hasCol('subtitle_template_resources', 'base_template_id'))) {
+      await pool.query(
+        `ALTER TABLE subtitle_template_resources ADD COLUMN base_template_id VARCHAR(36) NULL`,
+      );
+    }
     await pool.query(
       `UPDATE subtitle_template_resources SET style_json = '{}' WHERE style_json IS NULL`,
     );
@@ -709,6 +1400,11 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       'subtitle_template_resources',
       'style_json',
       false,
+    );
+    await ensureLongTextColumn(
+      'subtitle_template_resources',
+      'style_config_json',
+      true,
     );
     await ensureLongTextColumn(
       'digital_human_templates',
@@ -731,8 +1427,30 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
     await ensureLongTextColumn('task_statuses', 'error', true);
     await ensureLongTextColumn('avatar_resources', 'cover_url', true);
     await ensureLongTextColumn('avatar_resources', 'source_video_url', true);
+    await ensureLongTextColumn('avatar_resources', 'video_cover_url', true);
+    await ensureLongTextColumn('avatar_resources', 'video_oss_key', true);
     await ensureLongTextColumn('voice_resources', 'audio_url', true);
     await ensureLongTextColumn('voice_resources', 'clone_error', true);
+    await ensureLongTextColumn('video_scripts', 'script_text', false);
+    await ensureLongTextColumn('video_scripts', 'highlights_json', false);
+    if (!(await hasCol('video_scripts', 'visual_style_json'))) {
+      await pool.query(
+        `ALTER TABLE video_scripts ADD COLUMN visual_style_json LONGTEXT NULL`,
+      );
+    }
+    await pool.query(
+      `UPDATE video_scripts SET visual_style_json = '{}' WHERE visual_style_json IS NULL`,
+    );
+    await ensureLongTextColumn('video_scripts', 'visual_style_json', false);
+    if (!(await hasCol('video_scripts', 'marks_json'))) {
+      await pool.query(
+        `ALTER TABLE video_scripts ADD COLUMN marks_json LONGTEXT NULL`,
+      );
+    }
+    await pool.query(
+      `UPDATE video_scripts SET marks_json = '[]' WHERE marks_json IS NULL`,
+    );
+    await ensureLongTextColumn('video_scripts', 'marks_json', false);
     if (!(await hasIndex('avatar_resources', 'idx_avatar_resources_expires'))) {
       await pool.query(
         `ALTER TABLE avatar_resources ADD INDEX idx_avatar_resources_expires (expires_at)`,
@@ -758,11 +1476,58 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
         INDEX idx_audit_logs_created (created_at)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS video_title_asset (
+        id VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id VARCHAR(36) NOT NULL,
+        video_id VARCHAR(128) NOT NULL,
+        mark_id VARCHAR(128) NOT NULL,
+        text LONGTEXT NOT NULL,
+        template_id VARCHAR(64) NOT NULL,
+        theme_id VARCHAR(64) NOT NULL,
+        start_time DOUBLE NOT NULL DEFAULT 0,
+        end_time DOUBLE NOT NULL DEFAULT 0,
+        duration DOUBLE NOT NULL DEFAULT 1.8,
+        position VARCHAR(32) NOT NULL DEFAULT 'center',
+        layout_json LONGTEXT NULL,
+        status VARCHAR(16) NOT NULL DEFAULT 'pending',
+        transparent_asset_url LONGTEXT NULL,
+        preview_url LONGTEXT NULL,
+        error_message LONGTEXT NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        INDEX idx_video_title_asset_user_video (user_id, video_id, updated_at),
+        INDEX idx_video_title_asset_mark (user_id, video_id, mark_id),
+        INDEX idx_video_title_asset_status (status, updated_at),
+        INDEX idx_video_title_asset_active_time (user_id, video_id, is_active, start_time),
+        CONSTRAINT fk_video_title_asset_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await ensureLongTextColumn('video_title_asset', 'text', false);
+    await ensureLongTextColumn(
+      'video_title_asset',
+      'transparent_asset_url',
+      true,
+    );
+    await ensureLongTextColumn('video_title_asset', 'preview_url', true);
+    await ensureLongTextColumn('video_title_asset', 'error_message', true);
+    if (!(await hasCol('video_title_asset', 'layout_json'))) {
+      await pool.query(
+        `ALTER TABLE video_title_asset ADD COLUMN layout_json LONGTEXT NULL`,
+      );
+    }
+    await ensureLongTextColumn('video_title_asset', 'layout_json', true);
     await ensureLongTextColumn('audit_logs', 'detail', true);
     await ensureIndex(
       'users',
       'idx_users_created',
       `ALTER TABLE users ADD INDEX idx_users_created (created_at)`,
+    );
+    await ensureIndex(
+      'users',
+      'idx_users_phone',
+      `ALTER TABLE users ADD INDEX idx_users_phone (phone_number)`,
     );
     await ensureIndex(
       'user_works',
@@ -834,5 +1599,247 @@ export class DatabaseService implements OnModuleInit, OnModuleDestroy {
       'idx_task_statuses_expires',
       `ALTER TABLE task_statuses ADD INDEX idx_task_statuses_expires (expires_at)`,
     );
+    await ensureIndex(
+      'video_scripts',
+      'idx_video_scripts_user_updated',
+      `ALTER TABLE video_scripts ADD INDEX idx_video_scripts_user_updated (user_id, updated_at, id)`,
+    );
+    await ensureIndex(
+      'oss_upload_grants',
+      'idx_oss_upload_grants_user_updated',
+      `ALTER TABLE oss_upload_grants ADD INDEX idx_oss_upload_grants_user_updated (user_id, updated_at, id)`,
+    );
+    await ensureIndex(
+      'oss_upload_grants',
+      'idx_oss_upload_grants_expires',
+      `ALTER TABLE oss_upload_grants ADD INDEX idx_oss_upload_grants_expires (expires_at)`,
+    );
+    await ensureIndex(
+      'oss_upload_grants',
+      'idx_oss_upload_grants_status_updated',
+      `ALTER TABLE oss_upload_grants ADD INDEX idx_oss_upload_grants_status_updated (status, updated_at)`,
+    );
+    await ensureIndex(
+      'video_title_asset',
+      'idx_video_title_asset_user_video',
+      `ALTER TABLE video_title_asset ADD INDEX idx_video_title_asset_user_video (user_id, video_id, updated_at)`,
+    );
+    await ensureIndex(
+      'video_title_asset',
+      'idx_video_title_asset_mark',
+      `ALTER TABLE video_title_asset ADD INDEX idx_video_title_asset_mark (user_id, video_id, mark_id)`,
+    );
+    await ensureIndex(
+      'video_title_asset',
+      'idx_video_title_asset_status',
+      `ALTER TABLE video_title_asset ADD INDEX idx_video_title_asset_status (status, updated_at)`,
+    );
+    await ensureIndex(
+      'video_title_asset',
+      'idx_video_title_asset_active_time',
+      `ALTER TABLE video_title_asset ADD INDEX idx_video_title_asset_active_time (user_id, video_id, is_active, start_time)`,
+    );
+    await ensureIndex(
+      'audio_assets',
+      'idx_audio_assets_user_project_updated',
+      `ALTER TABLE audio_assets ADD INDEX idx_audio_assets_user_project_updated (user_id, project_id, updated_at)`,
+    );
+    await ensureIndex(
+      'audio_assets',
+      'idx_audio_assets_user_updated',
+      `ALTER TABLE audio_assets ADD INDEX idx_audio_assets_user_updated (user_id, updated_at, id)`,
+    );
+    await ensureIndex(
+      'subtitle_tracks',
+      'idx_subtitle_tracks_user_project',
+      `ALTER TABLE subtitle_tracks ADD INDEX idx_subtitle_tracks_user_project (user_id, project_id, updated_at)`,
+    );
+    await ensureIndex(
+      'subtitle_tracks',
+      'idx_subtitle_tracks_audio_asset',
+      `ALTER TABLE subtitle_tracks ADD INDEX idx_subtitle_tracks_audio_asset (audio_asset_id, updated_at)`,
+    );
+    await ensureIndex(
+      'digital_human_video_assets',
+      'idx_dvh_assets_user_project_updated',
+      `ALTER TABLE digital_human_video_assets ADD INDEX idx_dvh_assets_user_project_updated (user_id, project_id, updated_at)`,
+    );
+    await ensureIndex(
+      'digital_human_video_assets',
+      'idx_dvh_assets_source_task',
+      `ALTER TABLE digital_human_video_assets ADD INDEX idx_dvh_assets_source_task (source_task_id, updated_at)`,
+    );
+    await ensureIndex(
+      'digital_human_video_assets',
+      'idx_dvh_assets_reuse_lookup',
+      `ALTER TABLE digital_human_video_assets ADD INDEX idx_dvh_assets_reuse_lookup (user_id, project_id, avatar_resource_id, audio_asset_id, render_mode, status, updated_at)`,
+    );
+    await ensureIndex(
+      'video_projects',
+      'idx_video_projects_user_status_updated',
+      `ALTER TABLE video_projects ADD INDEX idx_video_projects_user_status_updated (user_id, status, updated_at, id)`,
+    );
+    await ensureIndex(
+      'video_projects',
+      'idx_video_projects_user_updated',
+      `ALTER TABLE video_projects ADD INDEX idx_video_projects_user_updated (user_id, updated_at, id)`,
+    );
+    await ensureIndex(
+      'video_project_stage_states',
+      'idx_video_project_stage_states_user_project',
+      `ALTER TABLE video_project_stage_states ADD INDEX idx_video_project_stage_states_user_project (user_id, project_id, updated_at)`,
+    );
+
+    await this.backfillRecommendedSubtitleTemplateUrlsMysql();
+  }
+
+  private resolveTemplatePreviewBaseUrl(): string {
+    const configured =
+      this.config.get<string>('PUBLIC_TEMPLATE_PREVIEW_BASE_URL')?.trim() ||
+      this.config.get<string>('TEMPLATE_PREVIEW_BASE_URL')?.trim() ||
+      '/template-previews';
+    return configured.replace(/\/+$/, '');
+  }
+
+  private buildTemplatePreviewFallbackUrl(
+    templateId: string,
+    variant: 'cover' | 'preview',
+  ): string {
+    const safeId = templateId
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '-');
+    return `${this.resolveTemplatePreviewBaseUrl()}/subtitle-template-${safeId}-${variant}.png`;
+  }
+
+  private sanitizeTemplateAssetUrl(
+    value: string | null | undefined,
+    fallback: string,
+  ): string {
+    const text = value?.trim();
+    if (!text) return fallback;
+    const normalized = text.toLowerCase();
+    if (
+      normalized.startsWith('data:') ||
+      normalized.startsWith('javascript:') ||
+      normalized.startsWith('blob:')
+    ) {
+      return fallback;
+    }
+    if (text.length > 2000) return fallback;
+    return text;
+  }
+
+  private makeSubtitleTemplateUrlSeed(id: string): string {
+    const source = (id || 'unknown').trim().toLowerCase();
+    if (source.length > 0 && /^[a-z0-9_-]+$/i.test(source)) {
+      return source;
+    }
+    return createHash('sha1').update(source).digest('hex').slice(0, 16);
+  }
+
+  private backfillRecommendedSubtitleTemplateUrlsSqlite(): void {
+    const db = this.sqlite;
+    if (!db) return;
+    const rows = db
+      .prepare(
+        `SELECT id, cover_url, preview_url
+         FROM subtitle_template_resources
+         WHERE is_recommended = 1`,
+      )
+      .all() as Array<{
+      id: string;
+      cover_url: string | null;
+      preview_url: string | null;
+    }>;
+    if (!rows.length) return;
+    const now = new Date().toISOString();
+    let changed = 0;
+    const update = db.prepare(
+      `UPDATE subtitle_template_resources
+       SET cover_url = ?, preview_url = ?, updated_at = ?
+       WHERE id = ?`,
+    );
+    const run = db.transaction(() => {
+      for (const row of rows) {
+        const seed = this.makeSubtitleTemplateUrlSeed(row.id);
+        const fallbackCover = this.buildTemplatePreviewFallbackUrl(
+          seed,
+          'cover',
+        );
+        const fallbackPreview = this.buildTemplatePreviewFallbackUrl(
+          seed,
+          'preview',
+        );
+        const coverUrl = this.sanitizeTemplateAssetUrl(
+          row.cover_url,
+          fallbackCover,
+        );
+        const previewUrl = this.sanitizeTemplateAssetUrl(
+          row.preview_url || row.cover_url,
+          fallbackPreview,
+        );
+        if (coverUrl === row.cover_url && previewUrl === row.preview_url) {
+          continue;
+        }
+        update.run(coverUrl, previewUrl, now, row.id);
+        changed += 1;
+      }
+    });
+    run();
+    if (changed > 0) {
+      this.logger.log(
+        `subtitle template URL backfill (sqlite) updated ${changed} recommended rows`,
+      );
+    }
+  }
+
+  private async backfillRecommendedSubtitleTemplateUrlsMysql(): Promise<void> {
+    const pool = this.mysqlPool;
+    if (!pool) return;
+    const [rows] = await pool.query(
+      `SELECT id, cover_url, preview_url
+       FROM subtitle_template_resources
+       WHERE is_recommended = 1`,
+    );
+    const list = rows as Array<{
+      id: string;
+      cover_url: string | null;
+      preview_url: string | null;
+    }>;
+    if (!list.length) return;
+    const now = new Date().toISOString();
+    let changed = 0;
+    for (const row of list) {
+      const seed = this.makeSubtitleTemplateUrlSeed(row.id);
+      const fallbackCover = this.buildTemplatePreviewFallbackUrl(seed, 'cover');
+      const fallbackPreview = this.buildTemplatePreviewFallbackUrl(
+        seed,
+        'preview',
+      );
+      const coverUrl = this.sanitizeTemplateAssetUrl(
+        row.cover_url,
+        fallbackCover,
+      );
+      const previewUrl = this.sanitizeTemplateAssetUrl(
+        row.preview_url || row.cover_url,
+        fallbackPreview,
+      );
+      if (coverUrl === row.cover_url && previewUrl === row.preview_url) {
+        continue;
+      }
+      await pool.execute(
+        `UPDATE subtitle_template_resources
+         SET cover_url = ?, preview_url = ?, updated_at = ?
+         WHERE id = ?`,
+        [coverUrl, previewUrl, now, row.id],
+      );
+      changed += 1;
+    }
+    if (changed > 0) {
+      this.logger.log(
+        `subtitle template URL backfill (mysql) updated ${changed} recommended rows`,
+      );
+    }
   }
 }

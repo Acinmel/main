@@ -32,20 +32,8 @@ import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
 import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import { RewriteAiService } from '../../integrations/ai/rewrite-ai.service';
 import { DigitalHumanImageService } from '../../integrations/ai/digital-human-image.service';
-import { VideoGenerateLlmService } from '../../integrations/ai/video-generate-llm.service';
-import {
-  SeedanceI2vService,
-  type SeedanceI2vSubmitBody,
-} from '../../integrations/ai/seedance-i2v.service';
-import {
-  ArkI2vVideoService,
-  type ArkI2vTaskSubmitBody,
-} from '../../integrations/ai/ark-i2v-video.service';
 import { AliLipSyncService } from '../../integrations/ai/ali-lip-sync.service';
-import {
-  SpeechAiService,
-  type VoiceTuningOptions,
-} from '../../integrations/ai/speech-ai.service';
+import { SpeechAiService } from '../../integrations/ai/speech-ai.service';
 import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.service';
 import {
   FfmpegAudioService,
@@ -64,14 +52,16 @@ import { SubtitleWorkflowService } from './subtitle-workflow.service';
 import { RecentExtractionService } from './recent-extraction.service';
 import { VoicePreviewTaskService } from './voice-preview-task.service';
 import { SavedVideoService } from './saved-video.service';
+import { normalizeVoiceTuning } from './voice-tuning.util';
+import { StagedWorkflowService } from './staged-workflow.service';
 
 class SourceVideoUrlDto {
-  /** 支持抖音整段分享文案或纯 URL */
+  /** 鏀寔鎶栭煶鏁存鍒嗕韩鏂囨鎴栫函 URL */
   sourceVideoUrl!: string;
 }
 
 class DouyinTranscribeRewriteDto extends SourceVideoUrlDto {
-  /** 与任务改写风格一致；默认 conservative */
+  /** 涓庝换鍔℃敼鍐欓鏍间竴鑷达紱榛樿 conservative */
   rewriteStyle?: RewriteStyle;
 }
 
@@ -80,11 +70,11 @@ class DouyinHomepageLearnDto {
 }
 
 class SourceVideoFileDto {
-  /** 支持抖音整段分享文案或纯 URL */
+  /** 鏀寔鎶栭煶鏁存鍒嗕韩鏂囨鎴栫函 URL */
   sourceVideoUrl!: string;
   /**
-   * 默认 true。为 false 时仅下载并保存到本机目录，不调用 ASR；
-   * 前端可随后调用 `transcribe-saved-video` 以展示分阶段进度。
+   * 榛樿 true銆備负 false 鏃朵粎涓嬭浇骞朵繚瀛樺埌鏈満鐩綍锛屼笉璋冪敤 ASR锛?
+   * 鍓嶇鍙殢鍚庤皟鐢?`transcribe-saved-video` 浠ュ睍绀哄垎闃舵杩涘害銆?
    */
   transcribe?: boolean;
 }
@@ -118,6 +108,57 @@ class SubtitleWorkflowPreviewDto extends LipSyncPreviewDto {
   subtitleTemplateId?: string;
   previewSeconds?: number;
   subtitlesEnabled?: boolean;
+  subtitleVisualStyle?: {
+    layout?: {
+      xPct: number;
+      yPct: number;
+      anchor?:
+        | 'center'
+        | 'top-center'
+        | 'bottom-center'
+        | 'top-left'
+        | 'top-right'
+        | 'bottom-left'
+        | 'bottom-right'
+        | 'left-center'
+        | 'right-center';
+      safeAreaPct?: number;
+      scale?: number;
+      maxWidthPct?: number;
+    };
+    normalColor?: string;
+    highlightColor?: string;
+    strokeColor?: string;
+    backgroundColor?: string;
+    fontSize?: number;
+    strokeWidth?: number;
+    fontWeight?: number;
+    lineHeight?: number;
+  };
+  subtitles?: Array<{
+    id?: string;
+    startTime: number;
+    endTime: number;
+    text: string;
+    highlightRanges?: Array<{
+      start: number;
+      end: number;
+      color?: string;
+      fontWeight?: number;
+      fontSizeScale?: number;
+    }>;
+  }>;
+  highlights?: Array<{
+    id?: string;
+    start: number;
+    end: number;
+    text?: string;
+    style?: {
+      color?: string;
+      fontWeight?: number;
+      fontSizeScale?: number;
+    };
+  }>;
   voiceLanguage?: string;
   voiceEmotion?: string;
   voiceEmotionIntensity?: number;
@@ -133,6 +174,9 @@ class SubtitleWorkflowFinalizeDto {
 class GenerateTtsAudioDto extends VoiceTuningDto {
   text!: string;
   voiceResourceId?: string;
+  projectId?: string;
+  idempotencyKey?: string;
+  forceRetry?: boolean;
 }
 
 class GenerateLipSyncVideoDto {
@@ -167,7 +211,7 @@ function getLipSyncVideoMaxBytes(): number {
   return 500 * 1024 * 1024;
 }
 
-/** 默认保存到项目内 backend/data/download-video；可用 VIDEO_SAVE_DIR 覆盖。 */
+/** 榛樿淇濆瓨鍒伴」鐩唴 backend/data/download-video锛涘彲鐢?VIDEO_SAVE_DIR 瑕嗙洊銆?*/
 function getVideoSaveDir(config: ConfigService): string {
   return resolveConfiguredDir(
     config.get<string>('VIDEO_SAVE_DIR'),
@@ -235,38 +279,6 @@ const uploadAudioStorage = diskStorage({
   },
 });
 
-function readFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-  return null;
-}
-
-function clampNumber(value: unknown, min: number, max: number): number | null {
-  const parsed = readFiniteNumber(value);
-  if (parsed === null) return null;
-  return Math.min(max, Math.max(min, Number(parsed.toFixed(2))));
-}
-
-function cleanShortText(value: unknown, maxLength = 32): string | null {
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  return trimmed ? trimmed.slice(0, maxLength) : null;
-}
-
-function buildVoiceTuning(body: VoiceTuningDto): VoiceTuningOptions {
-  return {
-    language: cleanShortText(body.voiceLanguage),
-    emotion: cleanShortText(body.voiceEmotion),
-    emotionIntensity: clampNumber(body.voiceEmotionIntensity, 0.6, 1.5),
-    speechRate: clampNumber(body.voiceRate, 0.5, 1.5),
-    volume: clampNumber(body.voiceVolume, 0.5, 1.5),
-    pitch: clampNumber(body.voicePitch, 0.5, 2),
-  };
-}
-
 function getLipSyncPublicMediaDir(
   config: ConfigService,
   kind: 'videos' | 'audios',
@@ -294,7 +306,7 @@ function toSingleErrorMessage(e: unknown): string {
     if (typeof r === 'string') return r;
     if (r && typeof r === 'object' && 'message' in r) {
       const m = (r as { message: string | string[] }).message;
-      return Array.isArray(m) ? m.join('；') : String(m);
+      return Array.isArray(m) ? m.join('锛?') : String(m);
     }
   }
   return e instanceof Error ? e.message : String(e);
@@ -319,21 +331,21 @@ function guessMimeFromFilename(filename: string): string {
   return map[ext] ?? 'application/octet-stream';
 }
 
-/** 仅允许单层文件名，防路径穿越 */
+/** 浠呭厑璁稿崟灞傛枃浠跺悕锛岄槻璺緞绌胯秺 */
 function assertSafeSavedBasename(name: string): string {
   const t = name.trim();
   if (!t) {
-    throw new BadRequestException('fileName 不能为空');
+    throw new BadRequestException('fileName 涓嶈兘涓虹┖');
   }
   const base = path.basename(t);
   if (base !== t || /[\\/]/.test(t) || t.includes('..')) {
-    throw new BadRequestException('只允许保存目录下的文件名，不能包含路径');
+    throw new BadRequestException('鍙厑璁镐繚瀛樼洰褰曚笅鐨勬枃浠跺悕锛屼笉鑳藉寘鍚矾寰?');
   }
   return base;
 }
 
 /**
- * 工具类接口：不创建任务即可预览「解析后的口播文案」（当前为 ASR 占位实现）
+ * 宸ュ叿绫绘帴鍙ｏ細涓嶅垱寤轰换鍔″嵆鍙瑙堛€岃В鏋愬悗鐨勫彛鎾枃妗堛€嶏紙褰撳墠涓?ASR 鍗犱綅瀹炵幇锛?
  */
 @Controller('v1/tools')
 export class ToolsController {
@@ -345,12 +357,9 @@ export class ToolsController {
     private readonly ffmpegAudio: FfmpegAudioService,
     private readonly transcriptStore: TranscriptStore,
     private readonly rewriteAi: RewriteAiService,
-    private readonly videoGenerateLlm: VideoGenerateLlmService,
     private readonly digitalHumanImage: DigitalHumanImageService,
     private readonly douyinBenchmark: DouyinBenchmarkService,
     private readonly digitalHumanPersistence: DigitalHumanPersistenceService,
-    private readonly seedanceI2v: SeedanceI2vService,
-    private readonly arkI2vVideo: ArkI2vVideoService,
     private readonly aliLipSync: AliLipSyncService,
     private readonly speechAi: SpeechAiService,
     private readonly resources: ResourcesService,
@@ -358,126 +367,8 @@ export class ToolsController {
     private readonly recentExtractions: RecentExtractionService,
     private readonly voicePreviewTasks: VoicePreviewTaskService,
     private readonly savedVideos: SavedVideoService,
+    private readonly stagedWorkflow: StagedWorkflowService,
   ) {}
-
-  /**
-   * 第二步「生成视频」：大模型优化口播稿；若配置 ARK_API_KEY 且传入参考图，则走火山方舟图生视频并轮询成片，否则回退演示 MP4。
-   */
-  @Post('generate-video-preview')
-  async generateVideoPreview(
-    @Body()
-    body: {
-      script?: string;
-      sourceVideoUrl?: string;
-      /** 公网可访问的参考图 URL */
-      imageUrl?: string;
-      /** 数字人参考图 data URL（推荐，与专属数字人联调） */
-      imageDataUrl?: string;
-    },
-  ): Promise<{
-    optimizedScript: string;
-    llmUsed: boolean;
-    estimatedTotalSeconds: number;
-    videoUrl: string | null;
-    hint: string;
-  }> {
-    const script = body.script?.trim() ?? '';
-    if (script.length < 2) {
-      throw new BadRequestException('口播文案过短或为空');
-    }
-    const max = 50_000;
-    if (script.length > max) {
-      throw new BadRequestException(`口播文案过长（>${max}）`);
-    }
-
-    const { text, usedLlm } =
-      await this.videoGenerateLlm.optimizeScriptForVideo(
-        script,
-        body.sourceVideoUrl?.trim(),
-      );
-
-    const promptSuffix = '  --duration 12 --camerafixed false --watermark true';
-    /** 方舟图生视频默认提示：纯口播 + 文案驱动音频；允许手势，禁止物品/商品展示类画面 */
-    const i2vAudioFromScriptPrefix =
-      '【口播成片】纯口播视频：请严格依据下方口播文案生成口播音频与人像口型（勿编造或大幅偏离台词）。允许自然手势与表情；不要出现手持或展示物品、商品特写、陈列道具、桌面好物等展示类元素。口播全文如下：\n\n';
-    const fullPrompt = `${i2vAudioFromScriptPrefix}${text}${promptSuffix}`;
-
-    if (this.arkI2vVideo.isConfigured()) {
-      const imageRef = body.imageDataUrl?.trim() || body.imageUrl?.trim() || '';
-      if (!imageRef) {
-        throw new BadRequestException(
-          '已配置火山方舟图生视频：请提供 imageDataUrl 或 imageUrl 作为首帧参考图（首页请使用当前数字人形象）。',
-        );
-      }
-
-      const created = await this.arkI2vVideo.createTask({
-        prompt: fullPrompt,
-        imageUrl: imageRef,
-      });
-      if (created.status < 200 || created.status >= 300) {
-        throw new BadRequestException(
-          `方舟创建图生视频任务失败：HTTP ${created.status} ${JSON.stringify(created.data).slice(0, 800)}`,
-        );
-      }
-      const taskId = this.arkI2vVideo.extractTaskIdFromCreateResponse(
-        created.data,
-      );
-      if (!taskId) {
-        throw new BadRequestException(
-          `方舟未返回任务 id：${JSON.stringify(created.data).slice(0, 600)}`,
-        );
-      }
-
-      const videoUrl = await this.arkI2vVideo.pollUntilVideoUrl(taskId);
-
-      return {
-        optimizedScript: text,
-        llmUsed: usedLlm,
-        estimatedTotalSeconds: Math.min(
-          600,
-          this.videoGenerateLlm.estimateDurationSeconds(script.length) + 120,
-        ),
-        videoUrl,
-        hint: '成片由火山方舟图生视频生成，可直接预览；正式任务仍可通过下方「创建任务」继续。',
-      };
-    }
-
-    const customDemo = this.config
-      .get<string>('GENERATE_VIDEO_DEMO_MP4_URL')
-      ?.trim();
-    const videoUrl =
-      customDemo === 'none' || customDemo === 'off'
-        ? null
-        : customDemo || 'https://www.w3schools.com/html/mov_bbb.mp4';
-
-    return {
-      optimizedScript: text,
-      llmUsed: usedLlm,
-      estimatedTotalSeconds: this.videoGenerateLlm.estimateDurationSeconds(
-        script.length,
-      ),
-      videoUrl,
-      hint: '未配置 ARK_API_KEY 时使用演示成片；配置后可使用火山方舟图生视频生成真实预览。',
-    };
-  }
-
-  /**
-   * jiekou Seedance 1.5 Pro 图生视频（异步）：参数与官方 curl 一致，详见 `SeedanceI2vService`。
-   * 需配置 SEEDANCE_I2V_API_KEY 或 JIEKOU_API_KEY；返回值为网关 JSON（含任务 id 等以文档为准）。
-   */
-  @Post('seedance-i2v-async')
-  async seedanceI2vAsync(@Body() body: SeedanceI2vSubmitBody) {
-    return this.seedanceI2v.submitAsync(body);
-  }
-
-  /**
-   * 火山方舟图生视频：创建异步任务（POST .../contents/generations/tasks）。
-   * 需配置 ARK_API_KEY（或单独 ARK_I2V_API_KEY）；可选 ARK_BASE_URL、ARK_I2V_MODEL。
-   */
-  @Post('ark-i2v-task')
-  async arkI2vTask(@Body() body: ArkI2vTaskSubmitBody) {
-    return this.arkI2vVideo.createTask(body);
-  }
 
   @Post('upload-video')
   @UseInterceptors(
@@ -490,7 +381,7 @@ export class ToolsController {
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     if (!file?.path || !file.size) {
-      throw new BadRequestException('请上传视频文件（multipart 字段名：file）');
+      throw new BadRequestException('璇蜂笂浼犺棰戞枃浠讹紙multipart 瀛楁鍚嶏細file锛?');
     }
     const mime = (file.mimetype || '').toLowerCase();
     const name = file.originalname || file.filename || '';
@@ -499,7 +390,7 @@ export class ToolsController {
       !/\.(mp4|mov|webm|m4v|mkv)$/i.test(name)
     ) {
       await fs.rm(file.path, { force: true }).catch(() => undefined);
-      throw new BadRequestException('仅支持上传视频文件');
+      throw new BadRequestException('浠呮敮鎸佷笂浼犺棰戞枃浠?');
     }
     return {
       success: true,
@@ -520,7 +411,7 @@ export class ToolsController {
     @UploadedFile() file: Express.Multer.File | undefined,
   ) {
     if (!file?.path || !file.size) {
-      throw new BadRequestException('请上传音频文件（multipart 字段名：file）');
+      throw new BadRequestException('璇蜂笂浼犻煶棰戞枃浠讹紙multipart 瀛楁鍚嶏細file锛?');
     }
     const mime = (file.mimetype || '').toLowerCase();
     const name = file.originalname || file.filename || '';
@@ -529,7 +420,7 @@ export class ToolsController {
       !/\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(name)
     ) {
       await fs.rm(file.path, { force: true }).catch(() => undefined);
-      throw new BadRequestException('仅支持上传音频文件');
+      throw new BadRequestException('浠呮敮鎸佷笂浼犻煶棰戞枃浠?');
     }
     const duration = await this.ffmpegAudio.probeFileDurationSeconds(file.path);
     return {
@@ -548,42 +439,25 @@ export class ToolsController {
   ) {
     const text = body.text?.trim() ?? '';
     if (text.length < 1) {
-      throw new BadRequestException('text 不能为空');
+      throw new BadRequestException('text 涓嶈兘涓虹┖');
     }
-
-    const voice = body.voiceResourceId?.trim()
-      ? await this.resources.getVoice(req.userId!, body.voiceResourceId.trim())
-      : null;
-    if (voice?.provider === 'local-upload') {
-      throw new BadRequestException(
-        '当前音色未完成模型克隆，不能用于文本转语音，请重新克隆。',
-      );
-    }
-
-    const speech = await this.speechAi.synthesizeAudio({
-      text,
-      voiceStyleId: voice?.id || 'default',
-      voiceName: voice?.name,
-      provider: voice?.provider,
-      providerVoice: voice?.providerVoice,
-      providerModel: voice?.providerModel,
-      voiceTuning: buildVoiceTuning(body),
-    });
-    const ext = this.audioExtensionForMime(speech.mimeType);
-    const fileName = uploadFileName('tts', `tts${ext}`, ext);
-    const audioPath = path.join(getUploadDir('audio'), fileName);
-    await fs.mkdir(path.dirname(audioPath), { recursive: true });
-    await fs.writeFile(audioPath, speech.buffer);
-    const duration = await this.ffmpegAudio.probeFileDurationSeconds(audioPath);
+    const asset = await this.stagedWorkflow.createAudioAssetFromTts(
+      req.userId!,
+      this.mergeLegacyTtsIdempotencyKey(
+        req,
+        body as unknown as Record<string, unknown>,
+      ),
+    );
     return {
       success: true,
-      audioUrl: this.publicUploadUrl('audio', fileName),
-      audioPath,
-      fileName,
-      duration: duration ? Number(duration.toFixed(2)) : null,
-      providerVoice: speech.voice,
-      styleApplied: Boolean(speech.styleApplied),
-      hint: speech.styleHint,
+      audioAssetId: asset.audioAssetId,
+      audioUrl: asset.audioUrl,
+      audioPath: null,
+      fileName: this.fileNameFromPublicUploadUrl(asset.audioUrl),
+      duration: asset.durationSeconds,
+      providerVoice: null,
+      styleApplied: Boolean(body.voiceRate && Number(body.voiceRate) !== 1),
+      hint: 'Use /api/v1/audio-assets/generate as the canonical TTS API.',
     };
   }
 
@@ -595,15 +469,15 @@ export class ToolsController {
       if (!videoRef) {
         return {
           success: false,
-          message: '文件不存在',
-          path: 'videoPath/videoUrl 为空',
+          message: '鏂囦欢涓嶅瓨鍦?',
+          path: 'videoPath/videoUrl 涓虹┖',
         };
       }
       if (!audioRef) {
         return {
           success: false,
-          message: '文件不存在',
-          path: 'audioPath/audioUrl 为空',
+          message: '鏂囦欢涓嶅瓨鍦?',
+          path: 'audioPath/audioUrl 涓虹┖',
         };
       }
 
@@ -619,8 +493,8 @@ export class ToolsController {
       if (!result.videoUrl?.trim()) {
         return {
           success: false,
-          message: 'VideoReTalk 调用失败',
-          error: 'VideoReTalk 未返回输出视频地址',
+          message: 'VideoReTalk 璋冪敤澶辫触',
+          error: 'VideoReTalk 鏈繑鍥炶緭鍑鸿棰戝湴鍧€',
         };
       }
       const output = await this.saveOutputVideoFromUrl(result.videoUrl);
@@ -636,20 +510,20 @@ export class ToolsController {
       if (error instanceof LocalMediaFileNotFoundError) {
         return {
           success: false,
-          message: '文件不存在',
+          message: '鏂囦欢涓嶅瓨鍦?',
           path: error.checkedPath,
         };
       }
       return {
         success: false,
-        message: 'VideoReTalk 调用失败',
+        message: 'VideoReTalk 璋冪敤澶辫触',
         error: toSingleErrorMessage(error),
       };
     }
   }
 
   /**
-   * 视频对口型：前端上传单个视频，后端代理调用阿里接口并返回处理后视频 URL。
+   * 瑙嗛瀵瑰彛鍨嬶細鍓嶇涓婁紶鍗曚釜瑙嗛锛屽悗绔唬鐞嗚皟鐢ㄩ樋閲屾帴鍙ｅ苟杩斿洖澶勭悊鍚庤棰?URL銆?
    */
   @Post('ali-lip-sync')
   @UseInterceptors(
@@ -663,7 +537,7 @@ export class ToolsController {
   ) {
     if (!file?.buffer?.length) {
       throw new BadRequestException(
-        '请上传视频文件（multipart 字段名：video）',
+        '璇蜂笂浼犺棰戞枃浠讹紙multipart 瀛楁鍚嶏細video锛?',
       );
     }
 
@@ -673,7 +547,7 @@ export class ToolsController {
       !mime.startsWith('video/') &&
       !/\.(mp4|mov|webm|m4v|mkv)$/i.test(name)
     ) {
-      throw new BadRequestException('仅支持上传视频文件');
+      throw new BadRequestException('浠呮敮鎸佷笂浼犺棰戞枃浠?');
     }
 
     const durationSeconds =
@@ -682,10 +556,10 @@ export class ToolsController {
         : undefined;
     if (durationSeconds !== undefined) {
       if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
-        throw new BadRequestException('视频时长无效');
+        throw new BadRequestException('瑙嗛鏃堕暱鏃犳晥');
       }
       if (durationSeconds > LIP_SYNC_MAX_DURATION_SECONDS) {
-        throw new BadRequestException('视频长度不能超过 5 分钟');
+        throw new BadRequestException('瑙嗛闀垮害涓嶈兘瓒呰繃 5 鍒嗛挓');
       }
     }
 
@@ -701,7 +575,7 @@ export class ToolsController {
           fallback: true,
           reason: 'lip-sync-api-unconfigured',
         },
-        hint: '当前环境未配置对口型 API，已直接返回上传视频用于流程联调。',
+        hint: '褰撳墠鐜鏈厤缃鍙ｅ瀷 API锛屽凡鐩存帴杩斿洖涓婁紶瑙嗛鐢ㄤ簬娴佺▼鑱旇皟銆?',
       };
     }
 
@@ -720,13 +594,13 @@ export class ToolsController {
   ) {
     const script = body.script?.trim() ?? '';
     if (script.length < 2) {
-      throw new BadRequestException('口播文案过短或为空');
+      throw new BadRequestException('鍙ｆ挱鏂囨杩囩煭鎴栦负绌?');
     }
     if (!body.avatarResourceId?.trim()) {
-      throw new BadRequestException('avatarResourceId 不能为空');
+      throw new BadRequestException('avatarResourceId 涓嶈兘涓虹┖');
     }
     if (!body.voiceResourceId?.trim()) {
-      throw new BadRequestException('voiceResourceId 不能为空');
+      throw new BadRequestException('voiceResourceId 涓嶈兘涓虹┖');
     }
 
     const userId = req.userId!;
@@ -735,7 +609,7 @@ export class ToolsController {
       this.resources.getVoice(userId, body.voiceResourceId.trim()),
     ]);
     if (!avatar.originalVideoUrl?.trim()) {
-      throw new BadRequestException('该数字人资源未配置原始视频');
+      throw new BadRequestException('璇ユ暟瀛椾汉璧勬簮鏈厤缃師濮嬭棰?');
     }
 
     const videoMedia = await this.readVideoFromSourceRef(
@@ -758,13 +632,10 @@ export class ToolsController {
         providerVoice: voice.providerVoice,
         providerModel: voice.providerModel,
       });
-      hintParts.push(`已用「${voice.name}」生成配音音轨。`);
+      hintParts.push(`TTS generated with voice ${voice.name}.`);
     } catch (e) {
-      hintParts.push(
-        `当前环境未走通真实 TTS（${toSingleErrorMessage(e)}），已回退为原始出镜视频，便于先联调整体流程。`,
-      );
       throw new BadRequestException(
-        `TTS 音频生成失败，无法进入 VideoReTalk：${toSingleErrorMessage(e)}`,
+        `TTS generation failed: ${toSingleErrorMessage(e)}`,
       );
     }
 
@@ -779,13 +650,10 @@ export class ToolsController {
           originalname: `tts${this.audioExtensionForMime(speech.mimeType)}`,
         },
       });
-      hintParts.push(`已把配音写入「${avatar.name}」的原始视频。`);
+      hintParts.push(`Audio replaced for avatar ${avatar.name}.`);
     } catch (e) {
       hintParts.push(
-        `音轨替换失败（${toSingleErrorMessage(e)}），已回退为原始出镜视频。`,
-      );
-      hintParts.push(
-        '本地换音轨预览失败不阻断 VideoReTalk，将继续使用原视频和 TTS 音频发起对口型。',
+        `Audio replacement failed: ${toSingleErrorMessage(e)}; continue lip-sync.`,
       );
     }
 
@@ -812,17 +680,14 @@ export class ToolsController {
         videoUrl: result.videoUrl,
         hint:
           result.hint ||
-          `${hintParts.join(' ')} 已使用「${voice.name}」驱动「${avatar.name}」生成对口型预览。`,
+          `${hintParts.join(' ')} Lip-sync preview generated for ${avatar.name}.`,
         providerResponse: result.providerResponse,
         fallback: false,
         lipSyncApplied: true,
       };
     } catch (e) {
-      hintParts.push(
-        `对口型接口调用失败（${toSingleErrorMessage(e)}），已回退为换音轨预览。`,
-      );
       throw new BadRequestException(
-        `VideoReTalk 对口型失败：${toSingleErrorMessage(e)}`,
+        `VideoReTalk lip-sync failed: ${toSingleErrorMessage(e)}`,
       );
     }
   }
@@ -837,7 +702,7 @@ export class ToolsController {
     const task = this.voicePreviewTasks.createTask(req.userId!, {
       script: body.script,
       voiceResourceId: body.voiceResourceId,
-      voiceTuning: buildVoiceTuning(body),
+      voiceTuning: normalizeVoiceTuning(body),
     });
     return {
       ...task,
@@ -876,7 +741,7 @@ export class ToolsController {
     @Body() body: SubtitleWorkflowPreviewDto,
   ) {
     if (body.subtitlesEnabled !== false && !body.subtitleTemplateId?.trim()) {
-      throw new BadRequestException('subtitleTemplateId 不能为空');
+      throw new BadRequestException('subtitleTemplateId 涓嶈兘涓虹┖');
     }
     return this.subtitleWorkflow.createPreview(req.userId!, {
       script: body.script,
@@ -885,7 +750,10 @@ export class ToolsController {
       subtitleTemplateId: body.subtitleTemplateId,
       subtitlesEnabled: body.subtitlesEnabled,
       previewSeconds: body.previewSeconds,
-      voiceTuning: buildVoiceTuning(body),
+      subtitleVisualStyle: body.subtitleVisualStyle,
+      subtitles: body.subtitles,
+      highlights: body.highlights,
+      voiceTuning: normalizeVoiceTuning(body),
     });
   }
 
@@ -905,7 +773,7 @@ export class ToolsController {
   }
 
   /**
-   * 当前用户是否已有数字人模板（每人最多 1 个；再次生成会覆盖）。
+   * 褰撳墠鐢ㄦ埛鏄惁宸叉湁鏁板瓧浜烘ā鏉匡紙姣忎汉鏈€澶?1 涓紱鍐嶆鐢熸垚浼氳鐩栵級銆?
    */
   @Get('digital-human-template')
   async digitalHumanTemplate(@Req() req: Request) {
@@ -919,13 +787,13 @@ export class ToolsController {
       styleId: row.style_id,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
-      /** 需带 Authorization 的 GET，前端请用 axios blob 拉取后 createObjectURL */
+      /** 闇€甯?Authorization 鐨?GET锛屽墠绔鐢?axios blob 鎷夊彇鍚?createObjectURL */
       imageFetchPath: 'v1/tools/digital-human-image',
     };
   }
 
   /**
-   * 流式返回当前用户已保存的数字人输出图（本地磁盘）。
+   * 娴佸紡杩斿洖褰撳墠鐢ㄦ埛宸蹭繚瀛樼殑鏁板瓧浜鸿緭鍑哄浘锛堟湰鍦扮鐩橈級銆?
    */
   @Get('digital-human-image')
   async digitalHumanImageFile(
@@ -935,11 +803,11 @@ export class ToolsController {
     const userId = req.userId!;
     const row = await this.digitalHumanPersistence.findByUserId(userId);
     if (!row) {
-      throw new NotFoundException('暂无已保存的数字人形象');
+      throw new NotFoundException('鏆傛棤宸蹭繚瀛樼殑鏁板瓧浜哄舰璞?');
     }
     const abs = this.digitalHumanPersistence.absolutePathForOutput(row);
     if (!existsSync(abs)) {
-      throw new NotFoundException('数字人形象文件不存在或已被清理');
+      throw new NotFoundException('鏁板瓧浜哄舰璞℃枃浠朵笉瀛樺湪鎴栧凡琚竻鐞?');
     }
     const ext = path.extname(abs).toLowerCase();
     const mime = ext === '.png' ? 'image/png' : 'image/jpeg';
@@ -949,7 +817,7 @@ export class ToolsController {
   }
 
   /**
-   * 删除当前用户的数字人模板与本地文件（每人最多 1 个）。
+   * 鍒犻櫎褰撳墠鐢ㄦ埛鐨勬暟瀛椾汉妯℃澘涓庢湰鍦版枃浠讹紙姣忎汉鏈€澶?1 涓級銆?
    */
   @Delete('digital-human-template')
   async deleteDigitalHumanTemplate(@Req() req: Request) {
@@ -959,8 +827,8 @@ export class ToolsController {
   }
 
   /**
-   * 自拍照 + 风格 → 调用配置的大模型接口（JSON：content、image_base64、mime_type、style_id）。
-   * multipart 字段：selfie（文件）、styleId（与 digital-human-styles 返回的 id 一致）。
+   * 鑷媿鐓?+ 椋庢牸 鈫?璋冪敤閰嶇疆鐨勫ぇ妯″瀷鎺ュ彛锛圝SON锛歝ontent銆乮mage_base64銆乵ime_type銆乻tyle_id锛夈€?
+   * multipart 瀛楁锛歴elfie锛堟枃浠讹級銆乻tyleId锛堜笌 digital-human-styles 杩斿洖鐨?id 涓€鑷达級銆?
    */
   @Post('digital-human-generate')
   @UseInterceptors(
@@ -972,14 +840,14 @@ export class ToolsController {
     @Req() req: Request,
   ) {
     if (!file?.buffer?.length) {
-      throw new BadRequestException('请上传自拍照');
+      throw new BadRequestException('璇蜂笂浼犺嚜鎷嶇収');
     }
     const mime = file.mimetype;
     if (mime !== 'image/jpeg' && mime !== 'image/png') {
-      throw new BadRequestException('自拍照仅支持 JPG/PNG');
+      throw new BadRequestException('鑷媿鐓т粎鏀寔 JPG/PNG');
     }
     if (!styleId?.trim()) {
-      throw new BadRequestException('请选择数字人风格（styleId）');
+      throw new BadRequestException('璇烽€夋嫨鏁板瓧浜洪鏍硷紙styleId锛?');
     }
 
     const userId = req.userId!;
@@ -1015,13 +883,13 @@ export class ToolsController {
       ...result,
       persisted: {
         saved: true,
-        /** 相对 http baseURL，需 Bearer；展示请 GET blob */
+        /** 鐩稿 http baseURL锛岄渶 Bearer锛涘睍绀鸿 GET blob */
         imageFetchPath: 'v1/tools/digital-human-image' as const,
       },
     };
   }
 
-  /** 下载媒体 → FFmpeg 视频则抽 16k 单声道 WAV → 送 ASR API */
+  /** 涓嬭浇濯掍綋 鈫?FFmpeg 瑙嗛鍒欐娊 16k 鍗曞０閬?WAV 鈫?閫?ASR API */
   private async transcribeAfterDownload(
     media: TranscribeMediaInput,
     opts?: { persistedVideoPath?: string },
@@ -1034,7 +902,7 @@ export class ToolsController {
   }
 
   /**
-   * 仅从本地磁盘上的已保存文件解析口播（FFmpeg 抽轨 → ASR），不依赖内存中的下载 buffer。
+   * 浠呬粠鏈湴纾佺洏涓婄殑宸蹭繚瀛樻枃浠惰В鏋愬彛鎾紙FFmpeg 鎶借建 鈫?ASR锛夛紝涓嶄緷璧栧唴瀛樹腑鐨勪笅杞?buffer銆?
    */
   private async transcribeFromDisk(
     absPath: string,
@@ -1051,7 +919,7 @@ export class ToolsController {
   }
 
   /**
-   * 转写偶发失败（网络/冷启动）时静默重试一次，不改变下载与落盘逻辑。
+   * 杞啓鍋跺彂澶辫触锛堢綉缁?鍐峰惎鍔級鏃堕潤榛橀噸璇曚竴娆★紝涓嶆敼鍙樹笅杞戒笌钀界洏閫昏緫銆?
    */
   private async transcribeFromDiskWithRetry(
     absPath: string,
@@ -1073,7 +941,7 @@ export class ToolsController {
     const full = path.resolve(path.join(dir, base));
     const rel = path.relative(dir, full);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw new BadRequestException('非法文件路径');
+      throw new BadRequestException('闈炴硶鏂囦欢璺緞');
     }
     return full;
   }
@@ -1085,13 +953,13 @@ export class ToolsController {
     const basename = path.basename(ref);
     if (!basename || /[\\/]/.test(basename) || basename.includes('..')) {
       throw new BadRequestException(
-        '本地视频仅支持 VIDEO_SAVE_DIR 目录下的文件名',
+        '鏈湴瑙嗛浠呮敮鎸?VIDEO_SAVE_DIR 鐩綍涓嬬殑鏂囦欢鍚?',
       );
     }
     const full = path.resolve(path.join(dir, basename));
     const rel = path.relative(dir, full);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw new BadRequestException('本地视频路径不合法');
+      throw new BadRequestException('鏈湴瑙嗛璺緞涓嶅悎娉?');
     }
     return full;
   }
@@ -1102,7 +970,7 @@ export class ToolsController {
     const full = path.resolve(path.join(dir, base));
     const rel = path.relative(dir, full);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw new BadRequestException('非法预览文件路径');
+      throw new BadRequestException('闈炴硶棰勮鏂囦欢璺緞');
     }
     return full;
   }
@@ -1113,7 +981,7 @@ export class ToolsController {
     const full = path.resolve(path.join(dir, base));
     const rel = path.relative(dir, full);
     if (rel.startsWith('..') || path.isAbsolute(rel)) {
-      throw new BadRequestException('非法预览音频路径');
+      throw new BadRequestException('闈炴硶棰勮闊抽璺緞');
     }
     return full;
   }
@@ -1133,6 +1001,33 @@ export class ToolsController {
       throw new BadRequestException('invalid lip-sync public media path');
     }
     return { full, kind };
+  }
+
+  private mergeLegacyTtsIdempotencyKey(
+    req: Request,
+    body: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const headerKey = req.get('idempotency-key')?.trim();
+    const bodyKey =
+      typeof body.idempotencyKey === 'string' ? body.idempotencyKey.trim() : '';
+    if (!headerKey || bodyKey) return body;
+    return {
+      ...body,
+      idempotencyKey: headerKey,
+    };
+  }
+
+  private fileNameFromPublicUploadUrl(url?: string | null): string | null {
+    if (!url) return null;
+    const value = url.trim();
+    if (!value) return null;
+    try {
+      const parsed = new URL(value, 'http://localhost');
+      const base = path.basename(parsed.pathname || '');
+      return base || null;
+    } catch {
+      return null;
+    }
   }
 
   private publicUploadUrl(
@@ -1211,7 +1106,7 @@ export class ToolsController {
     }
     const response = await fetch(ref);
     if (!response.ok) {
-      throw new Error(`下载媒体文件失败：HTTP ${response.status}`);
+      throw new Error(`涓嬭浇濯掍綋鏂囦欢澶辫触锛欻TTP ${response.status}`);
     }
     const urlPath = new URL(response.url || ref).pathname;
     const filename =
@@ -1231,7 +1126,7 @@ export class ToolsController {
   }> {
     const response = await fetch(videoUrl);
     if (!response.ok) {
-      throw new Error(`下载 VideoReTalk 输出视频失败：HTTP ${response.status}`);
+      throw new Error(`涓嬭浇 VideoReTalk 杈撳嚭瑙嗛澶辫触锛欻TTP ${response.status}`);
     }
     const sourceName =
       path.basename(new URL(response.url || videoUrl).pathname) || 'output.mp4';
@@ -1284,7 +1179,7 @@ export class ToolsController {
         };
       } catch {
         throw new NotFoundException(
-          `未找到本地视频文件：${path.basename(local)}`,
+          `鏈壘鍒版湰鍦拌棰戞枃浠讹細${path.basename(local)}`,
         );
       }
     }
@@ -1292,7 +1187,7 @@ export class ToolsController {
     const normalized = normalizeSourceVideoUrl(sourceRef) || sourceRef.trim();
     if (!/^https?:\/\//i.test(normalized)) {
       throw new BadRequestException(
-        '视频资源需填写可访问的视频 URL，或 VIDEO_SAVE_DIR 下的文件名',
+        '瑙嗛璧勬簮闇€濉啓鍙闂殑瑙嗛 URL锛屾垨 VIDEO_SAVE_DIR 涓嬬殑鏂囦欢鍚?',
       );
     }
 
@@ -1301,7 +1196,7 @@ export class ToolsController {
         await this.videoMediaDownload.tryDownloadForTranscription(normalized);
       if (!dl.ok) {
         throw new BadRequestException(
-          '抖音视频下载失败，请先确认 Cookie 与链接有效',
+          '鎶栭煶瑙嗛涓嬭浇澶辫触锛岃鍏堢‘璁?Cookie 涓庨摼鎺ユ湁鏁?',
         );
       }
       return dl.media;
@@ -1320,11 +1215,11 @@ export class ToolsController {
         signal: controller.signal,
       });
       if (!res.ok) {
-        throw new BadRequestException(`视频下载失败：HTTP ${res.status}`);
+        throw new BadRequestException(`瑙嗛涓嬭浇澶辫触锛欻TTP ${res.status}`);
       }
       const buffer = Buffer.from(await res.arrayBuffer());
       if (!buffer.length || buffer.length > maxBytes) {
-        throw new BadRequestException('视频文件为空或超过上传上限');
+        throw new BadRequestException('瑙嗛鏂囦欢涓虹┖鎴栬秴杩囦笂浼犱笂闄?');
       }
       const filename = sanitizeFilenameForDisk(
         path.basename(new URL(res.url || normalized).pathname) ||
@@ -1342,8 +1237,8 @@ export class ToolsController {
   }
 
   /**
-   * 数字人形象：当前进程是否读到 ARK / Seedream / 自建 URL（不返回密钥）。
-   * 排障：curl http://127.0.0.1:8080/api/v1/tools/digital-human-env
+   * 鏁板瓧浜哄舰璞★細褰撳墠杩涚▼鏄惁璇诲埌 ARK / Seedream / 鑷缓 URL锛堜笉杩斿洖瀵嗛挜锛夈€?
+   * 鎺掗殰锛歝url http://127.0.0.1:8080/api/v1/tools/digital-human-env
    */
   @Public()
   @Get('digital-human-env')
@@ -1356,11 +1251,11 @@ export class ToolsController {
       arkConfigured: Boolean(ark),
       seedreamConfigured: Boolean(seedreamUrl && seedreamKey),
       remoteConfigured: Boolean(remote),
-      /** 仅长度，便于确认是否注入成功（勿当密钥用） */
+      /** 浠呴暱搴︼紝渚夸簬纭鏄惁娉ㄥ叆鎴愬姛锛堝嬁褰撳瘑閽ョ敤锛?*/
     };
   }
 
-  /** 是否已配置 DY_DOWNLOADER_COOKIE（不返回具体值，供前端展示） */
+  /** 鏄惁宸查厤缃?DY_DOWNLOADER_COOKIE锛堜笉杩斿洖鍏蜂綋鍊硷紝渚涘墠绔睍绀猴級 */
   @Get('dy-downloader-cookie')
   dyDownloaderCookieStatus() {
     const configured = !!this.config
@@ -1394,20 +1289,20 @@ export class ToolsController {
   @Post('douyin-homepage-learn')
   async learnDouyinHomepage(@Body() body: DouyinHomepageLearnDto) {
     if (!body?.homepageUrl?.trim()) {
-      throw new BadRequestException('homepageUrl 不能为空');
+      throw new BadRequestException('homepageUrl 涓嶈兘涓虹┖');
     }
     return this.douyinBenchmark.learnHomepage(body.homepageUrl);
   }
 
-  /** 第三步：检查 ASR API 是否可达（不消耗模型推理） */
+  /** 绗笁姝ワ細妫€鏌?ASR API 鏄惁鍙揪锛堜笉娑堣€楁ā鍨嬫帹鐞嗭級 */
   @Get('asr-health')
   async asrHealth() {
     return this.transcription.checkHealth();
   }
 
   /**
-   * 口播转写全链路自检：保存目录可写、FFmpeg 可用、ASR HTTP 可达、抖音 Cookie 是否配置（不返回密钥）。
-   * 供首页在下载成功后展示「抽音轨 → ASR」前置条件。
+   * 鍙ｆ挱杞啓鍏ㄩ摼璺嚜妫€锛氫繚瀛樼洰褰曞彲鍐欍€丗Fmpeg 鍙敤銆丄SR HTTP 鍙揪銆佹姈闊?Cookie 鏄惁閰嶇疆锛堜笉杩斿洖瀵嗛挜锛夈€?
+   * 渚涢椤靛湪涓嬭浇鎴愬姛鍚庡睍绀恒€屾娊闊宠建 鈫?ASR銆嶅墠缃潯浠躲€?
    */
   @Get('transcribe-pipeline-health')
   async transcribePipelineHealth() {
@@ -1436,20 +1331,20 @@ export class ToolsController {
     };
   }
 
-  /** 取回主后端已保存的某次转写（与 POST /transcribe 返回的 transcriptId 对应） */
+  /** 鍙栧洖涓诲悗绔凡淇濆瓨鐨勬煇娆¤浆鍐欙紙涓?POST /transcribe 杩斿洖鐨?transcriptId 瀵瑰簲锛?*/
   @Get('transcripts/:transcriptId')
   getSavedTranscript(@Param('transcriptId') transcriptId: string) {
     const row = this.transcriptStore.get(transcriptId);
     if (!row) {
       throw new NotFoundException(
-        '未找到该 transcriptId，可能已过期或服务已重启',
+        '鏈壘鍒拌 transcriptId锛屽彲鑳藉凡杩囨湡鎴栨湇鍔″凡閲嶅惎',
       );
     }
     return row;
   }
 
   /**
-   * 第四步：接收上传 → ASR HTTP → 归一化 fullText/language/segments → 保存 transcript → 返回
+   * 绗洓姝ワ細鎺ユ敹涓婁紶 鈫?ASR HTTP 鈫?褰掍竴鍖?fullText/language/segments 鈫?淇濆瓨 transcript 鈫?杩斿洖
    */
   @Post('transcribe')
   @UseInterceptors(
@@ -1462,7 +1357,7 @@ export class ToolsController {
   ) {
     if (!file?.buffer?.length) {
       throw new BadRequestException(
-        '请上传音视频文件（multipart 字段名：file）',
+        '璇蜂笂浼犻煶瑙嗛鏂囦欢锛坢ultipart 瀛楁鍚嶏細file锛?',
       );
     }
     const media: TranscribeMediaInput = {
@@ -1475,32 +1370,32 @@ export class ToolsController {
   }
 
   /**
-   * 根据作品页链接… 下载字节 → ASR（与 transcribe 同一套归一化与保存）。
+   * 鏍规嵁浣滃搧椤甸摼鎺モ€?涓嬭浇瀛楄妭 鈫?ASR锛堜笌 transcribe 鍚屼竴濂楀綊涓€鍖栦笌淇濆瓨锛夈€?
    */
   /**
-   * 抖音专用流水线：dy-downloader 拉取媒体 → ASR →
-   * 拿到全文后再调用改写建议（与任务内 `suggestRewrite` 同源），便于用户直接进入「改写」心智。
+   * 鎶栭煶涓撶敤娴佹按绾匡細dy-downloader 鎷夊彇濯掍綋 鈫?ASR 鈫?
+   * 鎷垮埌鍏ㄦ枃鍚庡啀璋冪敤鏀瑰啓寤鸿锛堜笌浠诲姟鍐?`suggestRewrite` 鍚屾簮锛夛紝渚夸簬鐢ㄦ埛鐩存帴杩涘叆銆屾敼鍐欍€嶅績鏅恒€?
    */
   @Post('douyin-transcribe-rewrite')
   async douyinTranscribeRewrite(@Body() body: DouyinTranscribeRewriteDto) {
     if (!body?.sourceVideoUrl?.trim()) {
-      throw new BadRequestException('sourceVideoUrl 不能为空');
+      throw new BadRequestException('sourceVideoUrl 涓嶈兘涓虹┖');
     }
     const normalized = normalizeSourceVideoUrl(body.sourceVideoUrl);
     if (!normalized) {
       throw new BadRequestException(
-        '无法识别有效的视频链接，请粘贴含 v.douyin.com 短链或作品页链接的分享文案。',
+        '鏃犳硶璇嗗埆鏈夋晥鐨勮棰戦摼鎺ワ紝璇风矘璐村惈 v.douyin.com 鐭摼鎴栦綔鍝侀〉閾炬帴鐨勫垎浜枃妗堛€?',
       );
     }
     let host: string;
     try {
       host = new URL(normalized).hostname.toLowerCase();
     } catch {
-      throw new BadRequestException('URL 格式无效');
+      throw new BadRequestException('URL 鏍煎紡鏃犳晥');
     }
     if (!host.includes('douyin.com')) {
       throw new BadRequestException(
-        '本接口仅支持抖音作品页 / 分享链接（douyin.com）',
+        '鏈帴鍙ｄ粎鏀寔鎶栭煶浣滃搧椤?/ 鍒嗕韩閾炬帴锛坉ouyin.com锛?',
       );
     }
 
@@ -1509,11 +1404,11 @@ export class ToolsController {
     if (!dl.ok) {
       if (dl.failure === 'douyin_no_ytdlp') {
         throw new BadRequestException(
-          '未找到可用的抖音下载能力：请配置 DY_DOWNLOADER_COOKIE（仓库内 backend/DY-DOWNLOADER，npm 包 dy-downloader）。详见 backend/.env.example。',
+          '鏈壘鍒板彲鐢ㄧ殑鎶栭煶涓嬭浇鑳藉姏锛氳閰嶇疆 DY_DOWNLOADER_COOKIE锛堜粨搴撳唴 backend/DY-DOWNLOADER锛宯pm 鍖?dy-downloader锛夈€傝瑙?backend/.env.example銆?',
         );
       }
       throw new BadRequestException(
-        '抖音拉取失败：dy-downloader 未得到可用音视频。可检查 DY_DOWNLOADER_COOKIE 是否有效，并查看后端日志。',
+        '鎶栭煶鎷夊彇澶辫触锛歞y-downloader 鏈緱鍒板彲鐢ㄩ煶瑙嗛銆傚彲妫€鏌?DY_DOWNLOADER_COOKIE 鏄惁鏈夋晥锛屽苟鏌ョ湅鍚庣鏃ュ織銆?',
       );
     }
 
@@ -1535,12 +1430,12 @@ export class ToolsController {
   @Post('transcribe-url')
   async transcribeFromUrl(@Body() body: SourceVideoUrlDto) {
     if (!body?.sourceVideoUrl?.trim()) {
-      throw new BadRequestException('sourceVideoUrl 不能为空');
+      throw new BadRequestException('sourceVideoUrl 涓嶈兘涓虹┖');
     }
     const normalized = normalizeSourceVideoUrl(body.sourceVideoUrl);
     if (!normalized) {
       throw new BadRequestException(
-        '无法识别有效的视频链接，请粘贴含 v.douyin.com 短链或作品页链接的分享文案。',
+        '鏃犳硶璇嗗埆鏈夋晥鐨勮棰戦摼鎺ワ紝璇风矘璐村惈 v.douyin.com 鐭摼鎴栦綔鍝侀〉閾炬帴鐨勫垎浜枃妗堛€?',
       );
     }
     const dl =
@@ -1549,16 +1444,16 @@ export class ToolsController {
       const isDouyin = normalized.toLowerCase().includes('douyin.com');
       if (isDouyin && dl.failure === 'douyin_no_ytdlp') {
         throw new BadRequestException(
-          '抖音链接需要配置 DY_DOWNLOADER_COOKIE（dy-downloader）。见 backend/.env.example。',
+          '鎶栭煶閾炬帴闇€瑕侀厤缃?DY_DOWNLOADER_COOKIE锛坉y-downloader锛夈€傝 backend/.env.example銆?',
         );
       }
       if (isDouyin && dl.failure === 'douyin_ytdlp_failed') {
         throw new BadRequestException(
-          '抖音：未下载到可用音视频。可检查 DY_DOWNLOADER_COOKIE 是否有效；详见后端日志。',
+          '鎶栭煶锛氭湭涓嬭浇鍒板彲鐢ㄩ煶瑙嗛銆傚彲妫€鏌?DY_DOWNLOADER_COOKIE 鏄惁鏈夋晥锛涜瑙佸悗绔棩蹇椼€?',
         );
       }
       throw new BadRequestException(
-        '未能下载到可用音视频：可配置 YTDLP_BIN，或使用 yt-dlp-master（PYTHON_BIN + pip install -e）；非抖音还可依赖页面直链解析。也可使用「本地上传」转写。',
+        '鏈兘涓嬭浇鍒板彲鐢ㄩ煶瑙嗛锛氬彲閰嶇疆 YTDLP_BIN锛屾垨浣跨敤 yt-dlp-master锛圥YTHON_BIN + pip install -e锛夛紱闈炴姈闊宠繕鍙緷璧栭〉闈㈢洿閾捐В鏋愩€備篃鍙娇鐢ㄣ€屾湰鍦颁笂浼犮€嶈浆鍐欍€?',
       );
     }
     return this.transcribeAfterDownload(dl.media);
@@ -1567,12 +1462,12 @@ export class ToolsController {
   @Post('transcript-preview')
   async previewTranscript(@Body() body: SourceVideoUrlDto) {
     if (!body?.sourceVideoUrl?.trim()) {
-      throw new BadRequestException('sourceVideoUrl 不能为空');
+      throw new BadRequestException('sourceVideoUrl 涓嶈兘涓虹┖');
     }
     const normalized = normalizeSourceVideoUrl(body.sourceVideoUrl);
     if (!normalized) {
       throw new BadRequestException(
-        '无法识别有效的视频链接，请粘贴含 v.douyin.com 短链或作品页链接的分享文案。',
+        '鏃犳硶璇嗗埆鏈夋晥鐨勮棰戦摼鎺ワ紝璇风矘璐村惈 v.douyin.com 鐭摼鎴栦綔鍝侀〉閾炬帴鐨勫垎浜枃妗堛€?',
       );
     }
     return this.transcription.transcribe({
@@ -1582,13 +1477,13 @@ export class ToolsController {
   }
 
   /**
-   * 抓取视频页 HTML 并解析 Open Graph 等元信息（不调用 AI；可能被平台反爬限制）
+   * 鎶撳彇瑙嗛椤?HTML 骞惰В鏋?Open Graph 绛夊厓淇℃伅锛堜笉璋冪敤 AI锛涘彲鑳借骞冲彴鍙嶇埇闄愬埗锛?
    */
   @Post('optimize-oral-script')
   async optimizeOralScript(@Body() body: OptimizeOralScriptDto) {
     const sourceText = body?.sourceText?.trim() ?? '';
     if (!sourceText) {
-      throw new BadRequestException('sourceText 不能为空');
+      throw new BadRequestException('sourceText 涓嶈兘涓虹┖');
     }
     return this.rewriteAi.optimizeHookedOralScript({
       source: sourceText,
@@ -1599,21 +1494,21 @@ export class ToolsController {
   @Post('video-meta')
   async fetchVideoMeta(@Body() body: SourceVideoUrlDto) {
     if (!body?.sourceVideoUrl?.trim()) {
-      throw new BadRequestException('sourceVideoUrl 不能为空');
+      throw new BadRequestException('sourceVideoUrl 涓嶈兘涓虹┖');
     }
     const normalized = normalizeSourceVideoUrl(body.sourceVideoUrl);
     if (!normalized) {
       throw new BadRequestException(
-        '无法识别有效的视频链接，请粘贴含 v.douyin.com 短链或作品页链接的分享文案。',
+        '鏃犳硶璇嗗埆鏈夋晥鐨勮棰戦摼鎺ワ紝璇风矘璐村惈 v.douyin.com 鐭摼鎴栦綔鍝侀〉閾炬帴鐨勫垎浜枃妗堛€?',
       );
     }
     return this.videoMeta.fetchMeta(normalized);
   }
 
   /**
-   * 下载源视频并保存到项目内资源目录（默认 backend/data/download-video；见 VIDEO_SAVE_DIR），
-   * 并以同一份媒体调用 ASR，供首页「口播文案」使用。
-   * 抖音侧仅 dy-downloader + DY_DOWNLOADER_COOKIE。
+   * 涓嬭浇婧愯棰戝苟淇濆瓨鍒伴」鐩唴璧勬簮鐩綍锛堥粯璁?backend/data/download-video锛涜 VIDEO_SAVE_DIR锛夛紝
+   * 骞朵互鍚屼竴浠藉獟浣撹皟鐢?ASR锛屼緵棣栭〉銆屽彛鎾枃妗堛€嶄娇鐢ㄣ€?
+   * 鎶栭煶渚т粎 dy-downloader + DY_DOWNLOADER_COOKIE銆?
    */
   @Post('source-video-file')
   async downloadSourceVideoFile(
@@ -1628,13 +1523,13 @@ export class ToolsController {
     transcriptionError?: string;
   }> {
     if (!body?.sourceVideoUrl?.trim()) {
-      throw new BadRequestException('sourceVideoUrl 不能为空');
+      throw new BadRequestException('sourceVideoUrl 涓嶈兘涓虹┖');
     }
     const shouldTranscribe = body.transcribe !== false;
     const normalized = normalizeSourceVideoUrl(body.sourceVideoUrl);
     if (!normalized) {
       throw new BadRequestException(
-        '无法识别有效的视频链接，请粘贴含 v.douyin.com 短链或作品页链接的分享文案。',
+        '鏃犳硶璇嗗埆鏈夋晥鐨勮棰戦摼鎺ワ紝璇风矘璐村惈 v.douyin.com 鐭摼鎴栦綔鍝侀〉閾炬帴鐨勫垎浜枃妗堛€?',
       );
     }
     const dl =
@@ -1642,16 +1537,16 @@ export class ToolsController {
     if (!dl.ok) {
       if (dl.failure === 'douyin_no_ytdlp') {
         throw new BadRequestException(
-          '无法下载源视频（抖音）：请配置 DY_DOWNLOADER_COOKIE。详见 backend/.env.example。',
+          '鏃犳硶涓嬭浇婧愯棰戯紙鎶栭煶锛夛細璇烽厤缃?DY_DOWNLOADER_COOKIE銆傝瑙?backend/.env.example銆?',
         );
       }
       if (dl.failure === 'douyin_ytdlp_failed') {
         throw new BadRequestException(
-          '源视频下载失败（抖音）。可检查 DY_DOWNLOADER_COOKIE 是否有效及后端日志。',
+          '婧愯棰戜笅杞藉け璐ワ紙鎶栭煶锛夈€傚彲妫€鏌?DY_DOWNLOADER_COOKIE 鏄惁鏈夋晥鍙婂悗绔棩蹇椼€?',
         );
       }
       throw new BadRequestException(
-        '未能从该链接下载源视频；非抖音可配置 yt-dlp，抖音请配置 DY_DOWNLOADER_COOKIE。',
+        '鏈兘浠庤閾炬帴涓嬭浇婧愯棰戯紱闈炴姈闊冲彲閰嶇疆 yt-dlp锛屾姈闊宠閰嶇疆 DY_DOWNLOADER_COOKIE銆?',
       );
     }
     const { buffer, originalname } = dl.media;
@@ -1698,7 +1593,7 @@ export class ToolsController {
   }
 
   /**
-   * 列出保存目录中的视频文件（VIDEO_SAVE_DIR / 默认 backend/data/download-video），供「从本地文件转写口播」选择。
+   * 鍒楀嚭淇濆瓨鐩綍涓殑瑙嗛鏂囦欢锛圴IDEO_SAVE_DIR / 榛樿 backend/data/download-video锛夛紝渚涖€屼粠鏈湴鏂囦欢杞啓鍙ｆ挱銆嶉€夋嫨銆?
    */
   @Get('saved-videos')
   async listSavedVideos(@Req() req: Request) {
@@ -1724,7 +1619,7 @@ export class ToolsController {
   }
 
   /**
-   * 对已保存到本地目录的视频文件做 FFmpeg 抽音轨 + ASR，返回口播全文（与 source-video-file 转写环节一致）。
+   * 瀵瑰凡淇濆瓨鍒版湰鍦扮洰褰曠殑瑙嗛鏂囦欢鍋?FFmpeg 鎶介煶杞?+ ASR锛岃繑鍥炲彛鎾叏鏂囷紙涓?source-video-file 杞啓鐜妭涓€鑷达級銆?
    */
   @Get('saved-videos/:fileName/stream')
   async streamSavedVideo(
@@ -1740,10 +1635,10 @@ export class ToolsController {
     try {
       stat = await fs.stat(full);
     } catch {
-      throw new NotFoundException(`未找到文件：${path.basename(full)}`);
+      throw new NotFoundException(`鏈壘鍒版枃浠讹細${path.basename(full)}`);
     }
     if (!stat.isFile()) {
-      throw new NotFoundException(`鏈壘鍒版枃浠讹細${path.basename(full)}`);
+      throw new NotFoundException(`未找到文件：${path.basename(full)}`);
     }
 
     const size = stat.size;
@@ -1789,7 +1684,7 @@ export class ToolsController {
     try {
       await fs.access(full);
     } catch {
-      throw new NotFoundException(`未找到预览文件：${path.basename(full)}`);
+      throw new NotFoundException(`鏈壘鍒伴瑙堟枃浠讹細${path.basename(full)}`);
     }
     res.setHeader('Content-Type', guessMimeFromFilename(full));
     res.setHeader('Cache-Control', 'private, max-age=300');
@@ -1816,9 +1711,9 @@ export class ToolsController {
     return new StreamableFile(createReadStream(full));
   }
 
+  @Public()
   @Get('preview-audios/:fileName/stream')
   async streamPreviewAudio(
-    @Req() req: Request,
     @Param('fileName') fileName: string,
     @Query('token') token: string | undefined,
     @Query('expires') expires: string | undefined,
@@ -1826,8 +1721,7 @@ export class ToolsController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<StreamableFile> {
     const safeFileName = assertSafeSavedBasename(fileName);
-    this.voicePreviewTasks.assertSignedAudioAccess(
-      req.userId!,
+    await this.voicePreviewTasks.assertSignedAudioFileAccess(
       safeFileName,
       token,
       expires,
@@ -1928,7 +1822,7 @@ export class ToolsController {
   }> {
     if (!body?.fileName?.trim()) {
       throw new BadRequestException(
-        'fileName 不能为空（保存目录下的文件名，含扩展名）',
+        'fileName 涓嶈兘涓虹┖锛堜繚瀛樼洰褰曚笅鐨勬枃浠跺悕锛屽惈鎵╁睍鍚嶏級',
       );
     }
     const safeFileName = assertSafeSavedBasename(body.fileName);
@@ -1937,7 +1831,7 @@ export class ToolsController {
     try {
       await fs.access(full);
     } catch {
-      throw new NotFoundException(`未找到文件：${path.basename(full)}`);
+      throw new NotFoundException(`鏈壘鍒版枃浠讹細${path.basename(full)}`);
     }
     try {
       const transcript = await this.transcribeFromDiskWithRetry(full);

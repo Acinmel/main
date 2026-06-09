@@ -67,7 +67,9 @@ require_file "scripts/preflight-check.sh"
 require_file "scripts/run-migrations.sh"
 require_file "scripts/smoke-test.sh"
 require_file "scripts/verify-runtime.sh"
+require_file "scripts/ops-022-cleanup-builtin-voices.sh"
 require_file "scripts/verify-release-routes.js"
+require_file "scripts/verify-release-subtitle-seeds.js"
 require_file "database/migrations/20260517_001_widen_runtime_text_columns.sql"
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -89,6 +91,7 @@ npm --prefix backend/DY-DOWNLOADER run build
 npm --prefix backend ci
 npm --prefix backend run build
 node scripts/verify-release-routes.js --backend-dist-dir backend/dist --context backend-dist
+node scripts/verify-release-subtitle-seeds.js --backend-dist-dir backend/dist --context backend-dist
 
 if [[ "${RUN_BACKEND_TESTS:-0}" == "1" ]]; then
   npm --prefix backend run test
@@ -135,10 +138,11 @@ cp compose.runtime.yml "$PKG_DIR/compose.runtime.yml"
 cp deploy/deploy-runtime.sh "$PKG_DIR/deploy-runtime.sh"
 cp deploy/rollback.sh "$PKG_DIR/rollback.sh"
 cp deploy/setup-https-nginx.sh deploy/nginx-host-reverse-proxy.conf "$PKG_DIR/deploy/"
-cp scripts/preflight-check.sh scripts/run-migrations.sh scripts/smoke-test.sh scripts/verify-runtime.sh "$PKG_DIR/scripts/"
+cp scripts/preflight-check.sh scripts/run-migrations.sh scripts/smoke-test.sh scripts/verify-runtime.sh scripts/ops-022-cleanup-builtin-voices.sh "$PKG_DIR/scripts/"
 cp -R database/migrations/. "$PKG_DIR/database/migrations/"
 
 node scripts/verify-release-routes.js --backend-dist-dir "$PKG_DIR/backend/dist" --context package-dist
+node scripts/verify-release-subtitle-seeds.js --backend-dist-dir "$PKG_DIR/backend/dist" --context package-dist
 
 BUILD_TIME_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$PKG_DIR/VERSION" <<EOF
@@ -186,6 +190,7 @@ normalize_lf \
   "$PKG_DIR/scripts/run-migrations.sh" \
   "$PKG_DIR/scripts/smoke-test.sh" \
   "$PKG_DIR/scripts/verify-runtime.sh" \
+  "$PKG_DIR/scripts/ops-022-cleanup-builtin-voices.sh" \
   "$PKG_DIR/database/migrations/20260517_001_widen_runtime_text_columns.sql"
 
 (

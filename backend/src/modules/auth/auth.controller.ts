@@ -21,10 +21,21 @@ export class AuthController {
   @Public()
   @Post('register')
   async register(
-    @Body() body: { email?: string; password?: string },
+    @Body()
+    body: {
+      email?: string;
+      password?: string;
+      phoneNumber?: string;
+      idCardNumber?: string;
+    },
     @Req() req: Request,
   ) {
-    const out = await this.auth.register(body.email ?? '', body.password ?? '');
+    const out = await this.auth.register(
+      body.email ?? '',
+      body.password ?? '',
+      body.phoneNumber ?? '',
+      body.idCardNumber ?? '',
+    );
     void this.audit.log(
       out.user.id,
       'user_register',
@@ -61,5 +72,39 @@ export class AuthController {
         accountStatus: row.account_status,
       },
     };
+  }
+
+  @Post('change-password')
+  async changePassword(
+    @Body() body: { currentPassword?: string; newPassword?: string },
+    @Req() req: Request,
+  ) {
+    return this.auth.changePassword(
+      req.userId!,
+      body.currentPassword ?? '',
+      body.newPassword ?? '',
+      AuditService.clientIp(req),
+    );
+  }
+
+  @Public()
+  @Post('reset-password')
+  async resetPassword(
+    @Body()
+    body: {
+      email?: string;
+      phoneNumber?: string;
+      idCardNumber?: string;
+      newPassword?: string;
+    },
+    @Req() req: Request,
+  ) {
+    return this.auth.resetPassword({
+      emailRaw: body.email ?? '',
+      phoneNumberRaw: body.phoneNumber ?? '',
+      idCardNumberRaw: body.idCardNumber ?? '',
+      newPassword: body.newPassword ?? '',
+      reqIp: AuditService.clientIp(req),
+    });
   }
 }

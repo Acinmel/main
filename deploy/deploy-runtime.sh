@@ -60,12 +60,16 @@ write_deploy_env() {
   local version_file="$2"
   local runtime_env="$3"
   local backend_env="$4"
+  local registration_status
+  registration_status="$(read_env_value REGISTRATION_DEFAULT_ACCOUNT_STATUS "$backend_env")"
+  registration_status="${registration_status:-$(read_env_value REGISTRATION_DEFAULT_ACCOUNT_STATUS "$runtime_env")}"
+  registration_status="${registration_status:-pending}"
 
   : > "$output"
   if [[ -f "$runtime_env" ]]; then
     awk -F= '
       BEGIN {
-        split("APP_VERSION GIT_COMMIT BUILD_TIME_UTC VITE_API_BASE_URL SHUZIREN_ENV_FILE SHUZIREN_BACKEND_ENV_FILE COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILE", keys, " ")
+        split("APP_VERSION GIT_COMMIT BUILD_TIME_UTC VITE_API_BASE_URL SHUZIREN_ENV_FILE SHUZIREN_BACKEND_ENV_FILE COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILE REGISTRATION_DEFAULT_ACCOUNT_STATUS", keys, " ")
         for (i in keys) skip[keys[i]] = 1
       }
       /^[[:space:]]*$/ || /^[[:space:]]*#/ { print; next }
@@ -88,6 +92,7 @@ write_deploy_env() {
     echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
     echo "COMPOSE_FILE=$COMPOSE_FILE"
     echo "COMPOSE_ENV_FILE=$output"
+    echo "REGISTRATION_DEFAULT_ACCOUNT_STATUS=$registration_status"
   } >> "$output"
   chmod 600 "$output"
 }

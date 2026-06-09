@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed, h } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref } from 'vue'
 import { RouterView, useRoute, useRouter } from 'vue-router'
 import {
   NButton,
+  NDrawer,
+  NDrawerContent,
   NIcon,
   NLayout,
   NLayoutContent,
@@ -18,12 +20,16 @@ import {
   CubeOutline,
   DocumentTextOutline,
   HomeOutline,
+  MenuOutline,
   PeopleOutline,
 } from '@vicons/ionicons5'
 import './erp/erp-theme.css'
 
 const route = useRoute()
 const router = useRouter()
+
+const isMobile = ref(false)
+const menuDrawerOpen = ref(false)
 
 const activeMenu = computed(() => String(route.name ?? 'erp-dashboard'))
 
@@ -50,16 +56,41 @@ const menuOptions: MenuOption[] = [
   },
 ]
 
+function syncViewport() {
+  isMobile.value = window.innerWidth <= 760
+  if (!isMobile.value) {
+    menuDrawerOpen.value = false
+  }
+}
+
+function goDashboard() {
+  void router.push({ name: 'erp-dashboard' })
+  menuDrawerOpen.value = false
+}
+
 function handleMenu(key: string) {
-  router.push({ name: key })
+  void router.push({ name: key })
+  if (isMobile.value) {
+    menuDrawerOpen.value = false
+  }
 }
 
 const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
+
+onMounted(() => {
+  syncViewport()
+  window.addEventListener('resize', syncViewport)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', syncViewport)
+})
 </script>
 
 <template>
-  <n-layout class="erp-shell" has-sider position="absolute" style="inset: 0">
+  <n-layout class="erp-shell" :has-sider="!isMobile" position="absolute" style="inset: 0">
     <n-layout-sider
+      v-if="!isMobile"
       bordered
       show-trigger
       collapse-mode="width"
@@ -69,16 +100,13 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
       content-style="display: flex; flex-direction: column; padding: 22px 16px;"
       class="erp-sider"
     >
-      <div
-        class="erp-sider__brand"
-        @click="router.push({ name: 'erp-dashboard' })"
-      >
+      <div class="erp-sider__brand" @click="goDashboard">
         <div class="erp-sider__logo">
           <n-icon :component="CubeOutline" :size="26" />
         </div>
         <div class="erp-sider__titles">
           <strong>运营管理</strong>
-          <span>ERP · 可视化</span>
+          <span>ERP 可视化</span>
         </div>
       </div>
       <n-menu
@@ -89,22 +117,39 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
         @update:value="handleMenu"
       />
     </n-layout-sider>
-    <n-layout
-      content-style="display: flex; flex-direction: column; min-height: 100%"
-    >
-      <n-layout-header bordered class="erp-header">
+
+    <n-layout content-style="display: flex; flex-direction: column; min-height: 100%">
+      <n-layout-header bordered class="erp-header" :class="{ 'erp-header--mobile': isMobile }">
         <div class="erp-header__left">
+          <n-button
+            v-if="isMobile"
+            tertiary
+            circle
+            class="erp-header__menu-btn"
+            @click="menuDrawerOpen = true"
+          >
+            <template #icon>
+              <n-icon :component="MenuOutline" />
+            </template>
+          </n-button>
           <h1 class="erp-header__title">{{ pageTitle }}</h1>
         </div>
         <div class="erp-header__actions">
-          <n-button secondary round @click="router.push({ name: 'home' })">
+          <n-button
+            :secondary="!isMobile"
+            :quaternary="isMobile"
+            :round="!isMobile"
+            :circle="isMobile"
+            @click="router.push({ name: 'home' })"
+          >
             <template #icon>
               <n-icon :component="HomeOutline" />
             </template>
-            返回前台
+            <span v-if="!isMobile">返回前台</span>
           </n-button>
         </div>
       </n-layout-header>
+
       <n-layout-content embedded class="erp-content">
         <n-scrollbar style="height: 100%">
           <div class="erp-app adm">
@@ -113,6 +158,33 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
         </n-scrollbar>
       </n-layout-content>
     </n-layout>
+
+    <n-drawer
+      v-model:show="menuDrawerOpen"
+      placement="left"
+      :width="284"
+      :trap-focus="false"
+      class="erp-mobile-drawer"
+    >
+      <n-drawer-content :native-scrollbar="false" body-content-style="padding: 20px 14px;">
+        <div class="erp-sider__brand" @click="goDashboard">
+          <div class="erp-sider__logo">
+            <n-icon :component="CubeOutline" :size="26" />
+          </div>
+          <div class="erp-sider__titles">
+            <strong>运营管理</strong>
+            <span>ERP 可视化</span>
+          </div>
+        </div>
+        <n-menu
+          class="erp-sider__menu"
+          :value="activeMenu"
+          :options="menuOptions"
+          accordion
+          @update:value="handleMenu"
+        />
+      </n-drawer-content>
+    </n-drawer>
   </n-layout>
 </template>
 
@@ -122,7 +194,8 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
   background: #edf3fb;
 }
 
-.erp-sider :deep(.n-layout-sider-scroll-container) {
+.erp-sider :deep(.n-layout-sider-scroll-container),
+.erp-mobile-drawer :deep(.n-drawer-body-content-wrapper) {
   background:
     radial-gradient(circle at 10% 0%, rgba(50, 111, 255, 0.16), transparent 30%),
     linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
@@ -140,9 +213,11 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
   border-radius: 18px;
   user-select: none;
 }
+
 .erp-sider__brand:hover {
   background: rgba(255, 255, 255, 0.74);
 }
+
 .erp-sider__logo {
   width: 46px;
   height: 46px;
@@ -155,12 +230,14 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
   box-shadow: 0 18px 36px rgba(52, 107, 255, 0.22);
   flex-shrink: 0;
 }
+
 .erp-sider__titles strong {
   display: block;
   font-size: 16px;
   letter-spacing: 0.03em;
   color: #10203a;
 }
+
 .erp-sider__titles span {
   display: block;
   margin-top: 4px;
@@ -184,21 +261,25 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
     border-color 0.18s ease,
     box-shadow 0.18s ease;
 }
+
 .erp-sider__menu :deep(.n-menu-item-content::before) {
   display: none;
 }
+
 .erp-sider__menu :deep(.n-menu-item-content:hover) {
   color: #153b7a;
   border-color: rgba(52, 107, 255, 0.2);
   background: rgba(255, 255, 255, 0.82);
   transform: translateX(2px);
 }
+
 .erp-sider__menu :deep(.n-menu-item-content--selected) {
   color: #ffffff;
   border-color: rgba(52, 107, 255, 0.26);
   background: linear-gradient(135deg, #346bff, #24b7aa);
   box-shadow: 0 16px 32px rgba(52, 107, 255, 0.2);
 }
+
 .erp-sider__menu :deep(.n-menu-item-content--selected .n-menu-item-content__icon),
 .erp-sider__menu :deep(.n-menu-item-content--selected .n-menu-item-content-header) {
   color: #ffffff;
@@ -216,18 +297,33 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
   border-bottom-color: rgba(115, 135, 171, 0.16) !important;
 }
 
+.erp-header__left {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.erp-header__menu-btn {
+  flex-shrink: 0;
+}
+
 .erp-header__title {
   margin: 0;
   font-size: 20px;
   font-weight: 800;
   color: #10203a;
   letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .erp-header__actions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .erp-content {
@@ -253,5 +349,24 @@ const pageTitle = computed(() => (route.meta.title as string) ?? '控制台')
 
 .erp-app.adm {
   box-sizing: border-box;
+}
+
+@media (max-width: 760px) {
+  .erp-header {
+    padding: 0 12px !important;
+    gap: 10px;
+  }
+
+  .erp-header--mobile {
+    height: 60px;
+  }
+
+  .erp-header__title {
+    font-size: 17px;
+  }
+
+  .erp-app {
+    padding: 14px 12px 28px;
+  }
 }
 </style>

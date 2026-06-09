@@ -1,97 +1,47 @@
-# Deploying Media Workers
+# Worker Deployment
 
-## Minimal deployment
+当前版本不强制拆分独立 worker 服务。第一阶段继续使用后端进程内受控队列处理媒体任务，后续只有在并发和稳定性需要时再拆独立 worker。
 
-The current code can run as one backend process with bounded in-process queues.
+## Current Worker Jobs
 
-Required services:
+- TTS 音频生成。
+- ASR 字幕时间轴生成。
+- 口型视频生成。
+- 标题透明素材生成。
+- 包装成片。
 
-- Node backend
-- MySQL for production persistence
-- Redis for fast task status cache, optional but recommended
-- persistent upload/data volume
-- ffmpeg/ffprobe available in the container or host
+## Required Runtime
 
-Minimum production env:
+- Node.js backend。
+- SQLite 本地或 MySQL 生产库。
+- FFmpeg 和 ffprobe。
+- 持久化上传目录或 OSS。
+- 外部 provider 的 API key。
+
+## Environment
 
 ```env
-MYSQL_HOST=mysql
-MYSQL_PORT=3306
-MYSQL_DATABASE=shuziren
-MYSQL_USER=shuziren
-MYSQL_PASSWORD=change-me
-MYSQL_CONNECTION_LIMIT=10
-
-REDIS_URL=redis://redis:6379
-TASK_STATUS_REDIS_URL=redis://redis:6379
-
-UPLOAD_DIR=/workspace/uploads
+UPLOAD_ROOT=/workspace/uploads
 FFMPEG_BIN=/usr/bin/ffmpeg
 FFPROBE_BIN=/usr/bin/ffprobe
-
-AI_API_MAX_CONCURRENCY=4
-FFMPEG_MAX_CONCURRENCY=2
-RENDER_QUEUE_CONCURRENCY=1
-VOICE_PREVIEW_QUEUE_CONCURRENCY=2
-VOICE_PREVIEW_FILE_CONCURRENCY=2
-PREVIEW_AUDIO_STREAM_SECRET=change-me
+LIPSYNC_COMPLETED_DEDUPE_WINDOW_MS=1800000
+TITLE_ASSET_OUTPUT_DIR=/workspace/uploads/title-assets
+TITLE_ASSET_TEMP_DIR=/workspace/tmp/title-assets
 ```
 
-## Worker split plan
+## Boundaries
 
-For higher traffic, run API and worker separately.
+- API 只创建任务并返回 `taskId`。
+- worker 处理下载、provider 调用、FFmpeg、上传和状态更新。
+- 高成本任务必须有限流、超时、失败态和幂等复用。
+- staging 可以自动部署验证；production worker 重启必须人工确认。
 
-API responsibilities:
+## Verification
 
-- validate requests
-- write task rows
-- accept small metadata and upload references
-- return task ids
-- serve task status
-
-Worker responsibilities:
-
-- claim queued tasks
-- run ffmpeg and AI provider calls
-- write status/progress
-- upload outputs
-- remove temp files after completion/failure
-- enforce latest-request-wins for per-user preview jobs, so repeated clicks do not publish stale audio
-
-Recommended task claim pattern:
-
-1. API inserts `task_statuses` row with `status=pending`.
-2. Worker atomically claims one pending row.
-3. Worker marks `processing`.
-4. Worker heartbeats progress and timestamp.
-5. Worker marks `completed` or `failed`.
-6. Cleanup job deletes expired temp files and expired status rows.
-
-## Process sizing
-
-Start small and measure:
-
-| Machine | API replicas | Worker replicas | `FFMPEG_MAX_CONCURRENCY` | `AI_API_MAX_CONCURRENCY` |
-| --- | ---: | ---: | ---: | ---: |
-| 2 core / 4 GB | 1 | 1 | 1 | 2 |
-| 4 core / 8 GB | 1-2 | 1 | 2 | 4 |
-| 8 core / 16 GB | 2 | 2 | 2 per worker | 4-6 per worker |
-
-## Operational checks
-
-- Confirm `docker compose config` is valid before deploy.
-- Confirm upload/data directories are mounted and writable.
-- Confirm ffmpeg path in container with `ffmpeg -version`.
-- Confirm Redis connectivity from backend logs.
-- Alert on API memory, worker memory, queue full errors, and provider timeout errors.
-- Keep `TRANSCRIBE_MEDIA_MAX_BYTES`, lip-sync upload limits, and reverse-proxy body size aligned.
-
-## Safe retry policy
-
-Use retries only where duplicate provider side effects are acceptable:
-
-- Safe: status polling GET, result file download, transient network reads.
-- Provider-specific: chat/TTS/image calls if duplicate billing is acceptable.
-- Avoid blind retry: async provider task creation, upload policy creation, and any endpoint that can create a paid job.
-
-When retries are enabled, use short exponential backoff with jitter and keep the global AI limiter active.
+```bash
+ffmpeg -version
+ffprobe -version
+npm --prefix backend run test -- video-project-render.service.spec.ts --runInBand
+npm --prefix backend run test -- title-assets.service.spec.ts --runInBand
+npm --prefix backend run build
+```

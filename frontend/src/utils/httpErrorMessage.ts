@@ -5,11 +5,25 @@ import axios from 'axios'
  */
 export function describeHttpOrNetworkError(error: unknown): string {
   const err = error as {
-    response?: { status?: number; data?: { message?: string | string[] } }
+    response?: {
+      status?: number
+      data?:
+        | string
+        | {
+            message?: string | string[]
+            error?: string | string[]
+            detail?: string | string[]
+            details?: string | string[]
+          }
+    }
     message?: string
     code?: string
   }
-  const body = err.response?.data?.message
+  const data = err.response?.data
+  const body =
+    typeof data === 'string'
+      ? data
+      : data?.message ?? data?.error ?? data?.detail ?? data?.details
   const detail = Array.isArray(body) ? body.join('；') : body
   const status = err.response?.status
   const net =

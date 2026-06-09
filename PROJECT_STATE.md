@@ -1,319 +1,478 @@
-# Project State
+﻿# Project State
 
-## 2026-05-19 Post-v1.0 Access Control Dispatch
-- 新需求已拆解为 v1.0 后权限策略优化：普通新注册用户默认没有任何业务功能权限，必须由管理员开通后才能使用。
-- 当前代码基础：后端已有 `accountStatus=pending/active/disabled`、`AccountActiveGuard` 和管理员用户管理入口；风险点是 `AuthService.registrationDefaultAccountStatus()` 受 `REGISTRATION_DEFAULT_ACCOUNT_STATUS` 控制，缺省可能让新用户直接 `active`，需要统一收紧为默认待开通。
-- 已分发任务：`ARCH-004` 审查权限模型和既有用户兼容策略；`BE-017` 后端注册默认 pending 与业务 API 403 门禁；`FE-012` 前端等待审核页、入口禁用和管理员开通体验；`OPS-011` staging/production 默认配置与 smoke；`QA-012` 新用户未授权/开通/停用回归；`DOC-002` 同步 API、数据库、部署、验收和变更记录。
-- 本次不改业务代码，仅完成影响范围定位、任务拆解和 Agent 分发。
+## 2026-05-27 Post-V1.0 Core Flow Impact Audit
 
-## 2026-05-19 Release 20260519-003 Deployed
-- 已打包并部署 `20260519-003`：`shuziren-api:20260519-003` healthy，`shuziren-web:20260519-003` started。
-- 发布脚本通过：`SHA256SUMS` 校验、preflight、migration、docker compose build/up、`scripts/smoke-test.sh`、`scripts/verify-runtime.sh`。
-- 线上验收通过：`GET /api/health` 返回 `ok/app/version=20260519-003`；公网 `GET /api/health/deep` 已收敛为摘要，不再返回 `build`、`gitCommit`、`includedFiles` 或内部路径；所有 deep 子项均为 `ok=true`。
-- 静态缓存验收通过：`/index.html` 返回 `Cache-Control: no-cache`；`/assets/index-DvPcwezH.js` 返回 `Cache-Control: public, max-age=31536000, immutable`。
-- `BE-PROD-001` 与 `OPS-PROD-002` 已更新为 `Done`；`OPS-PROD-001` 仍阻塞于真实域名和 TLS 证书。
+- 结论：V1.0 后新增能力中，已经进入主链路并可能阻塞流程的只有 6 类：`video_projects/projectId` 任务容器、`scriptHash/stage-state` 阶段恢复、`tts_alignment` 字幕时间轴、`preserveSourceAspect` 口型保真、`provider_running` 口型长任务恢复、最终包装资产一致性校验。这些必须保留，但必须逐项完成端到端验收。
+- 当前仍会造成主流程阻塞的点：`QA-CORE-001` 未跑通；缺少安全 mock/stub E2E；VideoRetalk 真实 provider 成功回写未复测；剩余媒体 preflight 仍有时长/体积/分辨率/像素格式/音频大小硬阈值；前端 `subtitleTimelineAligned`、模板选择、stage-state 恢复过严时会让第三步按钮不可用。
+- 应冻结为可选能力的 V1.0+ 功能：Remotion/title assets、大标题素材、模板高级编辑/复制模板、封面编辑、项目列表性能优化、后端瘦身、legacy 删除、线上部署准备。这些功能不得成为第二步或第三步生成按钮的前置条件。
+- 主流程当前最小验收路径固定为：创建 `projectId` -> 保存当前文案快照和 `scriptHash` -> CosyVoice 生成当前 `audioAssetId` -> 用当前 `scriptSegments` 生成 `source=tts_alignment` 且条数一致的 `subtitleTrackId` -> 当前音频和当前数字人生成 `digitalHumanVideoAssetId` -> 选择一个有效 `subtitleTemplateId` -> 包装成片。
+- 下一步策略：先补 `BE-CORE-005/QA-CORE-002` 的安全 mock/stub 主链路，再做 `QA-CORE-004` V1.0 回归矩阵；在这之前，所有 Review 状态的主链路任务不得转 Done，所有非主链路新增需求继续冻结。
 
-## 2026-05-19 OPS-PROD-001 Repo-Side Hardening
-- 已完成仓库侧生产 HTTPS 加固：Docker web 容器不再在内部 HTTP 响应加 `Strict-Transport-Security`；Compose 支持 `WEB_BIND_HOST=127.0.0.1` 防止公网绕过 HTTPS 访问 8080；生产部署脚本默认拒绝非 HTTPS `PUBLIC_BASE_URL`；新增宿主机 HTTPS Nginx 模板与 `deploy/setup-https-nginx.sh`；`scripts/smoke-test.sh` 支持 `REQUIRE_HTTPS=1` 验证 HTTP 跳转、HTTP 无 HSTS、HTTPS 有 HSTS。
-- 当前生产切换仍阻塞：需要真实域名 DNS 指向 `39.105.194.164` 并签发可信 TLS 证书，不能用裸 IP 完成浏览器可信 HTTPS。
+## 2026-05-27 ARCH-CORE-024 Boundary Review
 
-## 2026-05-19 OPS-PROD-002 Static Cache Headers
-- 已完成仓库侧静态资源缓存优化：`/assets/` 使用 `Cache-Control: public, max-age=31536000, immutable`；`/index.html` 与 SPA fallback 使用 `Cache-Control: no-cache`。
-- `scripts/smoke-test.sh` 已加入缓存头验收，会从首页自动提取首个 `/assets/*.js|css` 并校验 immutable 缓存。
-- 待下一次发布后在线上执行缓存头 curl/smoke 验收。
+- 审查结论：核心流程边界成立，但当前实现不完全通过。`subtitleTemplateId` 作为“字幕样式选择”可以是第三步必需项；复制模板、模板高级编辑、封面编辑、标题素材、Remotion 透明标题和线上部署都只能是可选能力。
+- 已确认安全边界：`video-projects/:projectId/package-render-tasks` 已先校验项目归属，包装主链路只应强依赖 `digitalHumanVideoAssetId + audioAssetId + subtitleTrackId + subtitleTemplateId`；跨账号/跨项目资产一致性校验应继续保留。
+- 发现的阻塞风险 1：前端 `smartClipIncludeTitleAssets` 当前默认 `true`，并传入包装任务；`StepThreeSmartEdit` 虽声明 `includeTitleAssets` props，但未真正把它作为用户可控的核心外开关展示。标题素材会在用户无感知时参与核心包装。
+- 发现的阻塞风险 2：后端 project-scoped 包装路径在 `includeTitleAssets === true` 时调用 `overlayTitleAssets()`，当前没有降级捕获；若存在损坏的成功标题素材或叠加失败，最终包装任务会失败，等于让可选标题素材阻塞 V1.0 主链路。
+- 发现的体验风险：第三步进度文案固定出现“标题叠加/封面效果”，即使本次没有标题素材也会暗示标题是必需流程。该文案应按实际开关/素材存在性显示，或改成中性“画面处理/音视频对齐”。
+- 已更新看板：`ARCH-CORE-024` 审查完成；新增 `BE-CORE-009`，并收紧 `FE-CORE-003`、`QA-CORE-004` 的验收口径。
 
-## 2026-05-19 Production Health Monitoring Contract
-- 已核对仓库内巡检脚本：`scripts/smoke-test.sh` 与 `scripts/verify-runtime.sh` 不依赖旧版 `/api/health/deep` 的 `build.gitCommit`、`build.includedFiles` 或内部路径字段；仅要求 JSON 可解析，配置 `HEALTH_DEEP_TOKEN` 时会带 token 拉取详细信息。
-- 只读线上核对发现当前公网 `/api/health/deep` 仍返回旧详细结构，说明现网仍未发布健康接口收敛版本或仍在运行旧镜像；下一次发布后需要复验公网 deep 只返回摘要。
-- 已同步 `docs/DEPLOY.md` 的健康监控契约：公网监控只使用 `ok/app/version/checks.<item>.ok`，详细诊断必须带 `X-Health-Token`。
+## 2026-05-27 BE-CORE-007 VideoRetalk Bitrate Gate Removed
 
-## 2026-05-19 BE-PROD-001 Completed (Review)
-- 已完成生产健康接口信息收敛：
-  - `GET /api/health` 仅返回 `ok/app/version`。
-  - `GET /api/health/deep` 默认仅返回摘要 `checks.<item>.ok`。
-  - 公网不再暴露 `includedFiles`、`gitCommit`、内部目录路径和依赖细节。
-- 详细诊断改为受控访问：仅 loopback 或请求头 `X-Health-Token` 与 `HEALTH_DEEP_TOKEN` 匹配时返回完整结果。
-- 已同步 `scripts/smoke-test.sh`、`scripts/verify-runtime.sh`、`docs/API.md`、`docs/DEPLOY.md`、`docs/CHANGELOG.md`。
-- 验证通过：`npm --prefix backend run lint`、`npm --prefix backend run test -- health.service.spec.ts --runInBand`、`npm --prefix backend run build`。
+- 已确认“预处理视频码率过高：20.81Mbps，最大允许 12.00Mbps”来自 `BE-PERF-013` 的 VideoRetalk 媒体 preflight，默认 `ALI_VIDEORETALK_MEDIA_MAX_PREPARED_BITRATE_BPS=12000000` 是我们为了减少 provider 排队超时加的保守硬阈值，不是核心业务必需条件。
+- 已取消口型任务对源视频、预处理视频、输入音频的码率硬拦截；码率仍会通过 ffprobe 写入 `mediaPreflight` 诊断日志，但不再阻断提交。
+- 仍保留必要体检：媒体必须可读、时长/体积/分辨率/像素格式在合理范围内，音频容器不一致时自动规范化，避免空文件、超大文件和明显 provider 不可处理输入。
+- 已删除 env 示例和部署文档中的 `ALI_VIDEORETALK_MEDIA_MAX_*_BITRATE_BPS` 配置，防止后续再次配置出 12Mbps 阻断。
+- 已重启本地后端：新进程 PID `19720`，健康检查 `GET /api/health` 返回 `ok=true`。验证通过：`npm --prefix backend run test -- subtitle-workflow.service.spec.ts --runInBand`、`npm --prefix backend run test`（28 suites / 173 tests）、`npm --prefix backend run build`。
 
-## 2026-05-19 BE-PROD-002 Completed (Review)
-- 已完成 `GET /api/v1/tools/digital-human-env` 收敛：移除 `arkKeyLength`，仅返回前端必需能力布尔位：
-  - `arkConfigured`
-  - `seedreamConfigured`
-  - `remoteConfigured`
-- 已新增 e2e 防回归断言：`digital-human-env` 不得再包含 `arkKeyLength` 字段。
-- 已同步接口文档：`docs/API.md`。
-- 验证：`npm --prefix backend run build` 通过。
-- 当前剩余门禁阻塞（与本任务改动无关）：`health.service.spec.ts` 与 `tools-pipeline.e2e-spec.ts` 既有失败，待对应任务继续处理。
+## 2026-05-27 BE-CORE-006 VideoRetalk Timeout Recurrence Hotfix
 
-## 2026-05-19 Production Risk QA Round 1
-- 已对线上 `http://39.105.194.164:8080` 执行只读风险验收：`/`、`/api/health`、`/api/health/deep` 可访问，build version 为 `20260519-002`，deep health 的 database/storage/ffmpeg/ytdlp/schema 均为 ok。
-- API 验证通过：测试账号登录 201，`/api/v1/auth/me` 200，`/api/v1/tools/recent-extractions?limit=6` 200，资源、音色、字幕模板和转写健康接口均 200；`/studio` 浏览器回归无 `recent-extractions` 404，`QA-010` 已关闭。
-- Chrome CDP 抓包访问 `/studio`、`/resources`、`/admin/dashboard`：API 4xx/5xx 为 0，旧 `/api/v1/tools/saved-videos` 请求为 0，stream 请求为 0，Blob object URL 创建数为 0，console error 为 0。
-- 已分发线上风险返工：`OPS-PROD-001` 生产 HTTPS、`BE-PROD-001` 健康接口信息暴露和 payload 膨胀、`OPS-PROD-002` 静态资源缓存、`BE-PROD-002` `digital-human-env` 移除 `arkKeyLength`。
+- 复发原因已确认：本地 3000 后端进程 `node dist/main` 启动于 02:18，仍在运行旧内存代码；14:34 后构建出的 `provider_running` 修复没有被加载，所以 16:14 的 Aliyun `RUNNING` 任务又被写成 `failed`。
+- 已补后端兜底：即使 VideoRetalk 超时以旧格式普通 `Error` 抛出（`Aliyun VideoRetalk task timed out after ... { output.task_status=RUNNING }`），也会解析出 provider task 并写入 `provider_running`，不再当真实失败。
+- 已追加自愈机制：`GET /api/v1/render-tasks/:taskId` 读取到 lipsync `failed` 行时，会二次识别错误文案和 `result_json.provider`；若 provider 仍为 `RUNNING/PENDING/PROCESSING/SUBMITTED`，自动转回 `provider_running` 并触发恢复轮询。
+- 已修正本地失败任务 `lipsync_0612948d-af36-41fa-97c3-338cbb21da0a`：状态从 `failed` 恢复为 `provider_running`，保留 Aliyun taskId/requestId，前端继续查询时可进入恢复链路，不需要重新提交 provider。
+- 已重启本地后端：当前监听进程 PID `16132`，健康检查 `GET /api/health` 返回 `ok=true`。
+- 验证通过：`npm --prefix backend run test -- video-project-render.service.spec.ts --runInBand`、`npm --prefix backend run test`、`npm --prefix backend run build`。
 
-## 2026-05-19 FE/BE PERF Review QA
-- `FE-PERF-001` 已复测通过：`frontend/src` 中无 `fetchSavedVideoBlob` 和 saved-video 整文件 Blob 预览路径；`NewAvatarModal` 使用 `avatars/upload-videos` 的 `previewUrl`，`AvatarLibraryView` / `CreativeStudioView` 使用 `avatar-video-files/:fileName/stream` URL；资源库运行态未出现旧 `/tools/saved-videos` 请求，object URL 创建数为 0。
-- `BE-PERF-001` 已复测通过：本地 API 上传测试 avatar 视频后，`metadata` 返回 200；`Range: bytes=2-5` 返回 206、`Content-Range: bytes 2-5/<size>`、`Accept-Ranges: bytes`、`Content-Length: 4`；非法 Range 返回 416；跨账号访问 metadata/stream 返回 404。
-- 已执行验证：`npm --prefix frontend run lint`、`npm --prefix frontend run typecheck`、`npm --prefix frontend run build`、`npm --prefix backend run test -- resources.service.spec.ts resources.controller.spec.ts --runInBand`、`npm --prefix backend run test -- --runInBand`、`npm --prefix backend run build` 均通过。
-- 测试产生的临时 avatar 资源和视频文件已清理；本地临时 3000/5173 服务已停止。
+## 2026-05-27 FE-CORE-002 LipSync Preview Aspect
 
-## 2026-05-19 FE-PERF-001 Frontend Blob Preview Removal
-- 前端已移除添加数字人、资源库卡片预览、创作页数字人封面兜底中的整文件 Blob 视频预览路径。
-- `NewAvatarModal` 改为读取当前账号 `avatars/upload-videos` 专用列表，并直接使用后端返回的 `previewUrl` 给 `<video preload="metadata">`。
-- `AvatarLibraryView`、`CreativeStudioView` 改为使用 `avatar-video-files/:fileName/stream` URL，不再把大视频下载到 object URL；关闭/切换/卸载时清理预览状态。
-- 验证通过：`npm --prefix frontend run lint`、`npm --prefix frontend run typecheck`、`npm --prefix frontend run build`。
+- 已检查第二步口型生成参数：前端 `getCurrentStageTwoRenderMode()` 固定返回 `preserveSourceAspect`，创建口型任务时传入 `renderMode=preserveSourceAspect`；后端 `video-lipsync` payload 默认也是 `preserveSourceAspect`。
+- 已检查后端 FFmpeg 生成路径：`prepareVideoForAliLipSync()` 和 `normalizeVideoForRenderMode()` 在 `preserveSourceAspect` 下不走 1080x1920 的 `scale/pad` 竖版强制逻辑；若仍扭曲，下一步需要对真实输出文件执行 ffprobe 对比源视频和 provider 输出。
+- 已修复前端预览框：第二步“预览口型视频”弹窗改为 9:16 frame，视频使用 `object-fit: contain` 等比显示，避免预览 CSS 拉伸造成误判。
+- 验证通过：`npm --prefix frontend run build`。
 
-## 2026-05-19 BE-PERF-001 Backend Range Stream Update
-- `GET /api/v1/resources/avatar-video-files/:fileName/stream` now supports `Range`, `206 Partial Content`, `416`, `Content-Range`, and `Accept-Ranges: bytes` while retaining current-user avatar upload ownership checks.
-- Added `GET /api/v1/resources/avatar-video-files/:fileName/metadata` so video metadata preview can read file stats without loading the full video into memory.
-- Synced `docs/API.md`, `docs/PERFORMANCE.md`, and `docs/CHANGELOG.md`; validation passed: backend lint, targeted resource tests, full backend unit tests, and backend build.
+## 2026-05-27 OPS-CORE-001 Update
 
-## 2026-05-19 v1.0 Risk Test Round 1
-- 已执行 v1.0 第一轮风险测试，不做核心功能全链路回归；覆盖请求频率、参数风险、Blob/object URL、timer/listener、后端缓存和 Range stream。
-- 静态扫描与 targeted test：`npm --prefix frontend run typecheck` 通过；`npm --prefix backend run test -- saved-video.service.spec.ts voice-preview-task.service.spec.ts --runInBand` 通过；`npm --prefix backend run test -- health.service.spec.ts resources.service.spec.ts --runInBand` 通过。
-- 运行时抓包：临时启动本地 3000/5173，无头 Chrome 登录测试账号访问 `/resources` 和 `/studio`；`/resources` 初始仅触发 `auth/me` 与 `resources/avatars` 业务请求，切到 `/studio` 新增 recent-extractions、avatars、voices、subtitle-templates、dy-cookie、pipeline-health；未触发视频 Blob。
-- 发现风险 1：前端 `NewAvatarModal` / `AvatarLibraryView` / `CreativeStudioView` 仍存在 `fetchSavedVideoBlob()` 整文件 Blob 预览路径，接口为旧 `v1/tools/saved-videos/:fileName/stream`，大视频会常驻内存并绕开 `BE-016` 新增的头像上传视频专用接口。
-- 发现风险 2：`GET /api/v1/resources/avatar-video-files/:fileName/stream` 当前设置 `Content-Length` 后直接返回 stream，没有处理 `Range` / `206 Partial Content`；500MB 数字人上传视频用于 `<video preload="metadata">` 时仍可能产生全量读取风险。
-- 本轮已分发：`FE-PERF-001` 给前端优化 Agent，`BE-PERF-001` 给后端优化 Agent，`QA-PERF-001` 记录本轮测试完成。
+- 已补齐本地/staging 主链路运行门禁：`scripts/preflight-check.sh` 现在检查上传目录、`uploads/tmp`、临时目录、预览/口型公开媒体目录可写性，以及 `ffmpeg/ffprobe/python dashscope/ASR script` 容器内可用性（容器运行时）。
+- `docker-compose.yml` 与 `compose.runtime.yml` 已显式透传 `FFPROBE_BIN` 和 legacy 关闭开关，避免 staging 误启旧入口或缺少 ffprobe。
+- `docs/DEPLOY.md`、`deploy/compose.env.example`、`docs/CHANGELOG.md` 已补充 OPS-CORE-001 本地/staging 运行条件；真实 provider 校验仍需显式 `CORE_FLOW_REAL_PROVIDER=1` 与人工确认，不触发生产发布。
 
-## 2026-05-19 QA Strategy Shift After v1.0
-- 从现在开始，测试验收 Agent 不再主动执行模块核心功能全链路测试；v1.0 主链路已作为版本基线保留。
-- 后续测试方向切换为风险验收：请求是否过于频繁、接口参数是否存在越权/注入/大 payload 风险、数据保存是否存在内存或磁盘膨胀风险、一次性组件/变量/事件监听/object URL/timer/轮询注册后是否正确销毁。
-- 新增或修改任务进入验收时，默认输出性能风险、请求频率、参数风险、资源释放、内存/文件保存风险结论；除非用户明确要求，不再重复“按钮能否点击、流程能否走通”类核心功能验收。
+## 2026-05-27 FE-CORE-001 Frontend Update
 
-## 2026-05-19 v1.0 Milestone
-- 线上主流程已全部通过，当前项目正式标记为 `v1.0` 版本节点。
-- 本阶段目标从“打通全链路”切换为“围绕已上线能力做局部功能优化、体验优化、安全边界加固和运维稳定性补强”。
-- 向所有 Agent 同步感谢：指挥官 Agent 完成需求拆解、节奏控制与看板维护；前端 UI + 业务开发 Agent 打通创作页、资源库、数字人、配音和作品流程；前端优化 Agent 推进预览加载、状态反馈和交互体验；后端功能逻辑开发 Agent 完成鉴权、资源、任务、AI 工具和业务接口；后端优化 Agent 推进异步任务、并发、Range stream 和失败态；运维环境 + 服务器维护 Agent 完成 Docker、Nginx、发布、回滚、smoke 和 runtime verify；测试验收 Agent 完成跨账号、接口、浏览器和线上链路验收；架构审查 Agent 持续守住模块边界、任务状态化和安全访问模型。
-- 后续看板只保留必要优化：已知体验细节、资源归属、安全访问、预览性能、监控告警、文档和测试自动化；不再把 v1.0 主链路作为阻塞项。
+- 已完成 `/studio` 第二步到第三步状态门禁收敛：新增 `subtitleTimelineAligned`，只有 `subtitleTrackId` 存在且字幕轨通过 `tts_alignment` 对齐校验时，才允许进入第三步和最终渲染。
+- 已修复旧 ASR 轨误恢复：项目恢复时校验字幕轨 `audioAssetId` 与当前音频一致且 `source=tts_alignment`，否则标记失败并清空 `stage-state.subtitleTrackId`，避免旧轨回填。
+- 已修复失效模板回填：恢复文案配置后会校验 `selectedSubtitleTemplateId` 是否仍在当前模板列表，不存在则回退到可用模板，避免无效模板被当成已选。
+- 第二步口型生成按钮禁用逻辑已改为依赖真实阶段产物（音频、字幕对齐、数字人），不再依赖“是否已选音色”这类非必需条件。
+- 构建验证通过：`npm --prefix frontend run build`。
 
-## 2026-05-19 Release 20260519-002 Deployed
-- 已打包并部署 `20260519-002`，用于修复线上字幕小方块问题。
-- 发布包：`dist-release/shuziren-release-20260519-002.zip`，SHA256：`39616f0512d82f22789b5fdf145432f4b4e173cb30b886532261278bb5397613`。
-- 线上镜像已切换到 `shuziren-api:20260519-002`、`shuziren-web:20260519-002`。
-- 服务器部署脚本已通过：包内 `SHA256SUMS` 校验、preflight、migration、docker compose build/up、`scripts/smoke-test.sh`、`scripts/verify-runtime.sh`。
-- 字幕专项验证通过：API 容器已安装 `fonts-noto-cjk` / `fonts-wqy-zenhei`，`fc-match "Noto Sans CJK SC"` 正常；后端 dist 默认字幕字体为 `Noto Sans CJK SC`；FFmpeg 中文字幕渲染探测不再出现 `failed to find any fallback with glyph`。
-- 注意：旧成片中已经烧录成小方块的字幕不会自动恢复，需要用户重新生成成片。
+## 2026-05-27 FE-PERF-CORE-001 Frontend Update
 
-## 2026-05-19 BE-016 Backend Completed (Review)
-- 已完成“添加数字人 -> 从已保存视频中选择”后端隔离修复：
-  - 新增 `GET /api/v1/resources/avatars/upload-videos`，仅返回当前用户 `avatar_resources` 中 `avatar-upload_*` 本地来源视频。
-  - 新增 `GET /api/v1/resources/avatar-video-files/:fileName/stream`，仅允许当前用户访问 own 文件。
-  - `POST /api/v1/resources/avatars` 在传入本地 `originalVideoUrl` 时增加来源与归属校验：非 `avatar-upload_*` 或非本人文件拒绝。
-- 文档已同步：`docs/API.md`、`docs/DATABASE.md`。
-- 验证通过：`npm --prefix backend run test -- --runInBand`、`npm --prefix backend run build`。
-- 下一步：`FE-011` 切换前端下拉数据源到新接口，并由 `QA-011` 执行跨账号与抖音文件排除回归。
+- Core-flow frontend performance fix completed for `/studio` package-render polling.
+- Step-3 package render now has one polling source: recursive `setTimeout` with one in-flight request, active `taskId`, and `pollSeq` stale-response guard.
+- Removed the extra immediate `refreshSmartClipRenderTask()` after package task creation; the polling loop performs the first status read.
+- Terminal, failed, and timeout states release `smartClipSubmitLocked` so the user can retry without refreshing the page.
+- Verified: `npm --prefix frontend run lint`, `npm --prefix frontend run build`.
 
-## 2026-05-19 Avatar Saved Video Isolation Verified
-- 线上已复现“添加数字人 -> 从已保存视频中选择”越权问题：新注册账号 `ops_saved_video_probe_7e5d2034@example.com` 请求 `GET /api/v1/tools/saved-videos` 返回 `count=37`，包含其他历史视频和抖音下载视频，如 `*_douyin_dy_video.mp4`。
-- 代码定位：`backend/src/modules/tools/tools.controller.ts` 的 `listSavedVideos()` 直接读取全局 `VIDEO_SAVE_DIR`，没有按 `req.userId` 过滤；`frontend/src/components/resources/NewAvatarModal.vue` 使用该接口作为数字人已保存视频下拉数据源。
-- 已更新 `TASK_BOARD.md`：新增 `BE-016`（后端主修复）、`FE-011`（前端接口切换与文案配合）、`QA-011`（跨账号和抖音视频排除验收）。
-- 下一步：后端先修复数据来源和归属校验，确保添加数字人只能选择当前用户上传到数字人库的视频，禁止抖音抓取视频和其他用户视频混入。
+## 2026-05-27 Core Flow Recovery Mode
 
-## 2026-05-19 BE-015 Release Route Gate Completed
-- Added `scripts/verify-release-routes.js` to enforce route existence checks for `GET/POST /api/v1/tools/recent-extractions`.
-- Integrated checks into both release builders:
-  - `deploy/build-release.sh`
-  - `deploy/build-release.ps1`
-- The release process now validates route markers in both:
-  - local build output: `backend/dist/modules/tools/tools.controller.js`
-  - packaged output: `dist-release/<package>/backend/dist/modules/tools/tools.controller.js`
-- Local validation:
-  - pass: `node scripts/verify-release-routes.js --backend-dist-dir backend/dist --context manual-backend-dist`
-  - expected fail on historical package `20260518-006`, confirming the gate can block bad artifacts.
-- Completed later: `OPS-010` redeploy/version check and `QA-010` browser regression both passed; `/studio` no longer triggers `recent-extractions` 404.
+- 当前判断：项目已经从“局部优化”偏离到“核心链路不稳定”。在本地核心流程重新跑通前，所有 Agent 停止处理非主链路扩展、模板花样、后端瘦身和线上部署准备。
+- 当前唯一 P0 主链路：提取爆款文案 -> 克隆/选择声音并生成音频 -> 按口播分段生成秒级字幕时间轴 -> 生成当前数字人口型视频 -> 用户选择字幕模板并渲染最终视频。
+- 阶段产物必须显式串联：`projectId`、`scriptHash`、`audioAssetId`、`subtitleTrackId`、`digitalHumanVideoAssetId`、`subtitleTemplateId`、`packageRenderTaskId/finalVideoUrl`。不允许再用音频名称、文案、数字人名称、来源链接或旧 `studio-current` 自动匹配当前结果。
+- 当前高风险阻塞点：字幕时间轴仍有 `source=asr`/条数不等于口播分段的验收失败记录；真实口型 provider 本地端到端未验收；最终包装曾出现 `uploads/tmp/package-render-*` 目录缺失；部分前端 API 文件仍保留 legacy 包装，需要确认不会被主流程误调。
+- 执行策略：`TASK_BOARD.md` 已新增 `Core Flow Recovery Gate`。`QA-CORE-001` 本地端到端验收通过前，单元测试、build 或局部 mock 通过都只能算 `Review`，不能把主链路任务标为 `Done`。
+- 分发：后端功能逻辑 Agent 负责 API 合同、字幕时间轴、最终包装；后端优化 Agent 负责口型长任务和重复调用防护；前端 UI + 业务开发 Agent 负责 `/studio` 主状态机；前端优化 Agent 负责陈旧请求/轮询/保存；运维 Agent 负责本地与 staging 环境；测试验收 Agent 负责逐步记录端到端证据。
 
-## 2026-05-18 Recent Extractions 404 Hotfix
-- Restored backend controller routes for `GET /api/v1/tools/recent-extractions` and `POST /api/v1/tools/recent-extractions`; the service and table already existed but the controller route was missing, causing 404 on the video creation page.
-- Added e2e coverage for list/save recent extraction records. Validation passed: backend lint, unit tests, build, and targeted tools-pipeline e2e.
-## 2026-05-18 Release 20260518-006 Deployed
-- 已打包并上线 `20260518-006`，包含 `BE-014` voice-preview 异步队列/试听音频签名 Range stream 和 `FE-010` 配音试听状态机改造。
-- 本地发布门禁通过：frontend build、DY-DOWNLOADER build、backend build、backend jest 8 suites / 33 tests passed。
-- 服务器部署门禁通过：zip SHA256 校验、包内 `SHA256SUMS` 校验、preflight、MySQL migration、database preflight、docker compose build/up、smoke-test、runtime verify。
-- 线上容器已运行：`shuziren-api:20260518-006` healthy，`shuziren-web:20260518-006` started，`/api/health` 与 `/api/health/deep` 均通过。
-- Next: `OPS-009` 和 `QA-009` 继续做 preview-audios Range/Auth、试听卡片可见性、跨账号隔离和浏览器播放回归。
+## 2026-05-27 BE-CLEAN-004 Completed
 
-## 2026-05-18 BE-014 Completed
-- Backend voice preview performance guard is complete: `POST /api/v1/tools/voice-preview` creates an async task and `GET /api/v1/tools/voice-preview-tasks/:taskId` returns status/result.
-- Same-user repeated preview clicks now use latest-request-wins: unfinished older tasks are marked failed with a superseded error, and stale generated audio is removed if an old task finishes late.
-- Preview audio stream now requires signed `token/expires`, validates current user, and supports `Content-Length`, `Accept-Ranges`, `Content-Range`, 206 and 416 responses.
-- Backend validation passed: `npm --prefix backend run lint`, `npm --prefix backend run test -- --runInBand`, `npm --prefix backend run build`. `docker compose config` is still blocked locally because Docker CLI is not installed in PATH.
-- Next: `OPS-009` must verify reverse proxy preserves Range/Auth headers; `QA-009` must run browser playback/cross-account regression.
-## 2026-05-18 FE-010 Frontend Completed (Review)
-- `CreativeStudioView` 已完成配音试听状态流改造：点击生成后立即进入 `submitted`，并按 `queued/running/saving/ready/failed/timeout` 展示即时反馈。
-- 已兼容两类后端返回：同步 `audioUrl` 直出、异步 `previewTaskId + statusUrl` 轮询，轮询超时和失败有明确错误态。
-- 试听卡片改为状态驱动显示，不再仅依赖 `voicePreviewUrl`；播放和下载在无可用 URL 时禁用，避免误触发。
-- 已执行并通过：`npm --prefix frontend run typecheck`、`npm --prefix frontend run build`。下一步进入 `QA-009` 验收。
+- 已完成后端瘦身第二阶段：`ToolsController/ToolsModule/AiModule` 移除旧入口专用依赖，不影响 `/studio` 主链路。
+- `backend/src/integrations/ai/ai.module.ts` 已删除 legacy-only provider 注入与导出：`VideoGenerateLlmService`、`SeedanceI2vService`、`ArkI2vVideoService`。
+- `backend/src/modules/tools/tools.controller.ts` 已删除对应构造注入和 3 个旧入口实现：`generate-video-preview`、`seedance-i2v-async`、`ark-i2v-task`。
+- 已删除无引用 service 文件：`video-generate-llm.service.ts`、`seedance-i2v.service.ts`、`ark-i2v-video.service.ts`。
+- 验证通过：`npm --prefix backend run build`、`npm --prefix backend run test`。
+- 环境限制：`docker compose config` 未执行（当前环境缺少 Docker CLI）。
 
-## 2026-05-18 BE-013 Completed
-- `POST /api/v1/tools/voice-preview` 已改为异步任务创建，快速返回 `previewTaskId/status/pollPath`。
-- 新增 `GET /api/v1/tools/voice-preview-tasks/:taskId`，按当前用户返回 `queued/running/succeeded/failed` 与 `audioUrl/durationSeconds/error`。
-- `GET /api/v1/tools/preview-audios/:fileName/stream` 已要求 `token+expires` 短期签名并绑定 `userId`，禁止跨账号直接访问。
+## 2026-05-27 OPS-038 Completed
 
-## 2026-05-18 Voice Preview Visibility/Playback Dispatch
-- 新问题已拆解：创作第二步“生成音频”成功后，前端必须等 `POST /api/v1/tools/voice-preview` 同步长请求完整返回并写入 `voicePreviewUrl`，才显示“试听音频已生成”；后端当前等待 TTS 与 `persistPreviewAudio()` 写盘后才返回，播放层还会先全量 `fetch blob`。
-- 已分发任务：`ARCH-003` 审查 voice-preview 状态化链路；`BE-013` 后端补齐用户归属与快速返回/状态查询；`BE-014` 后端优化 TTS 并发、超时、写盘和 stream；`FE-010` 前端生成状态与试听卡片即时反馈；`OPS-009` 校验 preview-audios 反代与私有缓存；`QA-009` 做可见性、播放速度和跨账号隔离验收。
-- 当前未改业务代码，本次只完成问题定位、拆解与任务看板分发。
+- 已完成本地/staging Aliyun VideoRetalk 运维手册：补充轮询预算、`provider_running` 恢复语义、媒体 preflight 阈值、日志保留和 DB/日志排查命令。
+- 已补齐环境样例：`.env.example`、`backend/.env.example`、`deploy/compose.env.example`、`deploy/docker.env.example`。
+- 未触发真实 VideoRetalk provider；真实 provider 验证仍需人工确认，且不得使用生产数据或生产密钥。
 
-## 2026-05-18 Saved Videos Isolation/Preview Dispatch
-- 新问题已拆解：数字人添加弹窗“从已保存视频选择”当前基于全局 `VIDEO_SAVE_DIR` 列表，首次登录账号会看到历史/其他用户视频；选择后预览通过整文件 blob 下载，导致大视频等待时间长。
-- 已分发任务：`ARCH-002` 审查 saved video 归属模型；`BE-012` 后端按用户隔离并支持 Range/短期预览 URL；`FE-009` 前端预览改为按需 metadata/stream；`OPS-008` 校验 Nginx/OSS Range 与私有资源代理；`QA-008` 做跨账号隔离和预览速度验收。
-- 当前未改业务代码，本次只完成问题拆解与任务看板分发。
+## 2026-05-27 BE-CLEAN-002 Completed
 
-## 2026-05-18 BE-011 Completed
-- 创作页“最近提取记录”已从前端本地缓存升级为后端按用户隔离存储（`recent_extractions`）。
-- 新增接口：`GET /api/v1/tools/recent-extractions`、`POST /api/v1/tools/recent-extractions`，仅返回当前 JWT 用户数据。
-- 数据库已补充 `recent_extractions`（MySQL/SQLite 双迁移）与 `(user_id, source_url)` 唯一键，支持同用户重复提取 upsert。
-- 已验证通过：`npm --prefix backend run test -- recent-extraction.service.spec.ts --runInBand`、`npm --prefix backend run build`、`npm --prefix frontend run build`。
+- 已完成高风险 legacy tools 入口默认下线：`generate-video-preview`、`seedance-i2v-async`、`ark-i2v-task`、`upload-video`、`upload-audio`、`generate-lip-sync-video`、`ali-lip-sync`、`lip-sync-preview`、旧 `voice-preview`。
+- 实现方式：`backend/src/app.config.ts` 新增全局 kill-switch 中间件，命中 legacy 路由即在 controller 前返回 `410`，阻断 provider 调用、远程 fetch 与文件上传写盘。
+- 兼容开关：仅测试环境可显式设置 `ENABLE_LEGACY_TOOLS_ENDPOINTS=true` 临时开启，默认关闭。
+- 已补 e2e 回归：`backend/test/tools-pipeline.e2e-spec.ts` 新增 legacy 路由默认 `410` 断言。
+- 文档同步：`docs/API.md`、`docs/CHANGELOG.md`、`.env.example` 已更新开关与禁用策略。
 
-## 2026-05-18 Release Candidate 20260518-005 Prepared
-- 已生成下一次部署候选包：`dist-release/shuziren-release-20260518-005.zip`。
-- 包含看板候选内容：`BE-010` deep health 修复、`FE-008` 资源库视频预览缓存返工。
-- 已通过门禁：frontend `lint/typecheck/build`，backend `lint/test/build/test:e2e`，release package build。
-- 已部署到线上：`20260518-005`，服务器 runtime verify 和 smoke test 通过，`/api/health` 与 `/api/health/deep` 均返回 `ok=true`。
-- 待验收项：`FE-008` 已上线但仍在 `Review`，需要 `QA-007` 浏览器复测首屏无全量加载、hover 单卡请求、返回后缓存复用、预览弹窗。
+## 2026-05-27 ARCH-022 Backend Slimming Review
 
-## 2026-05-18 BE-010 Completed
-- `BE-010` 已完成：`/api/health/deep` 的 ffmpeg 探测改为复用 `FfmpegAudioService.probeBinary()`，与业务链路保持一致。
-- `schema` 探测已支持数据库方言分支：MySQL 使用 `INFORMATION_SCHEMA`，SQLite 使用 `PRAGMA table_info(...)`，修复 SQLite 环境误报 `INFORMATION_SCHEMA` 缺失的问题。
-- 新增单测：`backend/src/modules/health/health.service.spec.ts`，覆盖 SQLite 与 MySQL schema 检查路径。
-- 后端门禁已通过：`npm --prefix backend run lint`、`npm --prefix backend run test -- --runInBand`、`npm --prefix backend run build`、`npm --prefix backend run test:e2e -- --runInBand`。
+- `ARCH-022` 审查通过：后端瘦身采用“先禁用高风险旧入口、再验证主链路、最后删除/拆模块”的顺序，不直接大面积删除旧模块。
+- V1.0+ 保留范围：`/studio` project-scoped 主链路、`video_projects/task_statuses` 项目任务链、资源库、项目列表、管理后台、认证/健康检查，以及字幕、音频、标题素材、数字人口型和最终包装所需的性能/安全代码。
+- 必须下线范围：旧 direct provider tools、旧 `/api/v1/tasks` 与 `/api/v1/works` 前台流水线、legacy `studio-current`/resolve/非 v1 video-script。默认应返回 `410 LEGACY_ENDPOINT_DISABLED` 或进入只读历史模式。
+- 安全边界：旧入口禁用必须发生在 provider 调用、远程 fetch、文件写入、任务创建之前；不得再绕过 project-scoped 校验、媒体体检、SSRF 防护和付费 provider 防重复调用。
+- 兼容边界：`user_works` 暂保留给管理后台历史读取，不做破坏性删表；如需调试旧 tools，只允许 `ENABLE_LEGACY_TOOLS_ENDPOINTS=true` 在 dev/test 环境显式开启，禁止生产开启。
+- 后续执行顺序：`BE-CLEAN-001` 删除可证明死代码；`BE-CLEAN-002` 禁用高风险旧 tools；`BE-CLEAN-003` 下线旧任务/作品前台流水线；`QA-053` 回归确认主链路；`BE-CLEAN-004` 再拆分 `ToolsController/ToolsModule/AiModule`；`DOC-022` 最后同步 API/测试/变更文档。
 
-## 2026-05-18 FE-008 Rework Update
-- `FE-008` 已完成返工并回到 `Review`：会话缓存 key 从 `id + updatedAt + originalVideoUrl` 调整为稳定的 `id + originalVideoUrl`，修复 SPA 路由返回后同卡片二次 hover 仍重复请求 stream 的问题。
-- `QA-007` 已从 `Blocked` 解除为 `Ready`，待复测“首屏无全量加载、hover 单卡请求、跨路由返回缓存复用、预览弹窗可播放”。
-- 前端门禁已执行并通过：`npm --prefix frontend run lint`、`npm --prefix frontend run typecheck`、`npm --prefix frontend run build`。
+## 2026-05-27 FE-075 Frontend Update
 
-## 2026-05-18 QA Retest And Dispatch Update
-- 本轮测试已完成：前端 `lint/typecheck/build` 全通过；后端 `lint/test/build/test:e2e` 全通过；API 冒烟中 `/`、`/api`、`/api/v1/tools/digital-human-env`、`/api/v1/auth/me` 鉴权、`/api/v1/tools/transcribe-pipeline-health`、`/api/health` 均通过。
-- `FE-007` / `QA-006` 已转 `Done`：同一浏览器 A/B 账号验证“最近提取记录”按账号隔离，旧全局 localStorage key 已清理，无跨账号泄漏。
-- `FE-008` 退回 `Ready` 给前端 UI + 业务开发 Agent：`/resources` 首屏无全量 stream 请求、hover 单卡请求和预览弹窗均通过；失败点是 SPA 离开 `/resources` 再返回后，同一卡片第二次 hover 仍请求同一 saved-video stream，未复用已加载预览缓存。
-- `QA-007` 已标记 `Blocked`：等待 `FE-008` 返工后复测“首屏无全量加载、hover 单卡请求、跨路由返回缓存复用、预览弹窗”。
-- 环境阻塞仍存在：PowerShell PATH 无 `docker` 和 `bash`，`docker compose config` 与 `bash scripts/smoke-test.sh` 不可执行；`/api/health/deep` 剩余阻塞转由 `OPS-006` 补齐本地 `TEMP_DIR` / `yt-dlp` 等运行依赖后复测。
+- 已完成第二步口型可恢复状态前端适配：`SmartClipRenderStatus` 增加 `provider_running`，并兼容通过 `hint/error` 识别 `RUNNING_TIMEOUT/PROVIDER_RUNNING`。
+- `syncStageTwoLipSyncTaskState()` 在可恢复态会持久化 `lipsyncTaskId`，同时清空 `digitalHumanVideoAssetId/videoUrl`，避免第三步误用空或旧结果。
+- 第二步新增可恢复态操作：继续查询、稍后恢复、重新生成；继续查询会复用原 taskId 轮询，不重复提交 provider。
+- 刷新恢复时，若 stage-state 仅保留 `lipsyncTaskId`（无产物 URL/assetId），页面会恢复为“服务仍在处理中”的可恢复状态，不再直接当失败清空。
+- 构建验证通过：`npm --prefix frontend run build`。
 
-## 2026-05-18 Resource Library Preview Optimization
-- `FE-008` 已修复并进入 Review：`/resources` 头像卡片视频预览从“列表变更即全量并发加载”改为“卡片 hover 按需加载”，降低重复 loading。
-- 新增会话级卡片预览缓存（`id + updatedAt + originalVideoUrl`），跨页面返回素材库时可复用已加载预览，避免每次重新拉取全部 saved-video blob。
-- 已执行前端门禁：`npm --prefix frontend run lint`、`npm --prefix frontend run typecheck`、`npm --prefix frontend run build` 均通过；等待 `QA-007` 浏览器回归。
+## 2026-05-27 BE-PERF-013 Media Preflight Completed
 
-## 2026-05-18 Frontend Privacy Update
-- `FE-007` 已修复并进入 Review：创作页“最近提取记录”从全局 localStorage key 改为按当前账号 `id/email` 隔离存储，旧全局 key 不再读取。
-- `QA-006` 已分发给测试验收 Agent：需要在同一浏览器中用两个账号交叉验证最近提取记录互不可见。
-- 已执行前端门禁：`npm --prefix frontend run lint`、`npm --prefix frontend run typecheck`、`npm --prefix frontend run build` 均通过。
+- 已完成 VideoRetalk 提交前媒体体检：`createLipSyncAsset` 在 provider 调用前对源视频、预处理视频、输入音频执行 ffprobe 摘要采集并做阈值校验（时长、体积、码率、分辨率、像素格式）。
+- 已完成音频容器规范化：当检测到输入音频容器/扩展名不一致，或容器非 provider 推荐格式时，自动转为 WAV，并修正提交文件名与 mime，避免 `.mp3` 文件名承载 WAV/PCM 内容。
+- 体检摘要已写入口型资产元数据：`metadataJson.mediaPreflight`，用于后续排查 provider 排队慢、超时和失败。
+- 超限策略：在调用 provider 前直接返回明确 4xx 可读错误，不再把高风险媒体提交到外部任务队列。
+- 验证通过：`npm --prefix backend run test`（28 suites / 165 tests）、`npm --prefix backend run build`。
 
-## 2026-05-18 OSS QA/BE Update
-- `QA-005` 已执行并通过：线上完成上传视频、上传音频、口型生成、成片下载。
-- `QA-004` 已复测通过：部署 `20260518-004` 后，`GET /api/v1/resources/voice-files/:fileName/stream` 从 404 恢复为 200。
-- `BE-009` 已完成并上线：`resources.service.ts` 兼容 `ali-oss getStream()` 返回 `{ stream }`；线上声音样本 OSS 流式回读恢复。
+## 2026-05-27 ARCH-021 Review
 
-## 2026-05-18 Backend Update
-- `BE-002` 已完成：后端 lint 门禁通过，`npm --prefix backend run lint`、`build`、`test -- --runInBand`、`test:e2e -- --runInBand` 全通过。
-- `BE-003` 已完成：`no-unsafe-*` 类型安全收敛完成，provider response / statement cache / e2e response body 已补最小类型保护。
-- 阻塞解除：`backend/src/integrations/ai/qwen-voice-clone.service.ts` 中 `audio` 变量重名导致的编译失败已修复。
+- `ARCH-021` 已审查通过：Aliyun VideoRetalk 仍为 `RUNNING` 时，本地轮询预算耗尽只能标记为 `RUNNING_TIMEOUT/provider_running` 类可恢复状态，不能直接当真实失败。
+- 状态语义已收敛：`RUNNING_TIMEOUT` 表示本地前台轮询预算耗尽但 provider 未终态；`FAILED` 只用于 provider 明确失败、预提交校验失败或恢复/合同处理失败；`SUCCEEDED` 必须在下载结果、恢复源视频格式合同、发布产物、写入 `digital_human_video_assets` 和 stage-state 后才成立。
+- 轻量方案：不新增独立重型队列；复用 `task_statuses`，扩展 `video-lipsync` 为 `provider_running` 或等价可恢复状态，并在 `result_json` 持久化 provider 元数据、输入 URL、媒体合同和 `recoverUntil`。
+- 恢复边界：后台恢复只查询已有 provider task，不重复提交 Aliyun；恢复不能依赖临时 `draftDir`，必须用稳定资源引用、provider 输出 URL 和已持久化 `sourceContract` 完成最终恢复。
+- 已更新看板：`ARCH-021` 标记 Done；`BE-077`、`BE-PERF-013`、`FE-075` 的验收口径已按该状态模型收紧。
 
-## 2026-05-18 QA Update
-- 看板复测已完成：前端 `lint/typecheck/build` 全通过；后端 `lint/test/build/e2e` 全通过；PowerShell 等价 smoke 的 `/`、`/api`、`/api/v1/tools/digital-human-env`、无 token `/auth/me` 401、注册测试账号后带 token `/auth/me` 均通过。
-- 本轮新增环境失败项：`docker`、`bash` 仍不在 PowerShell PATH；`bash scripts/smoke-test.sh`、`docker compose config` 仍不可执行；`/api/health/deep` 返回 `ok=false`，原因包括 `TEMP_DIR=C:\tmp` 不存在、`ffmpeg/yt-dlp` ENOENT、本地 SQLite 环境下 schema 检查误用 MySQL `INFORMATION_SCHEMA`。
-- 已分发新任务：`OPS-006` 补齐本地 deep health 运行依赖，`OPS-007` 准备 OSS/AI 安全回归测试条件。
+## 2026-05-27 Backend Redundancy Audit Dispatch
 
-更新日期：2026-05-18
+- 结论：后端生产 TS 文件层面没有完全孤立文件；从 `main.ts/app.module.ts` 出发，88 个生产 TS 文件均可达。但函数/路由层面存在明确死代码、旧兼容入口和会影响主流程的高风险冗余。
+- 已执行：生产 import 图扫描；前端 API wrapper 引用扫描；`npm exec tsc -- --noEmit --noUnusedLocals --noUnusedParameters -p tsconfig.build.json`；`npm --prefix backend run build`。
+- 可证明死代码：TypeScript 未使用检查命中 11 项；另发现 `backend/src/modules/tools/tools.controller.ts:593-636` 为 `return` 后不可达分支。合计约 200 行可优先删除。
+- 高风险冗余：旧 direct provider tools 仍开放，包括 `generate-video-preview`、`ark-i2v-task`、`seedance-i2v-async`、`generate-lip-sync-video`、`ali-lip-sync`、`lip-sync-preview`、旧 `voice-preview` 等。前端当前主流程不再引用这些创建入口，继续保留可能绕过 project-scoped 校验、媒体体检、SSRF 防护和付费 provider 防重复调用。
+- 结构冗余：旧 `/api/v1/tasks`、`/api/v1/works` 前台流水线仍在后端注册，和当前 `video_projects + task_statuses + staged-workflow` 主链路重复；可以先隐藏/410 旧前台入口，保留 `user_works` 供管理后台历史数据读取。
+- 已分发给架构审查 Agent：`ARCH-022`，确认后端瘦身边界和兼容窗口。
+- 已分发给后端功能逻辑开发 Agent：`BE-CLEAN-001`，删除可证明死代码；`BE-CLEAN-003`，规划旧 `/v1/tasks`/`/v1/works` 下线。
+- 已分发给后端优化 Agent：`BE-CLEAN-002`，下线高风险旧 tools 入口；`BE-CLEAN-004`，拆分并瘦身 `ToolsController/ToolsModule/AiModule`。
+- 已分发给测试验收 Agent：`QA-053`，后端瘦身后执行 build/test/API 回归，不跑 Docker，不触发真实付费 provider。
+- 已分发给指挥官 Agent：`DOC-022`，落地后同步 API、测试、变更文档。
 
-## 当前项目阶段
+## 2026-05-27 Aliyun VideoRetalk Timeout Dispatch
 
-阶段：全栈 MVP 已成型，进入多 Agent 协作、稳定性加固和发布流程标准化阶段。
+- 结论：本地口型任务不是 Aliyun 明确失败，而是 Aliyun task 仍为 `RUNNING` 时，本地 `ALI_VIDEORETALK_POLL_MAX_MS=900000` 轮询预算耗尽，被后端标记为 failed。
+- 现场任务：本地 task `lipsync_561161f1-0e71-4196-a4fd-2e2b83b06b4f`，项目 `project_d444e7b5-387a-418a-85b8-18cd9d1cea64`，Aliyun request `51bf10fc-3d1f-9026-81d6-16fd78778a8a`，Aliyun task `4eee9e79-529a-4c53-9a67-39ddea9cab24`。本地创建约 `2026-05-27 03:53:36`，Aliyun 提交 `03:54:38`，调度 `03:55:00`，本地约 `04:09:38` 超时失败。
+- 媒体证据：源数字人视频约 `40.93s/88.36MB/1920x1080 HEVC 10-bit`；预处理给 Aliyun 的视频约 `76.90s/199.97MB/1920x1080 H.264 10-bit`；TTS 音频约 `76.88s/3.69MB`，实际容器为 WAV/PCM，但文件名为 `.mp3` 且 DB mime 为 `application/octet-stream`。
+- 主要风险：本地只把 provider taskId 写进错误文本，没有结构化持久化和恢复路径；如果 Aliyun 在 15 分钟后继续完成，系统不会自动下载结果、恢复源视频格式合同或写回 stage-state。
+- 已分发给架构审查 Agent：`ARCH-021`，审查 provider `RUNNING` 超时和真实失败的状态模型、持久化字段、恢复边界。
+- 已分发给后端功能逻辑开发 Agent：`BE-077`，持久化 Aliyun task metadata，增加 provider-running timeout 的可恢复状态和恢复查询/续跑路径。
+- 已分发给后端优化 Agent：`BE-PERF-013`，增加提交前媒体体检、时长/大小/码率阈值、音频容器/扩展名规范化，避免 76s/200MB 重输入直接打到 provider。
+- 已分发给前端 UI + 业务开发 Agent：`FE-075`，第二步区分“provider 仍处理中”和真实失败，提供继续查询/稍后恢复/重新生成的操作。
+- 已分发给运维环境 + 服务器维护 Agent：`OPS-038`，补充 VideoRetalk 超时、轮询、媒体阈值和日志排查环境手册；真实 provider 验证仍需人工确认。
+- 已分发给测试验收 Agent：`QA-052`，用 mock/provider stub 验证超时恢复和预提交拦截；不跑本地 Docker，不触发真实付费 provider。
+- 已分发给指挥官 Agent：`DOC-021`，开发完成后同步 API、数据库、测试和变更日志。
 
-当前判断：
+## 2026-05-27 QA-051 Acceptance
 
-- 前端已经具备数字人配置、资源库、创作工作台、任务流程、后台管理等主流程页面。
-- 后端已经具备鉴权、资源、任务、作品、后台、AI 工具接口、MySQL/SQLite 双持久化、Docker Compose 一体化部署。
-- 当前重点不是重写业务，而是建立任务流、验收流、部署流和状态文档，让多个 Agent 能持续协作。
+- 结论：`QA-051` 验收通过，`FE-074`、`FE-PERF-012` 已在 `TASK_BOARD.md` 转为 `Done`；无新增返工任务需要分发。
+- 测试项目：`project_c9f57284-03b2-44d7-ad1e-e44e09c92bdd`，测试数字人：`fcb38fe4-877c-439a-82e5-51b4e886c9f8`（我的数字人）。
+- 已执行：`npm --prefix frontend run build`、`npm --prefix backend run test -- staged-workflow.service.spec.ts --runInBand`、本地 API health、浏览器 `/studio` 第二步添加已保存视频数字人、刷新恢复、移除数字人、显式 `PUT/GET stage-state`。
+- 结果：添加后 `avatarResourceId` 写入 stage-state，`renderMode=preserveSourceAspect`，`lipsyncTaskId/digitalHumanVideoAssetId/videoUrl=null`；刷新同一项目后 UI 仍显示“我的数字人”；恢复阶段未重复保存；移除后 `avatarResourceId=null`；console warn/error 为 0。
+- 限制：浏览器插件当前不能读取原生 Network payload，已用前端 API wrapper、显式 `PUT /api/v1/video-projects/:projectId/stage-state`、`GET` 响应和 SQLite 落库结果替代验证。未跑本地 Docker，未触发真实 TTS/provider/口型生成。
 
-## 已完成功能
+## 2026-05-27 FE-PERF-012 Frontend Update
 
-- 用户注册、登录、`/api/v1/auth/me` 当前用户信息。
-- 全局 JWT 鉴权、账号状态拦截、管理员角色访问控制。
-- 数字人形象生成、保存、读取、删除。
-- 头像、声音、字幕模板资源库，支持推荐资源和个人资源。
-- 声音克隆、上传声音样本、provider stream。
-- 声音资源缺失样本时不再回退到同一段外部音乐，旧兜底音频 URL 会在资源初始化时清理为空。
-- 声音克隆失败时会回退为 `local-upload` 本地音色，且可在试听与最终成片流程中直接复用样本音频。
-- 声音样本存储支持 `local/oss` 双模式，`VOICE_SAMPLE_STORAGE=oss` 时写入 OSS 且保持现有 `voice-files` 接口不变。
-- OSS 模式下声音样本试听与 provider 回读已支持流式代理，减少后端内存占用。
-- 最终渲染后端已兼容顶层 `voiceRate` 语速参数，创作页已接入用户自选语速并移除固定 `1.13` 默认值。
-- 创作页第二步已显示脚本、数字人、音色 ready 状态、生成支持能力和资源匹配失败原因；已保存视频弹窗读取失败时会显示 `/api/v1/tools/saved-videos` 错误与重试入口。
-- `/studio` 语速/音量滑杆已补齐 `NSlider` 注册；数字人添加弹窗初次挂载会立即请求已保存视频列表。
-- 口播创作流程：链接解析、视频元信息、转写、文案优化、TTS、字幕工作流、对口型预览、最终渲染。
-- 任务流程：创建任务、上传照片、提取文案、改写、提交渲染、结果下载。
-- 我的作品列表和作品元数据编辑。
-- 后台：统计、用户审核、审计日志、作品、数字人模板、资源管理。
-- 数据层：MySQL 生产模式，SQLite 本地兜底模式。
-- 部署层：`docker-compose.yml`、`compose.runtime.yml`、`deploy/` 发布和回滚脚本。
-- 文件体积优化：前端字体收敛到 latin 子集，平台 logo 压缩，未引用生成副本和 PNG 备份已清理；后端移除 `ffmpeg-static` / `ffprobe-static` 大体积 npm 依赖；Docker build context 已排除本地运行产物。
-- 基础运行保护：CORS、生产 JWT/CORS 校验、安全响应头、基础限流、慢请求日志。
+- Optimized `/studio` step-2 `stage-state` saves with stable payload-key dedupe. Identical pending/done payloads are skipped.
+- Added a latest-only save queue: rapid avatar add/select/remove and model/quality toggles replace older unsent payloads, while only one `PUT stage-state` may be in flight.
+- Stale in-flight saves only mark completion when they still match the current `projectId` and latest save sequence; project switch, route leave, and unmount abort and clear the queue.
+- Verified: `npm --prefix frontend run lint`, `npm --prefix frontend run build`.
 
-## 未完成功能
+## 2026-05-27 FE-074 Frontend Update
 
-- 标准 CI 尚未固化到仓库流水线。
-- 前端 `package.json` 已提供 `lint` 脚本，当前以 `vue-tsc -b` 作为前端质量门禁。
-- 长任务仍有部分 HTTP 请求直接等待外部 AI 或 FFmpeg，后续需要统一进入任务队列或任务状态服务。
-- 任务状态目前支持内存/数据库/Redis 方向的能力，但生产高并发需要明确 Redis 与队列部署策略。
-- 部分历史中文注释或文档存在编码显示异常，后续应统一 UTF-8。
-- 生产监控、日志采集、告警和备份恢复演练尚未形成自动化。
+- 已修复 `/studio` 第二步数字人选择持久化缺失：新增 `selectedAvatarId` 独立监听，在非项目恢复/非第二步恢复阶段发生变更时，立即写回 `PUT /api/v1/video-projects/:projectId/stage-state`。
+- 本次写回会同步清空 `lipsyncTaskId`、`digitalHumanVideoAssetId`、`videoUrl`，确保数字人变更后第三步不会误用旧口型结果。
+- 当本地已有口型任务或口型预览时，数字人切换会即时清理本地口型状态并提示用户重新生成；无口型结果时静默清理并持久化。
+- 构建验证通过：`npm --prefix frontend run build`。
 
-## 当前阻塞
+## 2026-05-27 BE-076 Completed
 
-- 真实 AI 能力依赖外部密钥：`DASHSCOPE_API_KEY`、`ARK_API_KEY`、`SEEDANCE_I2V_API_KEY`、`DY_DOWNLOADER_COOKIE` 等。
-- 生产启动必须设置 `JWT_SECRET` 和 `CORS_ORIGINS`，否则后端会拒绝启动。
-- 需要公网可访问媒体回调时必须设置 `PUBLIC_BASE_URL`、`PUBLIC_UPLOAD_BASE_URL`。
-- Docker staging 若本机已有服务占用端口，需要通过 `WEB_PORT`、`MYSQL_HOST_PORT` 覆盖。
-- 2026-05-18 本地 `npm ci` 仍被 Windows 原生依赖文件锁阻断：前端 `rolldown-binding.win32-x64-msvc.node`、后端 `better_sqlite3.node` 出现 EPERM；需释放占用进程后复跑。
-- 2026-05-18 当前 PowerShell PATH 仍无 `docker` 和 `bash`，因此本轮体积优化未直接执行 `docker compose config` 与 `bash scripts/smoke-test.sh`。
-- 2026-05-18 `/studio` 看板返工已验收通过：`FE-005`、`FE-006`、`BE-008`、`QA-003` 均已转 `Done`；非付费链路已跑到第三步。真实 `voice-preview` / `render-final` provider 点击仍需 mock 或人工确认后再测。
-- 2026-05-18 `/api/health/deep` 本地复测未通过：`TEMP_DIR=C:\tmp` 不存在或不可写，deep health 未发现 `backend/ffmpeg/bin/ffmpeg.exe`，`yt-dlp` 未配置，SQLite 本地库下 schema 检查仍按 MySQL `INFORMATION_SCHEMA` 执行。
-- 2026-05-18 `QA-004` / `QA-005` 已执行真实链路并通过：`QA-005` 完成上传视频、上传音频、口型生成、成片下载；`QA-004` 在部署 `20260518-004` 后确认 `voice-files/*/stream` 返回 200。
+- 已完成 `stage-state` 数字人归属校验：`saveProjectStageState()` 在写入 `avatarResourceId` 时会校验该资源属于当前用户（通过 `resources.getAvatar`）。
+- 已补后端回归测试：
+  - `PUT /stage-state` 写入 `avatarResourceId` 后，`GET /stage-state` 返回同一值。
+  - 写入不存在的 `avatarResourceId` 返回 `404`，且不写库。
+  - 写入跨账号 `avatarResourceId` 返回 `403`，且不写库。
+- 已同步接口文档：`docs/API.md` 增加 stage-state 的 `avatarResourceId` 错误码与约束说明。
+- 验证通过：`npm --prefix backend run test -- staged-workflow.service.spec.ts --runInBand`、`npm --prefix backend run test`、`npm --prefix backend run build`。
 
-## 当前环境
+## 2026-05-27 Studio Avatar Persistence Dispatch
 
-本地工作目录：`C:\Users\PC\shuziren`
+- 结论：本地浏览器验收发现 `/studio` 第二步数字人选择未持久化。创建任务 `project_09837390-7d2f-44b4-968f-bb8ffe1f15e5` 后，通过已保存视频添加“我的数字人”，页面即时显示已选；刷新同一 `projectId` 后恢复为“未选择数字人”。
+- 证据：SQLite `video_project_stage_states` 中该项目 `avatar_resource_id=null`、`render_mode=null`、`audio_asset_id=null`、`digital_human_video_asset_id=null`；说明当前选择只存在前端内存，未写入阶段状态。
+- 已分发给前端 UI + 业务开发 Agent：`FE-074`，要求数字人新增、选择、删除后保存 `avatarResourceId`，并在数字人变化时清空旧口型结果字段。
+- 已分发给前端优化 Agent：`FE-PERF-012`，要求 `stage-state` 保存去重、取消陈旧保存，避免连续点击或切换项目造成旧保存覆盖新选择。
+- 已分发给后端功能逻辑开发 Agent：`BE-076`，要求补 `avatarResourceId` 保存/读取和资源归属回归测试；若接口已满足则只补测试与错误码说明。
+- 已分发给测试验收 Agent：`QA-051`，要求浏览器复测并抓 `PUT stage-state` 的 method/url/payload；不触发真实 TTS/provider/口型生成，不跑本地 Docker。
+- 未分发给运维：本问题是本地前后端业务状态持久化，不涉及 Docker、Nginx、生产发布或服务器配置。
 
-默认本地开发：
+## 2026-05-27 BE-075 Completed
 
-- 前端：`npm run dev:frontend`，默认 `http://127.0.0.1:5173`
-- 后端：`npm run dev:backend`，默认 `http://127.0.0.1:3000/api`
-- Docker：`docker compose up -d --build`，默认 `http://127.0.0.1:8080`
+- 结论：`BE-075` 已完成，`BE-072` 引入合同 ffprobe 后导致的 preserveSourceAspect 单测断言失配已修复。
+- 修改文件：`backend/src/integrations/media/ffmpeg-audio.service.spec.ts`。
+- 改动要点：preserve 相关用例不再假设 `execMediaTool` 固定 2 次调用，改为按 `ffmpeg.exe` / `ffprobe.exe` 分类断言；保留“无 `-vf` / 无 `scale=` / 无 `pad=`”核心断言；新增“存在合同探测 ffprobe（`format=format_name,duration`）”断言。
+- 验证通过：`npm --prefix backend run test -- ffmpeg-audio.service.spec.ts --runInBand`、`npm --prefix backend run test`、`npm --prefix backend run build`。
+- 影响：`QA-050` 从 `Blocked` 调整为 `Ready`，可继续做 mock/provider stub 联调验收。
 
-当前验证限制：
+## 2026-05-27 QA-050 Acceptance
 
-- 当前 PowerShell PATH 未提供 `bash`，因此 `.sh` 脚本需在 Git Bash、WSL、Linux、CI 或服务器上执行。
-- 当前 PowerShell PATH 未提供 `docker`，因此 Compose 验证需在安装 Docker CLI 的环境执行。
-- 2026-05-18 已执行 PowerShell 等价 smoke：`/`、`/api`、`/api/v1/tools/digital-human-env`、无 token `/api/v1/auth/me` 401、带本地测试 token `/api/v1/auth/me` 成功均通过；但当前无 `bash`，仍未直接执行 `scripts/smoke-test.sh`。
-- 2026-05-18 `GET /api/v1/auth/me` 的响应结构为 `{ user: { ... } }`，测试脚本需读取 `user.email` 和 `user.accountStatus`。
-- 2026-05-18 `GET /api/v1/tools/transcribe-pipeline-health` 带 token 可找到内置 `backend/ffmpeg/bin/ffmpeg.exe`，但 `GET /api/health/deep` 仍按 `ffmpeg` PATH 检查失败，后端健康检查存在解析不一致。
+- 结论：`QA-050` 验收未通过，已在 `TASK_BOARD.md` 标记为 `Blocked`；目标重新生成链路的后端专项单测通过，但后端全量测试存在失败项，不能主观放行。
+- 已验证通过：`npm --prefix backend run test -- video-project-render.service.spec.ts --runInBand` 通过（12 tests），覆盖 `forceRetry` 下 active task 仍复用、`regenerationKey` 下 completed 任务不复用并清空 stage-state；`npm --prefix frontend run lint`、`npm --prefix backend run build`、`npm --prefix frontend run build` 通过。
+- 失败项：`npm --prefix backend run test` 失败；复跑 `npm --prefix backend run test -- ffmpeg-audio.service.spec.ts --runInBand` 确认 3 条 preserveSourceAspect 用例失败。原因是 BE-072 新增源视频格式合同后多了一次 ffprobe 合同探测，旧用例仍断言 media tool 调用次数为 2。
+- 已分发给后端功能逻辑开发 Agent：`BE-075`，修复 `ffmpeg-audio.service.spec.ts` 的旧调用次数断言，保留无 `scale/pad` 的核心断言，并补充合同 ffprobe 调用断言。
+- 未执行：本地 Docker；真实付费 provider；浏览器 E2E。
 
-关键目录：
+## 2026-05-27 FE-PERF-011 Frontend Optimization
 
-- 前端源码：`frontend/src`
-- 后端源码：`backend/src`
-- 后端环境示例：`backend/.env.example`
-- 部署脚本：`deploy/`
-- 协作脚本：`scripts/`
+- 已完成第二步口型“重新生成”防旧任务回填改造：新增 `stageTwoLipSyncGenerationSeq` 和 `stageTwoLipSyncBoundTaskId`，为当前生成代次建立本地 token。
+- `syncStageTwoLipSyncTaskState()` 已改为按 `generationSeq + expectedTaskId` 校验响应归属；旧代次任务在 completed/failed 分支、预览 URL resolve 后、stage-state 写回后都会被拦截，不再写回 `stageTwoLipSyncVideoUrl` 与 `stageTwoDigitalHumanVideoAssetId`。
+- `startStageTwoLipSyncPolling()` 已改为 generation-aware：启动轮询先绑定 task 与 generation，轮询每轮校验代次；重新生成或清空结果会 abort 旧请求并使旧代次失效。
+- `clearStageTwoLipSyncResult()` 现在会在停止轮询后递增 generation，确保旧异步请求即使晚到也不能覆盖当前状态。
+- 验证通过：`npm --prefix frontend run build`。
 
-## 下一步目标
+## 2026-05-27 BE-PERF-011 Backend Optimization
 
-1. `OPS-004`：运维环境 Agent 落地 Windows Docker + bash 验收环境，释放 Node/原生依赖文件锁，复跑 `bash scripts/check-all.sh`、`bash scripts/smoke-test.sh`、`docker compose config` 与 frontend/backend `npm ci`。
-2. `OPS-006`：运维环境 Agent 补齐本地 deep health 运行依赖：可写 `TEMP_DIR`、`FFMPEG_BIN`/PATH、`YTDLP_BIN`，重启 API 后复测 `/api/health/deep`。
-3. `QA-001`：测试验收 Agent 在运维补齐依赖后复测 `/api/health/deep`，确认 ffmpeg/schema 子项与 `transcribe-pipeline-health` 一致。
-4. `OPS-007`：运维环境 Agent 准备 OSS/AI 安全回归测试条件：mock/staging provider，或取得用户确认的测试账号、声音样本、视频样本、token 与日志采集方式。
-5. `QA-001`：测试验收 Agent 在 bash 可用后直接执行 `scripts/smoke-test.sh`，确认脚本门禁与 PowerShell 等价结果一致。
-6. `OPS-007`：沉淀后续 OSS/AI 回归测试条件和日志采集方式，避免每次真实 provider 回归都临时组织。
-## 2026-05-19 Studio recent-extractions 404 Dispatch
-- 已新增看板任务并分发：
-  - `OPS-010`：线上 API 版本一致性修复与部署校验（已完成，用户确认）。
-  - `BE-015`：后端 dist/发布包路由存在性核对与文档补充。
-  - `QA-010`：`/studio` 首屏 recent-extractions 回归验收。
-- 当前结论：本地代码存在路由与前端容错，线上 404 主要是运行版本与发布包不一致导致。
-## 2026-05-19 Production recent-extractions API Verified
-- Production `GET http://39.105.194.164:8080/api/v1/tools/recent-extractions?limit=6` now returns 401 without token instead of 404, confirming the route is present online.
-- Production `/api/health` and `/api/health/deep` return `ok=true`; runtime build version is `20260519-002`.
-- No additional production redeploy was executed in that turn. Browser login regression has since passed in `QA-010` / `QA-PROD-001`; `/studio` has no visible `recent-extractions` error toast and no 404 in CDP network capture.
+- 已完成口型任务 dedupe 收敛：`forceRetry/regenerationKey` 不再绕过 active 复用，只禁用 completed 复用。
+- `video-lipsync` 复用顺序调整为：先匹配 pending/processing（内存 + DB），再在非强制重生请求中匹配 completed（受 dedupe window 约束）。
+- 新增日志分支：`active-dedupe-hit`、`completed-dedupe-hit`、`force-retry-new-task`，用于排查重复点击、旧任务复活和真实新任务创建。
+- 已补单测并通过：`npm --prefix backend run test -- video-project-render.service.spec.ts --runInBand`。
+- 构建验证通过：`npm --prefix backend run build`。
+
+## 2026-05-27 ARCH-020 Review
+
+- `ARCH-020` 已审查通过：重新生成不是普通重复点击，而是当前阶段旧口型结果的失效动作；历史 `digital_human_video_assets` 可保留审计，不做物理删除，但不得自动回填当前阶段，不得进入第三步包装。
+- 轻量方案：不新增复杂版本表；前端使用 regeneration intent、唯一 `idempotencyKey`、`forceRetry` 和本地 generation token；后端把 active task 复用与 completed task 复用拆开。
+- 必改边界：`forceRetry/regenerationKey` 只能绕过 completed 任务复用，不能绕过 pending/processing 防重复；否则双击或网络重试会创建多个口型任务，带来重复付费和队列压力。
+- 必改边界：旧轮询、旧预览 URL resolve、旧 stage-state 保存完成后必须校验当前 generation token；过期代次不得写回 `stageTwoLipSyncVideoUrl`、`stageTwoDigitalHumanVideoAssetId` 或 stage-state。
+- 已更新看板：`ARCH-020` 标记 Done；`FE-PERF-011` 明确所有异步回写必须带 generation token；`BE-PERF-011` 明确 force retry 只禁 completed 复用、保留 active 复用。
+
+## 2026-05-27 LipSync Regeneration Invalidation Dispatch
+
+- 结论：第二步点击“重新生成”后旧口型视频再次出现，直接原因是前端清空了当前状态，但下一次生成没有传 `forceRetry` 或 regeneration key；后端 `video-lipsync` completed task dedupe 复用窗口会把旧 completed 任务和旧 `digitalHumanVideoAssetId/outputUrl` 再次返回。
+- 当前风险：旧视频会污染第三步包装成片；用户删除/重新生成语义失效；文案、音频、数字人或画幅变化后可能复用不匹配口型；旧轮询/旧保存请求晚到可能回填旧 URL；completed dedupe 命中会掩盖真实重新生成失败并造成审计、费用和 QA 判断失真。
+- 已更新看板并分发：`ARCH-020` 给架构审查 Agent；`FE-073` 给前端 UI + 业务开发 Agent；`FE-PERF-011` 给前端优化 Agent；`BE-074` 给后端功能逻辑开发 Agent；`BE-PERF-011` 给后端优化 Agent；`QA-050` 给测试验收 Agent；`DOC-020` 给指挥官 Agent。
+- 修复原则：重新生成是当前阶段旧口型结果失效动作，不是普通重复点击；历史资产可以保留审计，但不得自动回填当前阶段，不得进入第三步包装。
+
+## 2026-05-27 FE-073 Frontend Update
+
+- 已完成前端重新生成意图/version：新增 `stageTwoLipSyncRegenerationVersion` 与 `stageTwoLipSyncForceRetryPending`。
+- 点击第二步“重新生成”后会先清空 `lipsyncTaskId/digitalHumanVideoAssetId/videoUrl`，再标记下一次口型创建为强制重试。
+- 下一次 `createSmartClipLipSyncTask()` 会携带：
+  - `forceRetry: true`
+  - regeneration `idempotencyKey`（基于 `projectId + audioAssetId + avatarResourceId + renderMode + scriptHash + version` 生成）
+- 当第二步已有口型结果且再次点击“生成数字人口型视频”时，也会走 `forceRetry`，避免命中 completed dedupe 复用旧任务。
+- 验证通过：`npm --prefix frontend run build`。
+- 看板状态已更新：`FE-073` 置为 `Review`，待 `QA-050` 验收。
+
+## 2026-05-27 BE-074 Backend Update
+
+- 已完成 `video-lipsync` 显式重生后端逻辑：`CreateLipSyncTaskBody` 新增 `regenerationKey`。
+- 当 `forceRetry=true` 或 `regenerationKey` 存在时，后端创建新口型任务前会先清空当前项目 stage-state：`lipsyncTaskId`、`digitalHumanVideoAssetId`、`videoUrl`。
+- 同一条件下，创建逻辑会绕过 dedupe 复用路径，避免返回 completed 旧任务的 `digitalHumanVideoAssetId/outputUrl`。
+- 已补回归测试：`video-project-render.service.spec.ts` 新增“regenerationKey 存在时不复用 completed + 清空 stage-state”用例。
+- 验证通过：`npm --prefix backend run test -- video-project-render.service.spec.ts --runInBand`、`npm --prefix backend run build`。
+
+## 2026-05-26 QA-048 Partial Acceptance
+
+- 结论：`QA-048` 不能标记 Done，已在 `TASK_BOARD.md` 标记为 `Blocked`；原因是未获确认不能触发真实付费口型 provider，本轮没有修复后的新口型输出可做最终 ffprobe 和画面裁剪验收。
+- 已执行 ffprobe：源素材 `C:\Users\Public\共享文档\素材样品\ef29e81564eb7d6f96b7fd1f8ca70b0b.mp4` 为 `720x1280`、`coded 720x1280`、`avg_frame_rate=46350/1601`、`bt709`；历史错误口型视频和 `lipsync-final_1779653063432_8b2d0b26.mp4` 均为 `1080x1920`、`coded 1088x1920`、`30/1`、色彩元数据缺失，确认旧产物确实被强制改画幅。
+- 已执行本地 FFmpeg preserve 预处理模拟：输出保持 `720x1280`、`coded 720x1280`、`bt709`，说明不加 `scale/pad` 的本地预处理路径可以保留源尺寸；临时输出已删除。
+- 已执行验证：`npm --prefix backend run test -- ffmpeg-audio.service.spec.ts video-project-render.service.spec.ts --runInBand`、`npm --prefix backend run test`、`npm --prefix backend run build`、`npm --prefix frontend run lint`、`npm --prefix frontend run build` 均通过。
+- 返工分发：新增 `BE-071` 给后端功能逻辑开发 Agent，要求把所有口型预处理默认收敛到 `preserveSourceAspect`，覆盖旧 `lip-sync-preview`/草稿 finalize 漏传 `renderMode` 的路径，并让未传 `renderMode` 的 API 默认落库为 `preserveSourceAspect`。
+- 未执行：本地 Docker；真实付费 provider；生产环境写操作。
+
+## 2026-05-26 BE-071 Completed
+
+- `FfmpegAudioService.prepareVideoForAliLipSync()` 与 `normalizeVideoForRenderMode()` 的缺省 `renderMode` 已统一为 `preserveSourceAspect`，缺省路径不再回落 `adaptive`。
+- 旧 `lip-sync-preview` 与草稿 `finalizeDraft` 调用链已显式传入 `preserveSourceAspect`，避免遗留漏传参数触发缩放。
+- `VideoProjectRenderService.runLipSyncTask()` 已统一使用 `effectiveRenderMode`（默认 `preserveSourceAspect`）传给口型生成与资产落库。
+- `StagedWorkflowService.createDigitalHumanVideoAsset()` 对缺失 `renderMode` 的入参落库兜底为 `preserveSourceAspect`。
+- 验证通过：`npm --prefix backend run test -- ffmpeg-audio.service.spec.ts video-project-render.service.spec.ts staged-workflow.service.spec.ts --runInBand`、`npm --prefix backend run build`。
+
+## 2026-05-26 QA-048 BE-071 Retest
+
+- 结论：`BE-071` 非 provider 验收通过，但 `QA-048` 仍不能标记 Done；最终缺口是没有修复后的新口型输出文件，不能完成真实输出 ffprobe 与画面裁剪验收。
+- 已验证：静态路径确认缺省 `renderMode=preserveSourceAspect`，旧 preview/finalize 路径不再漏传，`runLipSyncTask()` 与 `digital_human_video_assets.render_mode` 落库使用有效默认值。
+- 已执行命令：`npm --prefix backend run test -- ffmpeg-audio.service.spec.ts video-project-render.service.spec.ts staged-workflow.service.spec.ts --runInBand` 通过（3 suites/37 tests），`npm --prefix backend run test` 通过（26 suites/156 tests），`npm --prefix backend run build`、`npm --prefix frontend run lint`、`npm --prefix frontend run build` 均通过。
+- ffprobe 复核：源素材仍为 `720x1280/coded 720x1280/fps≈28.95/bt709`；历史错误口型视频与旧 lipsync-final 仍为 `1080x1920/coded 1088x1920/fps=30/1/色彩元数据缺失`。本地 FFmpeg preserve 预处理模拟输出保持 `720x1280/coded 720x1280/bt709`。
+- 未执行：本地 Docker；真实付费 provider；生产环境写操作。
+
+## 2026-05-26 QA-048 Resolution Plan
+
+- QA-048 的产品规则收敛为“源视频格式合同”：用户上传视频是什么画面参数，第二步最终口型预览就必须保持什么参数；除嘴部运动变化外，不允许改变画幅、比例、帧率、像素格式、色彩元数据和音轨策略。
+- 已分发给后端功能逻辑开发 Agent：`BE-072`，提交 provider 前记录源视频/预处理视频 ffprobe，provider 返回后记录临时输出 ffprobe，最终保存前必须恢复到源视频合同；可安全恢复则恢复后保存，无法恢复则任务失败且不落库成功资产。
+- 已分发给运维环境 + 服务器维护 Agent：`OPS-037`，提供隔离 staging/mock 输出样本；真实 VideoRetalk 调用只用于确认外部 provider 行为，仍需用户明确确认，且不得使用生产数据、生产上传目录或生产密钥。
+- 已分发给测试验收 Agent：`QA-049`，对源视频、预处理输入、provider 临时输出、第二步最终预览输出、第三步包装输出做 ffprobe 验收。
+- 当前最短通过路径：后端完成 `BE-072` 后，用 mock 或新生成样本证明最终保存输出满足源视频合同；真实 provider 验证仍需用户确认，但不作为设计规则本身的前置条件。
+
+## 2026-05-26 LipSync Video Parameter Diagnosis
+
+- 用户提供的 `C:\Users\Public\共享文档\素材样品\错误口型视频.mp4` 已只读检查，未改动原视频文件和业务代码。
+- ffprobe 结果：错误口型视频为 `1080x1920`、`coded_width=1088`、`fps=30/1`、`pix_fmt=yuv420p`、色彩元数据 `unknown`；同目录疑似源素材为 `720x1280`、`fps≈28.95`、`bt709`。
+- 直接原因：前端当前会把 9:16 字幕模板比例映射成 `renderMode=1080x1920`；后端 `prepareVideoForAliLipSync()` 和 `normalizeVideoForRenderMode()` 在该模式下执行 FFmpeg `scale/pad`，主动把视频改成 1080x1920。
+- 风险点：即使走 `adaptive`，当前后端也会重编码、把尺寸截成偶数并 `setsar=1`，因此现有 `preserveSourceAspect` 还不是严格保真模式。
+- 已更新看板：新增 `ARCH-019`、`BE-070`、`FE-072`、`QA-048`、`DOC-019`，目标是第二步口型默认保持原视频参数，第三步包装画幅转换只在用户明确选择最终输出画幅时发生。
+
+## 2026-05-26 Creation Task Script Snapshot Dispatch
+
+- 结论：创建任务后进入第二步会触发项目恢复，当前恢复逻辑会先清空本地文案状态；如果创建任务时没有先保存第一步文案，后续音频、字幕、口型会基于变化后的文案生成，导致已生成资产无法和当前文案稳定对齐。
+- 轻量方案：不新增表、不新增文案版本系统；复用现有 `video_scripts.script_text` 保存项目初始文案快照，复用 `video_project_stage_states.script_hash` 做一致性校验。
+- `ARCH-018` 已审查通过：现有 `video_scripts` 和 `video_project_stage_states` 足够承载该需求，无需数据库迁移、无需新增文案版本系统、无需新增后端接口。
+- 已完成：`FE-071` 已在创建任务成功后、项目恢复前写入 `saveVideoScript` 与 `saveProjectStageState(scriptHash)`；保存失败会留在第一步并提示重试。
+- 当前约束：快照保存失败时不得进入第二步生成音频或口型；不得恢复历史口型视频，也不得按文案、音频、数字人做自动匹配。
+
+## 2026-05-26 BE-069 Completed
+
+## 2026-05-26 BE-070 Completed
+
+- `FfmpegAudioService` 已完成 `preserveSourceAspect` 真保真：口型预处理与包装规格化在该模式下不再默认插入 `scale/pad`，避免无必要裁剪与尺寸重写。
+- 第二步口型默认 `renderMode` 已从 `adaptive` 调整为 `preserveSourceAspect`。
+- `1080x1920` 仍保留为显式竖版输出模式。
+- 已补单测并通过：`ffmpeg-audio.service.spec.ts`、`video-project-render.service.spec.ts`，后端 build 通过。
+
+## 2026-05-26 FE-072 Frontend Update
+
+- `CreativeStudioView.vue` 的第二步口型生成已固定使用 `renderMode=preserveSourceAspect`，不再根据字幕模板比例自动映射 `1080x1920`。
+- 第二步口型结果失效监听已移除对字幕模板画幅和渲染分辨率的依赖，避免用户切模板/分辨率时误触发口型重置。
+- 前端构建验证通过：`npm --prefix frontend run build`。
+- 看板状态已更新为 `FE-072: Review`，等待 `QA-048` 基于 ffprobe 和第三步成片链路验收。
+
+- 后端已完成字幕轨来源收敛：显式 `POST /api/v1/audio-assets/:id/subtitle-track` 传入 `scriptSegments` 时，强制返回/持久化 `source=tts_alignment`，并保证 `subtitles.length === scriptSegments.length`。
+- 音频生成阶段自动创建字幕轨保持 `source=asr`，避免被误当作分段字幕轨。
+- 显式创建字幕轨后，后端同步更新 `audio_assets.subtitle_track_id` 与 `video_project_stage_states.subtitle_track_id`，降低页面读取旧 ASR 轨道风险。
+- 已补日志诊断字段：`requestedSegmentCount/cueCount/alignmentSource`；后端验证通过：`staged-workflow` 单测 + `backend build`。
+
+## 2026-05-25 Subtitle Timeline QA Failure
+
+- 用户提供的本地返回数据为 `GET /api/v1/subtitle-tracks/track_392a4e65-434c-4ccb-aef0-ab5eb20102ca`，结果 `source=asr`、`subtitles.length=3`。
+- 结论：这不是按第二步 `scriptSegments` 生成的字幕轨，而是 ASR 原始轨道；正确的分段字幕轨必须返回 `source=tts_alignment`，且条数等于前端传入的 `scriptSegments.length`。
+- 当前阻塞点：显式生成字幕轴后，页面或接口仍可能使用音频生成阶段自动创建的 ASR 字幕轨。
+- 已更新看板：`FE-069` 改为 `Blocked`，新增 `BE-069`、`FE-070`，`QA-046` 改为 `Blocked` 等待返工后复测。
+- `FE-070` 前端已完成并通过 `npm --prefix frontend run build`：显式生成字幕轴时仅接受本次 POST 对应 track，强校验 `source=tts_alignment` 和条数=`scriptSegments.length`；失败时提示“字幕轴未按文案分段生成”并阻断进入第三步，同时移除音频阶段自动回填 `audioAsset.subtitleTrackId` 的覆盖路径。
+
+## 2026-05-25 QA-PERF-002 Acceptance
+
+- 结论：`QA-PERF-002` 验收通过，已在 `TASK_BOARD.md` 标记为 `Done`；`BE-PERF-009`、`BE-PERF-010` 主表状态已从 `Ready` 修正为 `Done`。
+- 已验证：前端长任务轮询具备 in-flight 防并发、`AbortController`、标题素材轮询上限/超时和路由/项目/卸载清理；保存链路具备稳定 payload key 去重。
+- 已验证：后端状态查询路径设置 no-store/Retry-After，状态读取不触发 provider；`video-script`、字幕 cues、`subtitleVisualStyle/titleLayout` 均有数量、长度、深度、节点或字节预算限制。
+- 执行命令：`npm --prefix frontend run lint`、`npm --prefix frontend run build`、`npm --prefix backend run test`、`npm --prefix backend run build` 均通过；后端测试结果为 24 suites / 146 tests passed。
+- 未执行：本地 Docker；真实付费 provider；浏览器 Network 时序录制（当前本地未安装 Playwright/浏览器自动化依赖）。
+
+## 2026-05-25 Subtitle Timeline Dispatch
+
+- 结论：字幕轴只生成 2 段的直接原因是后端按 ASR 返回的 `segments` 原样生成 cues，当前接口没有接收第二步口播文案分段。
+- `BE-068` 已完成：`POST /api/v1/audio-assets/:id/subtitle-track` 已支持 `projectId/scriptText/scriptSegments`，并在 `scriptSegments` 存在时按分段数生成秒级字幕轴（ASR 时长边界 + 音频时长兜底，时间递增且不重叠）。
+- 已分发给前端 UI + 业务开发 Agent：`FE-069`，生成字幕轴时传当前第二步口播文案和分段数组，不再空 body 调用。
+- 已分发给测试验收 Agent：`QA-046`，用 ASR 2 段、文案多段样例验收字幕条数、时间递增和第三步成片使用。
+- `FE-069` 前端代码已完成并通过 `npm --prefix frontend run build`：字幕轴创建请求已携带 `projectId/scriptText/scriptSegments`，分段优先取用户当前字幕分段，其次取 `extractedScriptLines`；当前进入 `QA-046` 联调验收阶段。
+- 已分发给指挥官 Agent：`DOC-017`，开发完成后同步接口、测试和变更文档。
+
+## 2026-05-25 Performance Optimization Dispatch
+
+- 已按 `/studio` 第一步到第三步的性能风险新增看板任务，均为 `Ready`。
+- 前端优化 Agent 已完成：`FE-PERF-009` 处理长任务轮询和定时器清理；`FE-PERF-010` 处理保存请求去重、防抖和相同 payload 防重复提交。
+- 分发给后端优化 Agent：`BE-PERF-009` 处理状态查询抗压、缓存和内存 task map 上限；`BE-PERF-010` 处理大 payload、marks/cues/style 对象参数上限。
+- 分发给测试验收 Agent：`QA-PERF-002` 做请求频率、参数上限、轮询清理和内存/缓存增长验收；不触发真实 provider，不跑本地 Docker。
+
+## 2026-05-25 Studio Step 1-3 Legacy Residual Scan
+
+- 结论：已对 `/studio` 第一步到第三步做旧逻辑残留检测，`QA-045` 已在 `TASK_BOARD.md` 标记为 `Done`。
+- 已确认：第一步创建任务后使用真实 `projectId`；第二步恢复只恢复音频和字幕，旧口型结果会清空并提示重新生成；第三步包装成片只提交当前 `projectId`、音频资产、字幕轨道和本次口型资产。
+- 已清理：`FE-068` 删除前端不可达旧音色校验死代码和未使用的 `listSavedVideos()` 包装函数。
+- 仍保留但允许：后端 `studio-current` 仅作为 legacy stage-state/resolve 兼容；`lipsync-assets/resolve` 兼容接口仍存在，但前端 active flow 不再调用；旧 `/api/video-script/*` 路径只作为兼容路由，前端已统一为 `/api/v1/video-script/*`。
+- 验证：`rg` 残留扫描、前端 lint/typecheck/build、后端相关单测和后端 build 均通过；未跑本地 Docker，未触发真实 provider。
+
+## 2026-05-25 QA-044 Acceptance
+
+- 结论：`QA-044` 复测通过，已在 `TASK_BOARD.md` 标记为 `Done`。
+- 已验证通过：创作任务创建、重复任务名、改名、归档、列表过滤、按真实 `projectId` 保存/恢复 `stage-state`、跨账号读取/改名/归档/stage-state 隔离、旧 `studio-current` 兼容。
+- `ARCH-017` 已完成：project-scoped 长任务接口必须先校验 `video_projects.id + user_id`，再执行 dedupe、并发判断、任务持久化和 provider 调用；`BE-066` 已由后端功能逻辑开发 Agent 完成代码修复并补充跨账号回归单测。
+- 复测结果：B 账号调用 A 项目的 `detect-cut-points`、`render-final`、`lipsync-tasks`、`package-render-tasks`、`pd-events` 均返回 `404`，且 `task_statuses` 没有新增记录。
+- 本轮未跑本地 Docker；未触发真实 provider。
+
+## 2026-05-25 Video Script Empty State Fix
+
+- 结论：已修复新建创作任务进入第二页时 `GET /api/video-script/:projectId` 在 F12 Network 中显示 404 的问题。
+- 原因：新任务尚未保存智能剪辑文案配置，后端把正常空状态当作 NotFound 返回；前端已捕获该 404，但 Network 仍显示红色请求。
+- 修复：`GET /api/v1/video-script/:projectId` 和兼容旧路径 `/api/video-script/:projectId` 在缺失配置时返回 `200 data=null`；前端 `saveVideoScript/getVideoScript` 统一切到 `v1/video-script` 路径并兼容空数据。
+- 验证：后端 video-script 单测、后端 build、前端 typecheck/build、临时 `3100` API 登录请求均通过。
+
+## Current Stage
+
+- 阶段：V1.0 后优化与稳定性迭代。
+- 产品：AI 数字人口播视频生成平台。
+- 主入口：`/studio` 创作台；辅助入口包括资源库、字幕模板库、数字人素材库、管理员后台。
+- 当前策略：线上流程已跑通，后续只做功能优化、稳定性加固、体验优化、测试环境验证和必要的轻量扩展。
+
+## Current Core Flow
+
+1. 用户在创作台第一步准备文案，点击下一步时创建 `video_projects` 创作任务，任务名可编辑。
+2. 后续音频、字幕、数字人选择、口型视频、模板和包装成片都绑定真实 `projectId`。
+3. 音频阶段生成或上传音频资产，写入 `audio_assets`，并生成秒级字幕时间轴 `subtitle_tracks`。
+4. 口型阶段使用当前用户自己的数字人视频和音频创建异步 `video-lipsync` 任务，成功后写入 `digital_human_video_assets`。
+5. 留存阶段通过 `projectId + video_project_stage_states` 恢复任务内容；不再按音频、数字人、文案、链接或画幅自动匹配历史口型视频。
+6. 智能剪辑阶段只做包装成片：读取口型视频、音频、字幕时间轴、字幕模板和标题素材，完成字幕烧录、标题叠加、音视频对齐和输出发布。
+7. 字幕模板和标题模板使用“公版只读、复制后可编辑”的模式，用户只能修改自己的模板。
+
+## Current Environment
+
+- 前端：Vue 3、Vite、TypeScript、Pinia、Vue Router、Naive UI。
+- 后端：NestJS 11、TypeScript、SQLite 本地库、MySQL 生产库、FFmpeg、外部 TTS/ASR/口型生成服务。
+- 本地开发：前端 `http://127.0.0.1:5173`，后端 `http://127.0.0.1:3000/api`。
+- Docker 验证：`http://127.0.0.1:8080`，Nginx 反代 `/api` 到后端。
+- 线上发布、生产重启、生产回滚、真实付费接口调用仍需要人工确认。
+
+## Completed Core Capabilities
+
+- V1.0 主链路已通过：文案、音频、数字人视频、口型生成、字幕模板、标题素材、最终成片。
+- 用户资源隔离已作为默认规则：音色、数字人视频、字幕模板、阶段状态和生成资产均按当前账号隔离。
+- 普通新注册用户默认无功能权限，需管理员开通后才能使用核心功能。
+- 最近提取记录、素材库、模板库已经按用户维度设计隔离。
+- 第二步支持分段编辑口播文案、滚动查看、音频试听和本次生成的口型视频预览；刷新后只自动恢复音频和字幕，口型视频需用户重新生成。
+- 第三步支持字幕模板切换、复制公版模板后编辑、可视化字幕/标题位置配置、标题透明素材叠加。
+- 本地 Vite 已支持 `/uploads` 预览代理，生成口型视频后可在本地预览。
+- 创作台 `stage-state` 接口已强制 `no-store`，避免浏览器返回 `304` 后误用陈旧阶段状态。
+- 待审核账号访问业务接口返回结构化 `403`（`code=ACCOUNT_PENDING`），便于前端统一识别和引导。
+- `ARCH-016` 已确定下一步采用 `video_projects` 创作任务容器，任务名只做展示和搜索，`projectId` 作为所有阶段数据的唯一关联点。
+- `ARCH-017` 已确定 project-scoped 长任务统一鉴权边界，越权请求必须返回 `404` 且不得创建任务。
+
+## Current Active Work
+
+- `FE-PERF-008`：已完成 `/projects` 创作任务列表入口；列表分页、详情预检、改名、归档/恢复、创作台项目恢复和 stage-state 查询均具备加载态、取消陈旧请求与防重复点击保护。
+- `QA-LIPSYNC-001`：真实 VideoRetalk 长任务边界测试仍阻塞，需 staging/mock 环境或明确确认使用真实付费 provider。
+- `OPS-PROD-001`：生产 HTTPS、静态资源缓存和 smoke 验证仍需人工确认后执行。
+- `QA-ENV-001`：准备不使用生产密钥和生产数据的 staging 验证账号、资源夹具和 smoke 参数。
+- `BE-065`：已完成创作台关键资产按真实 `projectId` 强绑定，`studio-current` 仅保留遗留兼容。
+- `BE-066`：已完成所有 project-scoped 长任务创建接口的项目归属校验前置修复。
+- `BE-068`、`FE-069`、`QA-046`：基础改造已进入联调，但用户提供返回数据仍为 `source=asr`、3 条字幕，验收失败；当前转入 `BE-069`、`FE-070` 返工，目标是只接受 `source=tts_alignment` 且条数等于 `scriptSegments.length` 的字幕轨。
+- `ARCH-018`：已完成创建任务文案快照架构审查，结论为复用现有 `video_scripts` + `stage-state script_hash`，不新增表和版本系统；`FE-071`、`QA-047` 继续推进。
+
+## Current Blockers
+
+- 真实长任务口型生成测试可能产生付费调用，未确认前不自动执行。
+- 生产发布、生产重启、生产回滚、生产数据库破坏性变更不自动执行。
+- 不允许为了测试复用生产密钥、生产数据库或生产上传目录。
+
+## Next Goals
+
+1. 优先处理 `BE-069` 和 `FE-070`，收敛 ASR 原始轨道与显式分段字幕轨的返回边界。
+2. `QA-046` 复测字幕轴时间对齐和第三步成片使用，重点确认 `source=tts_alignment`、trackId 一致、字幕条数等于 `scriptSegments.length`。
+3. 处理 `FE-071`、`QA-047`，让创建任务时的第一步文案成为第二步之后生成链路的稳定输入。
+4. 继续按看板处理 `QA-ENV-001`、`QA-LIPSYNC-001` 和生产运维阻塞项。
+5. 保持 V1.0 主链路稳定；按 `projectId` 恢复任务内容，但口型视频不做历史启发式匹配。
+6. 准备 staging/mock 验证条件，再处理 `QA-LIPSYNC-001`。
+7. 后续功能优化继续使用 `TASK_BOARD.md` 分发到对应 Agent，并由测试验收 Agent 回写结果。
+## 2026-05-25 BE-PERF-009/010 Completion
+
+- 已完成 `BE-PERF-009`：优化状态轮询路径，`title-assets/render-tasks/:taskId` 读取仅依赖 `task_statuses.result_json`，不再额外读取 title asset 行；接口补充 no-store 与轮询建议响应头，降低高频轮询带来的缓存和内存压力。
+- 已完成 `BE-PERF-010`：新增 payload 风险防护，覆盖 `video-script/save` highlights 限流、title mark layout 复杂度、subtitle cues 数量和文本总量、`subtitleVisualStyle/titleLayout` 深度/节点/字节预算；超限统一返回 4xx。
+- 验证结果：`npm --prefix backend run test` 通过（24 suites / 143 tests），`npm --prefix backend run build` 通过。
+- 环境限制：`docker compose config` 未执行，当前环境缺少 Docker CLI；`npm --prefix backend run lint` 仍有存量错误（集中在未改动历史用例）。
+
+## 2026-05-27 BE-077 Completed
+
+- 已完成 `video-lipsync` 可恢复状态持久化：任务状态新增 `provider_running`，并在 `task_statuses.result_json.provider` 持久化 Aliyun provider 元数据（含 `requestId/taskId/taskStatus/inputMode/videoUrl/audioUrl/submittedAt/lastPolledAt/recoverUntil/inputMeta/sourceContract/preparedContract/audioContract/lastResponse`）。
+- 本地轮询预算耗尽且 provider 仍 `RUNNING` 时，不再直接写 `failed`；后端改为 `provider_running`（progress 90+）并自动后台恢复。
+- 新增恢复链路：后端基于已持久化 provider taskId 调 `recoverAliyunTask` 续查，不重复提交 provider；恢复成功后再执行格式合同恢复、落 `digital_human_video_assets`，并回写 stage-state。
+- 回归验证通过：`npm --prefix backend run test -- video-project-render.service.spec.ts --runInBand`、`npm --prefix backend run test`、`npm --prefix backend run build`。
+## 2026-05-27 QA-CORE-001 First Acceptance
+
+- 结论：`QA-CORE-001` 首轮验收未通过，已在 `TASK_BOARD.md` 标记为 `Blocked`；核心流程相关任务仍只能保持 `Review/Blocked`，不能转 `Done`。
+- 已执行基础门禁：`npm --prefix backend run test` 通过（28 suites / 170 tests）、`npm --prefix backend run build` 通过、`npm --prefix frontend run lint` 通过、`npm --prefix frontend run build` 通过。
+- 已执行核心相关验证：`npm --prefix backend run test:pipeline` 通过（10 tests）；`npm --prefix backend run test -- staged-workflow.service.spec.ts video-project-render.service.spec.ts staged-workflow.controller.spec.ts video-projects.controller.spec.ts video-script.controller.spec.ts --runInBand` 通过（5 suites / 48 tests）。
+- 发现阻塞：当前没有“保证不调用真实付费 provider”的完整主链路 E2E mock/stub。`backend/test/tools-pipeline.e2e-spec.ts` 设置了 `AI_MOCK_FALLBACK=true`，但 `SpeechAiService` 没有消费该开关；本机若存在 provider 密钥，`POST /api/v1/audio-assets/generate` 可能真实调用 TTS。
+- 全量 e2e 现状：`npm --prefix backend run test:e2e` 失败于 `backend/test/admin-access.e2e-spec.ts`，注册 payload 未携带当前必填的 `phoneNumber/idCardNumber`，与核心流程无直接业务关系，但会阻断全量 e2e 门禁。
+- 已分发给后端功能逻辑开发 Agent：`BE-CORE-005`，补齐显式安全 mock/stub 主链路；`BE-TEST-001`，修复过期 admin e2e 注册 fixture。
+- 已分发给测试验收 Agent：`QA-CORE-002`，在 mock/stub 可用后补齐可重复执行的核心流程 E2E 脚本并回归 `QA-CORE-001`。
+- 未继续执行：本地 Docker、真实 VideoRetalk、最终成片真实 provider、生产或 staging 写操作。说明：`test:pipeline` 的音频生成路径缺少强制 mock，已作为阻塞风险记录，后续不得再用它替代安全主链路 E2E。

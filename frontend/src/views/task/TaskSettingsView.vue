@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  NAlert,
   NButton,
   NCard,
   NForm,
@@ -11,7 +12,7 @@ import {
   NText,
   useMessage,
 } from 'naive-ui'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listSubtitleTemplateResources, listVoiceResources } from '@/api/resources'
 import { getTask, submitRender } from '@/api/task'
@@ -39,25 +40,31 @@ const modeOptions = [
   { label: '纯字幕快剪版', value: 'subtitle_fast' as RenderMode },
 ]
 
-const fallbackVoiceOptions = [
-  { label: '中性女声', value: 'neutral_female' },
-]
-
-const hiddenRecommendedVoiceIds = new Set([
-  'rec-voice-female',
-  'rec-voice-male',
-  'rec-voice-narration',
-  'rec-voice-bright-young-female',
-])
-
 const fallbackSubtitleOptions = [
   { label: '极简白字', value: 'minimal_white' },
   { label: '高对比黄字', value: 'high_contrast_yellow' },
   { label: '新闻字幕条', value: 'news_bar' },
 ]
 
-const voiceOptions = ref([...fallbackVoiceOptions])
+const voiceOptions = ref<Array<{ label: string; value: string }>>([])
 const subtitleOptions = ref([...fallbackSubtitleOptions])
+const hasVoiceOptions = computed(() => voiceOptions.value.length > 0)
+const hasSelectedVoiceOption = computed(() =>
+  voiceOptions.value.some((item) => item.value === voiceStyleId.value),
+)
+
+function isDeprecatedVoiceStyleId(value: string | null | undefined) {
+  const normalized = value?.trim() ?? ''
+  if (!normalized) return false
+  return normalized === 'neutral_female' || normalized.startsWith('rec-voice-')
+}
+
+function normalizeVoiceStyleSelection() {
+  const current = voiceStyleId.value.trim()
+  const hasCurrent = voiceOptions.value.some((item) => item.value === current)
+  if (current && !isDeprecatedVoiceStyleId(current) && hasCurrent) return
+  voiceStyleId.value = voiceOptions.value[0]?.value ?? ''
+}
 
 async function loadResourceOptions() {
   try {
@@ -65,15 +72,10 @@ async function loadResourceOptions() {
       listVoiceResources({ scope: 'all', limit: 40 }),
       listSubtitleTemplateResources({ scope: 'all', limit: 40 }),
     ])
-    if (voices.items.length) {
-      const visibleVoiceOptions = voices.items
-        .filter((item) => !hiddenRecommendedVoiceIds.has(item.id))
-        .map((item) => ({ label: item.name, value: item.id }))
-      voiceOptions.value = visibleVoiceOptions.length ? visibleVoiceOptions : [...fallbackVoiceOptions]
-      if (!voiceOptions.value.some((item) => item.value === voiceStyleId.value)) {
-        voiceStyleId.value = voiceOptions.value[0].value
-      }
-    }
+    voiceOptions.value = voices.items
+      .filter((item) => !isDeprecatedVoiceStyleId(item.id))
+      .map((item) => ({ label: item.name, value: item.id }))
+    normalizeVoiceStyleSelection()
     if (subtitles.items.length) {
       subtitleOptions.value = subtitles.items.map((item) => ({ label: item.name, value: item.id }))
       if (!subtitleOptions.value.some((item) => item.value === subtitleStyleId.value)) {
@@ -81,14 +83,15 @@ async function loadResourceOptions() {
       }
     }
   } catch {
-    voiceOptions.value = [...fallbackVoiceOptions]
+    voiceOptions.value = []
+    voiceStyleId.value = ''
     subtitleOptions.value = [...fallbackSubtitleOptions]
   }
 }
 
 onMounted(async () => {
   try {
-    const [t] = await Promise.all([getTask(taskId), loadResourceOptions()])
+    const t = await getTask(taskId)
     task.value = t
     if (!t.rewrite) {
       message.warning('请先完成改写后再进入本页')
@@ -101,6 +104,8 @@ onMounted(async () => {
       voiceStyleId.value = t.renderConfig.voiceStyleId
       subtitleStyleId.value = t.renderConfig.subtitleStyleId
     }
+    await loadResourceOptions()
+    normalizeVoiceStyleSelection()
   } catch {
     message.error('加载任务失败')
   } finally {
@@ -109,6 +114,11 @@ onMounted(async () => {
 })
 
 async function onSubmit() {
+  normalizeVoiceStyleSelection()
+  if (!hasVoiceOptions.value || !voiceStyleId.value || !hasSelectedVoiceOption.value) {
+    message.warning('当前没有可用音色，请先在音色库上传样本或克隆声音。')
+    return
+  }
   submitting.value = true
   try {
     await submitRender(taskId, {
@@ -142,6 +152,10 @@ async function onSubmit() {
         </n-text>
 
         <n-form v-if="!loading" label-placement="top">
+          <n-alert v-if="!hasVoiceOptions" type="warning" :show-icon="false" style="margin-bottom: 12px">
+            当前没有可用音色，请先到音色库上传样本或克隆声音后再提交生成。
+          </n-alert>
+
           <n-form-item label="生成模式">
             <n-select v-model:value="mode" :options="modeOptions" />
           </n-form-item>
@@ -163,7 +177,7 @@ async function onSubmit() {
             <n-select v-model:value="subtitleStyleId" :options="subtitleOptions" />
           </n-form-item>
 
-          <n-button type="primary" :loading="submitting" @click="onSubmit">开始生成</n-button>
+          <n-button type="primary" :loading="submitting" :disabled="!hasVoiceOptions" @click="onSubmit">开始生成</n-button>
         </n-form>
       </n-space>
     </n-card>

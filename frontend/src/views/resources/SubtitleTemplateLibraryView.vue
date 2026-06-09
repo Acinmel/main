@@ -42,7 +42,7 @@ onMounted(() => {
     </n-alert>
 
     <n-spin :show="list.loading.value">
-      <n-empty v-if="list.empty.value" description="暂无字幕模板" class="resource-state" />
+      <n-empty v-if="list.empty.value" description="暂无可用字幕模板" class="resource-state" />
       <div v-else class="template-grid">
         <SubtitleTemplateCard
           v-for="item in list.items.value"

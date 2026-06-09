@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -10,6 +10,36 @@ export interface AliLipSyncResult {
   videoUrl: string | null;
   providerResponse: unknown;
   hint?: string;
+  providerState?: AliLipSyncProviderState;
+}
+
+export type AliLipSyncProviderState = {
+  name: 'aliyun-videoretalk' | 'generic-form';
+  requestId?: string | null;
+  taskId?: string | null;
+  taskStatus?: string | null;
+  inputMode?: 'dashscope-temp-upload' | 'public-url' | null;
+  videoUrl?: string | null;
+  audioUrl?: string | null;
+  submittedAt?: string | null;
+  lastPolledAt?: string | null;
+  recoverUntil?: string | null;
+  inputMeta?: Record<string, unknown> | null;
+  sourceContract?: Record<string, unknown> | null;
+  preparedContract?: Record<string, unknown> | null;
+  audioContract?: Record<string, unknown> | null;
+  lastResponse?: Record<string, unknown> | null;
+};
+
+export class AliLipSyncRunningTimeoutError extends Error {
+  readonly providerState: AliLipSyncProviderState;
+  readonly code = 'RUNNING_TIMEOUT';
+
+  constructor(message: string, providerState: AliLipSyncProviderState) {
+    super(message);
+    this.name = 'AliLipSyncRunningTimeoutError';
+    this.providerState = providerState;
+  }
 }
 
 export type LipSyncProvider = 'aliyun-videoretalk' | 'generic-form';
@@ -104,8 +134,6 @@ function sleep(ms: number): Promise<void> {
 
 @Injectable()
 export class AliLipSyncService {
-  private readonly logger = new Logger(AliLipSyncService.name);
-
   constructor(private readonly config: ConfigService) {}
 
   isConfigured(): boolean {
@@ -186,6 +214,7 @@ export class AliLipSyncService {
     refImageUrl?: string | null;
     durationSeconds?: number;
     videoExtension?: boolean;
+    onProviderEvent?: (state: AliLipSyncProviderState) => void;
   }): Promise<AliLipSyncResult> {
     const cfg = this.resolveConfig();
     return runAiLimited(this.config, () => {
@@ -208,6 +237,7 @@ export class AliLipSyncService {
       audio?: MediaPayload;
       refImageUrl?: string | null;
       videoExtension?: boolean;
+      onProviderEvent?: (state: AliLipSyncProviderState) => void;
     },
   ): Promise<AliLipSyncResult> {
     if (!cfg.apiKey) {
@@ -220,6 +250,8 @@ export class AliLipSyncService {
         'Aliyun VideoRetalk requires both video and audio inputs',
       );
     }
+    this.assertAliyunInputSizeWithinLimit('video', params.video.buffer.length);
+    this.assertAliyunInputSizeWithinLimit('audio', params.audio.buffer.length);
     if (!cfg.tempUploadEnabled && !cfg.publicBaseUrl) {
       throw new BadRequestException(
         'PUBLIC_BASE_URL or LIP_SYNC_PUBLIC_BASE_URL is required so Aliyun can fetch media files',
@@ -277,11 +309,39 @@ export class AliLipSyncService {
     const taskId =
       this.readString(submitOutput.task_id) ||
       this.readString(submitResponse.task_id);
+    const providerState: AliLipSyncProviderState = {
+      name: 'aliyun-videoretalk',
+      requestId:
+        this.readString(submitResponse.request_id) ||
+        this.readString(submitOutput.request_id) ||
+        null,
+      taskId: taskId || null,
+      taskStatus:
+        this.readString(submitOutput.task_status).toUpperCase() || 'SUBMITTED',
+      inputMode,
+      videoUrl,
+      audioUrl,
+      submittedAt: new Date().toISOString(),
+      lastPolledAt: null,
+      recoverUntil: new Date(
+        Date.now() +
+          readNumber(
+            this.config.get('ALI_VIDEORETALK_RECOVER_WINDOW_MS'),
+            24 * 60 * 60_000,
+          ),
+      ).toISOString(),
+      lastResponse: submitResponse,
+    };
+    params.onProviderEvent?.(providerState);
     if (!taskId) {
       throw new Error('Aliyun VideoRetalk did not return output.task_id');
     }
 
-    const resultResponse = await this.pollAliyunTask(cfg, taskId);
+    const resultResponse = await this.pollAliyunTask(cfg, taskId, {
+      deadlineMs: Date.now() + cfg.pollMaxMs,
+      onUpdate: (state) =>
+        params.onProviderEvent?.({ ...providerState, ...state }),
+    });
     const videoResultUrl = this.pickVideoUrl(resultResponse);
     if (!videoResultUrl) {
       throw new Error(
@@ -298,8 +358,107 @@ export class AliLipSyncService {
         submitResponse,
         resultResponse,
       },
+      providerState: {
+        ...providerState,
+        taskStatus: 'SUCCEEDED',
+        lastPolledAt: new Date().toISOString(),
+        lastResponse: resultResponse,
+      },
       hint: 'Aliyun VideoRetalk lip-sync completed.',
     };
+  }
+
+  async recoverAliyunTask(params: {
+    taskId: string;
+    recoverUntil?: string | null;
+    onProviderEvent?: (state: AliLipSyncProviderState) => void;
+  }): Promise<AliLipSyncResult> {
+    const cfg = this.resolveConfig();
+    if (cfg.provider !== 'aliyun-videoretalk') {
+      throw new BadRequestException(
+        'recoverAliyunTask is only available for aliyun-videoretalk provider',
+      );
+    }
+    if (!cfg.apiKey) {
+      throw new BadRequestException(
+        'DASHSCOPE_API_KEY is required for Aliyun VideoRetalk',
+      );
+    }
+    const now = Date.now();
+    const recoverUntilMs = params.recoverUntil
+      ? Date.parse(params.recoverUntil)
+      : now +
+        readNumber(
+          this.config.get('ALI_VIDEORETALK_RECOVER_WINDOW_MS'),
+          24 * 60 * 60_000,
+        );
+    const deadlineMs = Math.min(
+      now + cfg.pollMaxMs,
+      Number.isFinite(recoverUntilMs) ? recoverUntilMs : now + cfg.pollMaxMs,
+    );
+    const stateBase: AliLipSyncProviderState = {
+      name: 'aliyun-videoretalk',
+      taskId: params.taskId,
+      taskStatus: 'RECOVERING',
+      submittedAt: null,
+      recoverUntil: Number.isFinite(recoverUntilMs)
+        ? new Date(recoverUntilMs).toISOString()
+        : null,
+      lastPolledAt: null,
+      lastResponse: null,
+    };
+    params.onProviderEvent?.(stateBase);
+    const resultResponse = await this.pollAliyunTask(cfg, params.taskId, {
+      deadlineMs,
+      onUpdate: (state) => params.onProviderEvent?.({ ...stateBase, ...state }),
+    });
+    const videoResultUrl = this.pickVideoUrl(resultResponse);
+    if (!videoResultUrl) {
+      throw new Error(
+        'Aliyun VideoRetalk succeeded but did not return output.video_url',
+      );
+    }
+    return {
+      videoUrl: videoResultUrl,
+      providerResponse: {
+        provider: 'aliyun-videoretalk',
+        taskId: params.taskId,
+        resultResponse,
+      },
+      providerState: {
+        ...stateBase,
+        taskStatus: 'SUCCEEDED',
+        lastPolledAt: new Date().toISOString(),
+        lastResponse: resultResponse,
+      },
+      hint: 'Aliyun VideoRetalk recovered and completed.',
+    };
+  }
+
+  private assertAliyunInputSizeWithinLimit(
+    kind: 'video' | 'audio',
+    bytes: number,
+  ): void {
+    const maxBytes = this.readAliyunInputMaxBytes();
+    if (bytes <= maxBytes) return;
+    const actualMb = this.formatMb(bytes);
+    const maxMb = this.formatMb(maxBytes);
+    throw new BadRequestException(
+      `Aliyun VideoRetalk input too large: ${kind}=${actualMb}MB exceeds limit ${maxMb}MB (must be < ${maxMb}MB).`,
+    );
+  }
+
+  private readAliyunInputMaxBytes(): number {
+    const raw = this.config.get<string>('ALI_VIDEORETALK_INPUT_MAX_BYTES');
+    const fallback = 300 * 1024 * 1024;
+    if (!raw?.trim()) return fallback;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+    return Math.floor(parsed);
+  }
+
+  private formatMb(bytes: number): string {
+    return (bytes / (1024 * 1024)).toFixed(2);
   }
 
   private async submitGenericForm(
@@ -382,9 +541,14 @@ export class AliLipSyncService {
   private async pollAliyunTask(
     cfg: ResolvedLipSyncConfig,
     taskId: string,
+    opts: {
+      deadlineMs: number;
+      onUpdate?: (state: AliLipSyncProviderState) => void;
+    },
   ): Promise<Record<string, unknown>> {
-    const deadline = Date.now() + cfg.pollMaxMs;
+    const deadline = opts.deadlineMs;
     let lastResponse: Record<string, unknown> | null = null;
+    let lastStatus = 'RUNNING';
 
     while (Date.now() <= deadline) {
       const url = `${cfg.taskBaseUrl.replace(/\/+$/, '')}/tasks/${encodeURIComponent(taskId)}`;
@@ -402,6 +566,18 @@ export class AliLipSyncService {
           ? (json.output as Record<string, unknown>)
           : {};
       const status = this.readString(output.task_status).toUpperCase();
+      lastStatus = status || lastStatus;
+      opts.onUpdate?.({
+        name: 'aliyun-videoretalk',
+        requestId:
+          this.readString(json.request_id) ||
+          this.readString(output.request_id) ||
+          null,
+        taskId,
+        taskStatus: status || null,
+        lastPolledAt: new Date().toISOString(),
+        lastResponse: json,
+      });
       if (status === 'SUCCEEDED') return lastResponse;
       if (status === 'FAILED' || status === 'UNKNOWN') {
         const code = this.readString(output.code);
@@ -413,11 +589,23 @@ export class AliLipSyncService {
 
       await sleep(cfg.pollIntervalMs);
     }
-
-    throw new Error(
-      `Aliyun VideoRetalk task timed out after ${Math.round(cfg.pollMaxMs / 1000)}s: ${JSON.stringify(
+    const recoverUntil = new Date(
+      Date.now() +
+        readNumber(
+          this.config.get('ALI_VIDEORETALK_RECOVER_WINDOW_MS'),
+          24 * 60 * 60_000,
+        ),
+    ).toISOString();
+    throw new AliLipSyncRunningTimeoutError(
+      `Aliyun VideoRetalk task timed out after ${Math.round(cfg.pollMaxMs / 1000)}s while status=${lastStatus}`,
+      {
+        name: 'aliyun-videoretalk',
+        taskId,
+        taskStatus: lastStatus || 'RUNNING',
+        recoverUntil,
+        lastPolledAt: new Date().toISOString(),
         lastResponse,
-      ).slice(0, 800)}`,
+      },
     );
   }
 

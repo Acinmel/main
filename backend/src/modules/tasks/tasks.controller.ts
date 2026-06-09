@@ -11,7 +11,7 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import type { Express, Request } from 'express';
+import type { Request } from 'express';
 import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
 import { AuditService } from '../audit/audit.service';
 import { TasksService } from './tasks.service';

@@ -57,6 +57,7 @@ watch(activeTab, (value) => {
 .resource-library {
   width: 100%;
   min-height: 100dvh;
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 88% 10%, rgba(75, 107, 255, 0.1), transparent 22%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 28%);
@@ -77,27 +78,45 @@ watch(activeTab, (value) => {
   -webkit-backdrop-filter: blur(16px);
 }
 
+.resource-library__tabs :deep(.n-tabs-nav-scroll-wrapper) {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.resource-library__tabs :deep(.n-tabs-nav-scroll-wrapper::-webkit-scrollbar) {
+  display: none;
+}
+
 .resource-library__tabs :deep(.n-tabs-rail) {
+  width: min(100%, 560px);
   max-width: 560px;
   padding: 5px;
   border: 1px solid rgba(255, 255, 255, 0.56);
+  border-radius: 999px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(246, 249, 255, 0.8));
   box-shadow: var(--shadow-soft);
 }
 
+.resource-library__tabs :deep(.n-tabs-capsule) {
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
+  box-shadow: var(--shadow-glow);
+}
+
 .resource-library__tabs :deep(.n-tabs-tab) {
+  z-index: 1;
   min-width: 120px;
   font-weight: 700;
+  color: #334155;
 }
 
 .resource-library__tabs :deep(.n-tabs-tab:hover) {
   color: var(--primary);
 }
 
-.resource-library__tabs :deep(.n-tabs-tab--active) {
-  color: #ffffff;
-  background: linear-gradient(135deg, var(--primary), var(--accent-teal));
-  box-shadow: var(--shadow-glow);
+.resource-library__tabs :deep(.n-tabs-tab--active),
+.resource-library__tabs :deep(.n-tabs-tab--active .n-tabs-tab__label) {
+  color: #ffffff !important;
 }
 
 .resource-library__tabs :deep(.n-tab-pane) {
@@ -107,6 +126,16 @@ watch(activeTab, (value) => {
 @media (max-width: 760px) {
   .resource-library__tabs :deep(.n-tabs-nav) {
     padding: 14px 16px 0;
+  }
+
+  .resource-library__tabs :deep(.n-tabs-rail) {
+    width: 100%;
+    max-width: none;
+  }
+
+  .resource-library__tabs :deep(.n-tabs-tab) {
+    min-width: 96px;
+    padding-inline: 14px;
   }
 }
 </style>

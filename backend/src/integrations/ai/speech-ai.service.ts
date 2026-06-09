@@ -120,10 +120,12 @@ export class SpeechAiService {
         targetModel: params.providerModel,
         languageType:
           params.voiceTuning?.language || this.detectLanguageType(params.text),
-        instruction: this.buildVoiceInstruction(params.voiceTuning),
-        speechRate: params.voiceTuning?.speechRate,
-        volume: params.voiceTuning?.volume,
-        pitch: params.voiceTuning?.pitch,
+        instruction: null,
+        speechRate: this.normalizeAliyunSpeechRate(
+          params.voiceTuning?.speechRate,
+        ),
+        volume: null,
+        pitch: null,
       });
 
       return {
@@ -141,10 +143,12 @@ export class SpeechAiService {
         text: params.text,
         languageType:
           params.voiceTuning?.language || this.detectLanguageType(params.text),
-        instruction: this.buildVoiceInstruction(params.voiceTuning),
-        speechRate: params.voiceTuning?.speechRate,
-        volume: params.voiceTuning?.volume,
-        pitch: params.voiceTuning?.pitch,
+        instruction: null,
+        speechRate: this.normalizeAliyunSpeechRate(
+          params.voiceTuning?.speechRate,
+        ),
+        volume: null,
+        pitch: null,
       });
 
       return {
@@ -157,6 +161,12 @@ export class SpeechAiService {
           qwenSpeech.styleHint ||
           '当前音色没有可用的克隆 voice_id，已使用阿里云默认 TTS 音色按文案生成音频。',
       };
+    }
+
+    // Keep legacy instruction builder reachable for compatibility fallback experiments.
+    const legacyInstruction = this.buildVoiceInstruction(params.voiceTuning);
+    if (legacyInstruction) {
+      this.logger.debug(`voice-instruction=${legacyInstruction}`);
     }
 
     const req = this.buildOpenAiSpeechRequest(
@@ -257,6 +267,12 @@ export class SpeechAiService {
   private normalizeOpenAiSpeed(value?: number | null): number | null {
     if (typeof value !== 'number' || !Number.isFinite(value)) return null;
     const speed = Math.min(4, Math.max(0.25, value));
+    return Math.abs(speed - 1) < 0.01 ? null : Number(speed.toFixed(2));
+  }
+
+  private normalizeAliyunSpeechRate(value?: number | null): number | null {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    const speed = Math.min(2, Math.max(0.5, value));
     return Math.abs(speed - 1) < 0.01 ? null : Number(speed.toFixed(2));
   }
 

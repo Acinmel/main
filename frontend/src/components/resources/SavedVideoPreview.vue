@@ -11,9 +11,11 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   open: [];
+  "preview-error": [];
 }>();
 
 const metadataLoading = ref(false);
+const previewFailed = ref(false);
 let metadataTimer: number | null = null;
 
 function clearMetadataTimer() {
@@ -36,9 +38,18 @@ function onVideoReady() {
   metadataLoading.value = false;
 }
 
+function onVideoError() {
+  onVideoReady();
+  previewFailed.value = true;
+  emit("preview-error");
+}
+
 watch(
   () => props.videoUrl,
-  () => onVideoReady(),
+  () => {
+    previewFailed.value = false;
+    onVideoReady();
+  },
 );
 
 onBeforeUnmount(() => {
@@ -56,7 +67,7 @@ onBeforeUnmount(() => {
       <button
         type="button"
         class="saved-video-preview__open"
-        :disabled="!videoUrl || loading"
+        :disabled="!videoUrl || loading || previewFailed"
         @click="emit('open')"
       >
         点开查看
@@ -64,20 +75,21 @@ onBeforeUnmount(() => {
     </div>
 
     <button
-      v-if="videoUrl"
+      v-if="videoUrl && !previewFailed"
       type="button"
       class="saved-video-preview__frame"
       aria-label="打开视频预览"
       @click="emit('open')"
     >
       <video
+        :key="videoUrl"
         :src="videoUrl"
         muted
         playsinline
         preload="metadata"
         @loadstart="onVideoLoadStart"
         @loadedmetadata="onVideoReady"
-        @error="onVideoReady"
+        @error="onVideoError"
       />
       <span>{{ metadataLoading ? "正在加载元数据" : "点击放大预览" }}</span>
     </button>
@@ -85,10 +97,12 @@ onBeforeUnmount(() => {
     <div
       v-else
       class="saved-video-preview__empty"
-      :class="{ 'is-error': error }"
+      :class="{ 'is-error': error || previewFailed }"
     >
       <span>{{
-        loading
+        previewFailed
+          ? "Preview failed. Please refresh and try again."
+          : loading
           ? "正在加载服务器视频..."
           : error || "选择后会在这里显示视频预览"
       }}</span>

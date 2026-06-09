@@ -16,6 +16,7 @@ import { RewriteAiService } from '../../integrations/ai/rewrite-ai.service';
 import { SpeechAiService } from '../../integrations/ai/speech-ai.service';
 import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.service';
 import { DigitalHumanPersistenceService } from '../digital-human/digital-human-persistence.service';
+import { ResourcesService } from '../resources/resources.service';
 import { UserWorksPersistenceService } from '../works/user-works-persistence.service';
 import type {
   RewritePayloadDto,
@@ -65,6 +66,9 @@ const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
   failed: '失败',
 };
 
+const RETIRED_VOICE_STYLE_IDS = new Set(['neutral_female']);
+const RETIRED_VOICE_STYLE_PREFIXES = ['rec-voice-'];
+
 /**
  * 任务流水线 + 作品持久化（user_works）：内存热数据，DB 为权威存储（可跨进程恢复）。
  */
@@ -81,6 +85,7 @@ export class TasksService implements OnModuleInit, OnModuleDestroy {
     private readonly avatarAi: AvatarAiService,
     private readonly userWorks: UserWorksPersistenceService,
     private readonly digitalHumanPersistence: DigitalHumanPersistenceService,
+    private readonly resources: ResourcesService,
     private readonly config: ConfigService,
   ) {}
 
@@ -279,7 +284,11 @@ export class TasksService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('已提交过生成任务');
     }
 
-    row.renderConfig = { ...options };
+    const voiceStyleId = await this.assertRenderableVoiceStyleId(
+      userId,
+      options.voiceStyleId,
+    );
+    row.renderConfig = { ...options, voiceStyleId };
     row.renderStarted = true;
     this.transitionTo(row, 'voice_generating');
     await this.persistRow(row);
@@ -427,7 +436,10 @@ export class TasksService implements OnModuleInit, OnModuleDestroy {
     if (!row || row.status !== 'voice_generating') return;
     try {
       const text = row.rewrite?.text ?? '';
-      const voiceStyleId = row.renderConfig?.voiceStyleId ?? 'neutral_female';
+      const voiceStyleId = await this.assertRenderableVoiceStyleId(
+        row.userId,
+        row.renderConfig?.voiceStyleId,
+      );
       await this.speechAi.synthesizeWithPlaceholder({
         taskId: id,
         text,
@@ -560,6 +572,65 @@ export class TasksService implements OnModuleInit, OnModuleDestroy {
     if (!allowed.includes(row.status)) {
       throw new BadRequestException(msg);
     }
+  }
+
+  private normalizeVoiceStyleId(value?: string): string {
+    return (value ?? '').trim();
+  }
+
+  private isRetiredVoiceStyleId(voiceStyleId: string): boolean {
+    if (RETIRED_VOICE_STYLE_IDS.has(voiceStyleId)) return true;
+    return RETIRED_VOICE_STYLE_PREFIXES.some((prefix) =>
+      voiceStyleId.startsWith(prefix),
+    );
+  }
+
+  private async assertRenderableVoiceStyleId(
+    userId: string,
+    voiceStyleIdRaw?: string,
+  ): Promise<string> {
+    const voiceStyleId = this.normalizeVoiceStyleId(voiceStyleIdRaw);
+    if (!voiceStyleId) {
+      throw new BadRequestException(
+        'voiceStyleId 缺失，请重新选择你上传或克隆的音色',
+      );
+    }
+    if (this.isRetiredVoiceStyleId(voiceStyleId)) {
+      throw new BadRequestException(
+        '不支持内置/推荐音色，请选择你上传或克隆的音色',
+      );
+    }
+
+    let voice:
+      | {
+          owner: 'mine' | 'recommended';
+          canUseForRender: boolean;
+          renderUnavailableReason: string | null;
+        }
+      | undefined;
+    try {
+      voice = await this.resources.getVoice(userId, voiceStyleId);
+    } catch (error) {
+      if (
+        error instanceof NotFoundException ||
+        error instanceof ForbiddenException
+      ) {
+        throw new BadRequestException(
+          '音色不可用，请重新选择你上传或克隆的音色',
+        );
+      }
+      throw error;
+    }
+
+    if (!voice || voice.owner !== 'mine') {
+      throw new BadRequestException('仅支持当前账号下的音色，请重新选择');
+    }
+    if (!voice.canUseForRender) {
+      throw new BadRequestException(
+        voice.renderUnavailableReason || '音色暂不可用，请重新选择',
+      );
+    }
+    return voiceStyleId;
   }
 
   private toDetail(row: TaskInternal): TaskDetailDto {

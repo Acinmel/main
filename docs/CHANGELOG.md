@@ -1,143 +1,229 @@
 # Changelog
 
-## 2026-05-19 BE-PROD-001
+## 2026-05-27 BE-CORE-008 VideoRetalk Preflight Baseline
 
-### Changed
+- `SubtitleWorkflowService` media preflight default thresholds are now provider-aligned: `120s`, `300MB`, max side `2048`, audio `30MB`.
+- `ALI_VIDEORETALK_MEDIA_ALLOWED_PIX_FMTS` default is now empty, so pix_fmt is blocked only when explicitly configured.
+- Kept bitrate as diagnostic-only (log, no blocking).
+- Synced root/backend/deploy env examples and `docs/DEPLOY.md`; added unit test coverage in `subtitle-workflow.service.spec.ts`.
 
-- Reduced public `GET /api/health` payload to minimal fields: `ok`, `app`, `version`.
-- Changed `GET /api/health/deep` to return a public summary by default (`checks.<item>.ok` only), removing public exposure of build file lists, git commit, runtime paths, and dependency internals.
-- Added controlled detailed health mode: full diagnostics now require either loopback access or `X-Health-Token` matching `HEALTH_DEEP_TOKEN`.
-- Updated `scripts/smoke-test.sh` and `scripts/verify-runtime.sh` to optionally include `X-Health-Token` via `HEALTH_DEEP_TOKEN`.
-- Updated deployment/API docs for the new health exposure policy.
+## 2026-05-27 OPS-CORE-001 Core Flow Runtime Gate
 
-## 2026-05-19 BE-PROD-002
+- Added local/staging core-flow preflight checks for writable upload/temp/media directories, `uploads/tmp`, `ffprobe`, ASR script presence, legacy endpoint switches, and Nginx Range forwarding.
+- Added Docker Compose environment passthrough for `FFPROBE_BIN`, `ENABLE_LEGACY_TOOLS_ENDPOINTS`, and `ENABLE_LEGACY_TASKS_ENDPOINTS`.
+- Documented the local/staging runtime gate and kept real ASR/TTS/VideoRetalk provider validation opt-in through `CORE_FLOW_REAL_PROVIDER=1`.
 
-### Changed
+## 2026-05-27 FE-PERF-CORE-001 Core Flow Polling
 
-- `GET /api/v1/tools/digital-human-env` no longer returns `arkKeyLength`.
-- Response is restricted to capability booleans only: `arkConfigured`, `seedreamConfigured`, `remoteConfigured`.
-- Added e2e regression assertion to prevent re-exposing key-length metadata.
-- Updated API documentation for `digital-human-env` response contract.
+- `/studio` package-render polling now uses a single recursive timer with `taskId` and `pollSeq` stale-response checks.
+- Removed duplicate status refresh immediately after package task creation; the polling loop owns the first and subsequent reads.
+- Package render terminal, failed, and timeout states release the submit lock for retry.
 
-## 2026-05-19 FE-PERF-001
+## 2026-05-27 BE-CLEAN-004 Backend Slimming
 
-### Changed
+- Removed legacy-only AI providers from `backend/src/integrations/ai/ai.module.ts`: `VideoGenerateLlmService`, `SeedanceI2vService`, `ArkI2vVideoService`.
+- Removed corresponding injections and deprecated route handlers from `backend/src/modules/tools/tools.controller.ts`: `generate-video-preview`, `seedance-i2v-async`, `ark-i2v-task`.
+- Deleted unused legacy service files:
+  - `backend/src/integrations/ai/video-generate-llm.service.ts`
+  - `backend/src/integrations/ai/seedance-i2v.service.ts`
+  - `backend/src/integrations/ai/ark-i2v-video.service.ts`
+- Regression check passed: `npm --prefix backend run build`, `npm --prefix backend run test`.
 
-- Removed the full-file saved-video Blob preview path from avatar creation, avatar resource cards, and studio avatar cover fallback.
-- `NewAvatarModal` now uses the current-user `GET /api/v1/resources/avatars/upload-videos` response and passes `previewUrl` directly to `<video preload="metadata">`.
-- `AvatarLibraryView` and `CreativeStudioView` now use `/api/v1/resources/avatar-video-files/:fileName/stream` URLs instead of downloading large videos into object URLs.
-- Removed the unused `fetchSavedVideoBlob()` API helper.
+## 2026-05-27 OPS-038 VideoRetalk Ops Runbook
 
-## 2026-05-19 BE-PERF-001
+- Added local/staging Aliyun VideoRetalk operations guidance for polling budget, `provider_running` recovery, media preflight limits, log retention, and troubleshooting commands.
+- Added VideoRetalk preflight and recovery environment variables to root/backend/deploy env examples.
+- Documented that real provider validation requires explicit manual confirmation and must not use production data or production keys.
 
-### Changed
+## 2026-05-27 BE-CLEAN-002 Legacy Tools Kill-Switch
 
-- `GET /api/v1/resources/avatar-video-files/:fileName/stream` now supports byte range requests with `206 Partial Content`, `416`, `Content-Range`, and `Accept-Ranges: bytes` while preserving current-user ownership checks.
-- `GET /api/v1/resources/avatar-video-files/:fileName/metadata` returns avatar upload video metadata without reading the full video file.
-- `GET /api/v1/resources/avatars/upload-videos` now includes `mimeType` and `metadataUrl`.
+- Added a backend kill-switch for high-risk legacy tools endpoints in `backend/src/app.config.ts`.
+- Default behavior is disabled (`410 Gone`) to prevent bypass of project-scoped checks, media preflight, SSRF hardening, and provider dedupe flow.
+- Optional compatibility switch for test environments: `ENABLE_LEGACY_TOOLS_ENDPOINTS=true`.
+- Added e2e coverage in `backend/test/tools-pipeline.e2e-spec.ts` to assert disabled endpoints return `410`.
 
-## 2026-05-19 QA Strategy
+## 2026-05-27 FE-PERF-012 Stage State Save Queue
 
-### Changed
+- `/studio` step-2 `stage-state` saves now use a latest-only queue: identical pending/done payloads are skipped, and rapid avatar/model/quality changes keep only the newest unsent payload.
+- `PUT stage-state` is serialized to one in-flight request; stale results only complete when they still belong to the current `projectId` and latest save sequence.
+- Project switch, route leave, and component unmount abort the active save and clear queued stale payloads.
 
-- After `v1.0`, QA no longer defaults to full module core-flow regression.
-- Future acceptance focuses on request frequency, risky parameters, memory/data retention, object URL/blob cleanup, timers, listeners, polling, one-off component teardown, and deployment/runtime growth risks.
-- Synced policy docs: `PROJECT_STATE.md`, `ACCEPTANCE.md`, `docs/TEST_PLAN.md`, `TASK_BOARD.md`.
+## 2026-05-26 QA-048 LipSync Source Format Contract
 
-## 2026-05-19 v1.0
+- QA-048 验收口径收敛为源视频格式合同：用户上传视频的格式参数必须贯穿到第二步最终口型预览，除口型变化外不允许改变画幅、比例、帧率、像素格式、色彩元数据和音轨策略。
+- `BE-072` 调整为后端必须记录 source/provider/final 三段 ffprobe 摘要，并在 provider 输出异常时恢复到源格式或让任务失败，不得保存异常成功资产。
+- `QA-049` 调整为对源视频、预处理输入、provider 临时输出、第二步最终预览输出和第三步包装输出做 ffprobe 验收。
 
-### Milestone
+## 2026-05-26 BE-070 Preserve Source Aspect For LipSync
 
-- Production end-to-end flow is verified and the project is now marked as `v1.0`.
-- The team focus moves from main-flow completion to targeted functional improvements, UX polish, security boundary hardening, preview performance, monitoring, and test automation.
-- Thanks to all agents: Commander, Frontend UI + Business Development, Frontend Optimization, Backend Feature Development, Backend Optimization, Ops/Server Maintenance, QA Acceptance, and Architecture Review.
+- `prepareVideoForAliLipSync()` 与 `normalizeVideoForRenderMode()` 已支持真正 `preserveSourceAspect`：不再默认注入 `scale/pad` 过滤器。
+- 第二步口型任务默认 `renderMode` 改为 `preserveSourceAspect`，不再默认按 `adaptive` 重写尺寸。
+- `1080x1920` 仍保留，仅在明确选择竖版输出时使用。
+- 新增单测覆盖 `preserveSourceAspect` 下 `ffmpeg` 参数不包含 `-vf scale/pad`。
 
-## 2026-05-19 BE Font Runtime Hotfix
+## 2026-05-26 CosyVoice TTS Rate Control
 
-### Changed
+- 生成音频统一收敛到阿里云 CosyVoice SpeechSynthesizer。
+- `voiceRate` 继续由前端语速滑块传入，并透传为阿里云 `parameters.rate`。
+- 历史音色若保存了非 CosyVoice 合成模型，生成音频时不再走旧的 multimodal generation 路径。
 
-- Backend Docker images now install CJK fonts (`fonts-noto-cjk`, `fonts-wqy-zenhei`) and run `fc-cache -f -v` during build.
-- ASS subtitle default font changed from `Microsoft YaHei` to `Noto Sans CJK SC`.
-- Recommended subtitle template `fontFamily` defaults and preview SVG font stacks were aligned to `Noto Sans CJK SC`.
-- Deployment doc updated: `docs/DEPLOY.md`.
+## 2026-05-26 VideoRetalk Input Size Guard
 
-## 2026-05-19 BE-016
+- 后端新增 Aliyun VideoRetalk 输入大小前置校验：视频和音频单文件默认上限 300MB（可通过 `ALI_VIDEORETALK_INPUT_MAX_BYTES` 配置）。
+- 超限时在后端直接返回 `400 Bad Request`，避免任务进入 provider 后才失败并消耗轮询时间。
+- 新增单测覆盖超限拦截：`ali-lip-sync.service.spec.ts`。
 
-### Changed
+## 2026-05-26 BE-069 Subtitle Source Boundary
 
-- Added `GET /api/v1/resources/avatars/upload-videos` for “add avatar from saved videos”; this endpoint is now user-scoped and only returns `avatar-upload_*` sources from `avatar_resources`.
-- Added `GET /api/v1/resources/avatar-video-files/:fileName/stream` with ownership enforcement to prevent cross-account preview access.
-- Added server-side ownership validation in avatar creation: local `originalVideoUrl` must be an owned `avatar-upload_*` file, otherwise request is rejected.
-- Synced docs: `docs/API.md` and `docs/DATABASE.md`.
+- `POST /api/v1/audio-assets/:id/subtitle-track` 仅在显式传入 `scriptSegments` 时生成 `source=tts_alignment` 字幕轨。
+- 音频生成阶段自动创建字幕轨恢复为 ASR 轨道（`source=asr`），避免与“按文案分段字幕轴”混用。
+- 分段字幕轨新增强校验：`subtitles.length` 必须等于传入的 `scriptSegments.length`，否则返回错误。
+- 创建字幕轨后同步更新 `audio_assets.subtitle_track_id` 与 `video_project_stage_states.subtitle_track_id`，减少前端读取旧轨道的风险。
+- 新增后端日志字段：`requestedSegmentCount`、`cueCount`、`alignmentSource`，用于 QA 抓包定位。
 
-## 2026-05-19 BE-015
+## 2026-05-25 BE-068 Subtitle Cue Alignment
 
-### Changed
+- `POST /api/v1/audio-assets/:id/subtitle-track` 新增支持 `projectId`、`scriptText`、`scriptSegments` 入参。
+- 当传入 `scriptSegments` 时，字幕轨优先按文案分段生成 `N` 条 `cues`，不再直接等于 ASR 原始段数。
+- 新增时长对齐逻辑：使用 ASR 时间边界 + 音频时长兜底，确保 `startTime/endTime` 递增且不重叠。
+- 保留并强化 `projectId` 归属校验，跨项目音频资产创建字幕轨返回 `400`。
+- 补充 `staged-workflow` controller/service 单测覆盖。
 
-- Added `scripts/verify-release-routes.js` to validate critical route markers in compiled backend artifacts.
-- Added release-time route gate to:
-  - `deploy/build-release.sh`
-  - `deploy/build-release.ps1`
-- Build now fails if either marker is missing in `tools.controller.js`:
-  - `Get)('recent-extractions')`
-  - `Post)('recent-extractions')`
-- Updated release/test docs with pre-release route existence validation steps.
+## 2026-05-25 Studio Legacy Residual Cleanup
 
-## 2026-05-18 Recent Extractions Hotfix
-- Restored backend controller routes for `GET /api/v1/tools/recent-extractions` and `POST /api/v1/tools/recent-extractions`; the service and table already existed but the controller route was missing, causing 404 on the video creation page.
-- Added e2e coverage for list/save recent extraction records. Validation passed: backend lint, unit tests, build, and targeted tools-pipeline e2e.
-## 2026-05-18 Release 20260518-006
+- `/studio` 第一步到第三步完成旧逻辑残留复查：新流程使用真实 `projectId`，不再主动调用历史口型自动匹配接口。
+- 清理前端不可达旧音色校验分支和未使用的 `listSavedVideos()` API 包装，降低后续误用旧 saved-videos 入口的风险。
+- 后端 legacy `studio-current`、`lipsync-assets/resolve` 和旧 `video-script` 路径仍保留兼容，但不作为当前前端主流程入口。
 
-### Deployed
+## 2026-05-25 Video Script Empty State
 
-- Published production release `20260518-006`.
-- Included backend voice-preview async task flow, signed preview audio stream with Range support, and frontend voice-preview polling/status UI.
-- Validation passed: frontend build, DY-DOWNLOADER build, backend build, backend Jest, release checksum verification, preflight, migration, smoke test, and runtime verify.
-- Production containers are running `shuziren-api:20260518-006` and `shuziren-web:20260518-006`.
+- 修复新建创作任务进入第二页时浏览器 Network 出现 `GET /api/video-script/:projectId` 404 的问题。
+- 未保存智能剪辑文案配置现在返回 `200 data=null`，前端按正常空状态继续流程。
+- 前端 video-script API 已统一为 `/api/v1/video-script/*`。
 
-## 2026-05-18 BE-014
+本文件只记录 V1.0 后仍影响当前系统行为的关键变化。历史排查流水、失败中间态和过期任务细节不再追加到这里。
 
-### Changed
+## 2026-05-25
 
-- Voice preview now uses a backend async queue; repeated clicks from the same user supersede older unfinished preview tasks and only the latest result is published.
-- Preview audio streaming now requires short-lived signed access and returns `Content-Length`, `Accept-Ranges`, and `Content-Range` for browser metadata/range reads.
-- Documented `VOICE_PREVIEW_QUEUE_*`, `VOICE_PREVIEW_FILE_*`, `PREVIEW_AUDIO_URL_TTL_SECONDS`, and `PREVIEW_AUDIO_STREAM_SECRET` deployment knobs.
+### ARCH-017 Project-Scoped Long Task Boundary
 
-## 2026-05-18 FE-010
+- 明确所有带 `projectId` 的长任务创建接口必须先校验 `video_projects.id + user_id`。
+- 校验必须发生在 dedupe、并发计数、任务持久化和外部 provider 调用之前。
+- 跨账号请求统一返回 `404`，不得返回 `taskId`，不得创建 `task_statuses`，不得占用并发额度。
+- `studio-current` 只保留旧 stage-state/resolve 兼容，不作为新长任务创建入口。
 
-### Changed
+### BE-066 Ownership Guard Implementation
 
-- `CreativeStudioView` 配音试听改为状态机驱动：`submitted/queued/running/saving/ready/failed/timeout`。
-- 支持两种回包：同步 `audioUrl` 直出、异步 `previewTaskId + statusUrl` 轮询。
-- 试听卡片改为状态可见性驱动，不再只在 `voicePreviewUrl` 存在时显示；无 URL 时禁用播放与下载按钮。
-- 执行验证：`npm --prefix frontend run typecheck`、`npm --prefix frontend run build` 通过。
+- `VideoProjectRenderService` 新增统一 `assertOwnedProject(userId, projectId)`。
+- 已覆盖 `detect-cut-points`、`render-final`、`lipsync-tasks`、`package-render-tasks`、`pd-events` 入口前置校验。
+- 越权请求在 dedupe、并发校验、任务持久化之前即返回 `404`，不会创建内存 task，不会写入 `task_statuses`。
+- 新增单测覆盖跨账号拦截与“无任务创建”断言。
 
-## 2026-05-18
+### FE-PERF-009/010 Studio Request Control
 
-### Changed
+- `/studio` 第二步口型轮询增加 in-flight 请求取消，避免同一 `taskId` 产生并发状态查询。
+- 第三步标题素材轮询改为单 `markId` 单 timeout 链，增加活跃数量、轮询次数和总时长上限。
+- `stage-state`、`video-script/save`、`subtitle-tracks/:id/cues` 增加稳定 payload key 去重，相同 pending/done 内容不重复提交。
+- 保存失败仍展示原有错误提示，并释放 pending key 允许用户再次触发保存。
 
-- 完成 `BE-013`：`POST /api/v1/tools/voice-preview` 改为异步任务快速返回，新增 `GET /api/v1/tools/voice-preview-tasks/:taskId` 查询 `queued/running/succeeded/failed` 状态，并将试听音频 stream 改为用户绑定的短期签名访问（`token + expires`）。
-- 新增后端“最近提取记录”用户隔离：`/api/v1/tools/recent-extractions` 按当前 JWT 用户读写，记录落库 `recent_extractions`（MySQL/SQLite）。
-- 浼樺寲鍓嶇涓庨儴缃蹭綋绉細瀛椾綋鏀逛负 `@fontsource` latin 瀛愰泦锛岃惤鍦伴〉骞冲彴 logo 浠?512px 鍘嬬缉鍒?128px锛岀Щ闄ゆ湭寮曠敤鐨勫墠绔敓鎴?`.js` 鍓湰鍜?PNG 澶囦唤锛屽墠绔?`dist` 浠?4,434,344 bytes 闄嶅埌 2,451,825 bytes銆?- 绉婚櫎鍚庣 `ffmpeg-static` / `ffprobe-static` npm 渚濊禆锛屾敼涓虹户缁娇鐢?`FFMPEG_BIN`銆佹湰鍦?`backend/ffmpeg/bin` 鎴?PATH 涓殑绯荤粺 ffmpeg锛屽悗绔?`node_modules` 浠庣害 626MiB 闄嶅埌绾?211MiB銆?- 鏀舵暃 Docker build context锛氬拷鐣ユ湰鍦?ffmpeg銆佷笂浼犳枃浠躲€佽繍琛屾暟鎹€佹棩蹇椼€佸獟浣撲复鏃舵枃浠跺拰鍓嶇鐢熸垚鍓湰锛岄伩鍏嶆妸鏈湴杩愯浜х墿閫佸叆闀滃儚鏋勫缓銆?- 淇澹伴煶璧勬簮缂哄け鏍锋湰鏃剁粺涓€鎾斁鍚屼竴娈靛閮ㄩ煶涔愮殑闂锛涙棫鐨勫厹搴曢煶棰?URL 浼氬湪璧勬簮鍒濆鍖栨椂娓呯悊涓虹┖銆?- 鏈€缁堟覆鏌撳悗绔吋瀹归《灞?`voiceRate` 璇€熷弬鏁帮紝骞朵紭鍏堣鐩栨棫鐨?`voiceTuning.speechRate`锛屼緵鍓嶇鎺ュ叆鐢ㄦ埛鑷€夎閫熴€?- 鍒涗綔椤佃閫熸帶浠堕粯璁ゅ€艰皟鏁翠负 `1.0`锛岃寖鍥村榻?`0.5` 鍒?`1.5`锛屾渶缁堟垚鐗囪姹備細鍦?payload 椤跺眰浼?`voiceRate`銆?- 鍚屾鍒涗綔椤?JS 鍓湰涓殑璇€熼粯璁ゅ€硷紝骞惰 Vite 鏃犳墿灞曞鍏ヤ紭鍏堣В鏋?TS/Vue 婧愭枃浠讹紝閬垮厤鍚屽悕 JS 鍓湰瑕嗙洊鍓嶇婧愮爜鏀瑰姩銆?- 鍓嶇鏂板 `npm --prefix frontend run lint` 闂ㄧ锛屽綋鍓嶅鐢?`vue-tsc -b` 杩涜绫诲瀷鍜岀粍浠跺绾︽鏌ャ€?- 淇 `local-upload` 闊宠壊濂戠害锛氬厠闅嗗け璐ヤ細鍥為€€鍒涘缓鏈湴闊宠壊锛宍voice-preview` 涓?`render-final` 鍙鐢ㄦ牱鏈煶棰戯紝涓嶅啀琚悗绔洿鎺ユ嫆缁濄€?- 澹伴煶鏍锋湰瀛樺偍鏂板 `local/oss` 鍙屾ā寮忥細褰?`VOICE_SAMPLE_STORAGE=oss` 鏃讹紝鏍锋湰鍐欏叆 OSS 涓斾繚鎸?`voice-files/*/stream` 涓?`provider-stream` 鎺ュ彛涓嶅彉銆?- 浼樺寲 OSS 澹伴煶鏍锋湰鍥炶锛氳瘯鍚拰 provider 璁块棶鏀逛负娴佸紡杩斿洖锛岄檷浣庡悗绔唴瀛樺崰鐢ㄥ拰棣栧瓧鑺傜瓑寰呫€?- 淇绾夸笂 OSS 澹伴煶鏍锋湰娴佸紡璇诲彇鍏煎闂锛氬吋瀹?`ali-oss getStream()` 杩斿洖 `{ stream }` 鐨勭粨鏋勶紝`voice-files/*/stream` 浠?404 鎭㈠涓?200銆?- 澶村儚璧勬簮鍒楄〃鏂板缁熶竴鐢熸垚鍒ゅ畾瀛楁 `canUseForRender`銆乣renderUnavailableReason`銆乣renderMode=source-video`锛屽悗绔細璇嗗埆鏈湴鏂囦欢缂哄け涓庢棤鏁堣棰戝湴鍧€骞惰繑鍥炴槑纭師鍥犮€?- 鍒涗綔椤电浜屾鏂板璧勬簮鐘舵€佺鐢ㄥ師鍥犲睍绀猴紱鏁板瓧浜烘坊鍔犲脊绐楄鍙?`/api/v1/tools/saved-videos` 澶辫触鏃跺睍绀洪敊璇拰閲嶈瘯鍏ュ彛锛屼笉鍐嶉潤榛樺垏鎹㈠埌鎵嬪姩 URL銆?- 淇 `/studio` 璇€?闊抽噺婊戞潌缁勪欢娉ㄥ唽锛岃ˉ榻?`NSlider` 瀵煎叆锛涗慨澶嶆暟瀛椾汉娣诲姞寮圭獥鍒濇鎵撳紑鏃朵笉璇锋眰宸蹭繚瀛樿棰戝垪琛ㄧ殑闂銆?- 淇 `/studio` 绗簩姝ユ粦鏉嗚瑕嗙洊鏍峰紡闅愯棌鐨勯棶棰橈紝璇€熷拰闊抽噺璋冭妭鐜板湪鍙锛岃閫熷彲浠庨粯璁?`1.00` 鎷栧姩璋冩暣銆?- 淇 `/api/health/deep` 鏈湴鍋ュ悍妫€鏌ヤ竴鑷存€э細ffmpeg 鎺㈡祴澶嶇敤涓氬姟閾捐矾閫昏緫锛宻chema 妫€鏌ユ寜 MySQL/SQLite 鏂硅█鍒嗘敮鎵ц銆?- 浼樺寲璧勬簮搴撴暟瀛椾汉瑙嗛棰勮鍔犺浇锛氶灞忎笉鍐嶅叏閲忔媺鍙栬棰戞祦锛屽崱鐗?hover 鎸夐渶鍔犺浇锛屽苟澶嶇敤浼氳瘽绾ч瑙堢紦瀛樸€?- 鍙戝竷绾夸笂鐗堟湰 `20260518-005`锛岄儴缃插悗 `/api/health` 涓?`/api/health/deep` 鍧囪繑鍥?`ok=true`銆?- 淇鍒涗綔椤碘€滄渶杩戞彁鍙栬褰曗€濊法璐﹀彿鍙闂锛氳褰曟敼涓烘寜褰撳墠鐧诲綍璐﹀彿闅旂瀛樺偍锛屾棫鐨勫叏灞€娴忚鍣ㄧ紦瀛樹笉鍐嶈鍙栥€?
-- 浼樺寲 `/resources` 绱犳潗搴撹棰戦瑙堝姞杞界瓥鐣ワ細绉婚櫎鍒楄〃鍙樻洿鏃剁殑鍗＄墖鍏ㄩ噺棰勫姞杞斤紝鏀逛负鍗＄墖 hover 鎸夐渶鍔犺浇锛涙柊澧炰細璇濈骇棰勮缂撳瓨锛岃法椤甸潰杩斿洖绱犳潗搴撴椂澶嶇敤宸插姞杞介瑙堬紝鍑忓皯鍙嶅鈥滃姞杞介瑙堜腑鈥濄€?- 淇 FE-008 杩斿伐闂锛氫細璇濈紦瀛?key 浠?`id + updatedAt + originalVideoUrl` 璋冩暣涓?`id + originalVideoUrl`锛岄伩鍏?SPA 璺敱杩斿洖鍚庡悓涓€鍗＄墖浜屾 hover 浠嶉噸澶嶈姹傚悓涓€ stream銆?
-## 2026-05-17
+### FE-PERF-008 Task List Performance
 
-### Added
+- 新增 `/projects` 创作任务列表入口，支持按进行中、已归档、全部分页读取当前账号任务。
+- 任务列表支持打开详情前预检、改名、归档和恢复，操作期间显示加载态并禁止重复点击。
+- `videoProjects` 前端 API 增加列表、改名、归档/恢复和 `AbortSignal` 支持。
+- 创作台项目详情与 stage-state 恢复请求支持取消陈旧请求；恢复期间不挂载大视频预览，避免视频初始化阻塞任务恢复。
 
-- 鏂板澶?Agent 鍗忎綔鍏ュ彛 `AGENTS.md`銆?- 鏂板椤圭洰鐘舵€佹枃浠?`PROJECT_STATE.md`銆?- 鏂板浠诲姟鐪嬫澘 `TASK_BOARD.md`銆?- 鏂板璺嚎鍥?`ROADMAP.md`銆?- 鏂板缁熶竴楠屾敹鏍囧噯 `ACCEPTANCE.md`銆?- 鏂板 PRD銆丄PI銆佹暟鎹簱銆乁I銆侀儴缃层€佹祴璇曡鍒掓枃妗ｃ€?- 鏂板 `scripts/check-all.sh`锛岀敤浜庡墠绔€佸悗绔€丏ocker 閰嶇疆鍏ㄩ噺妫€鏌ャ€?- 鏂板 `scripts/smoke-test.sh`锛岀敤浜庡墠绔€佸悗绔仴搴峰拰鏍稿績 API smoke test銆?- 鏂板 `scripts/deploy-staging.sh`锛岀敤浜庢湰鍦?staging compose 鍙戝竷鍜?smoke test銆?- 鏂板 `scripts/rollback.sh`锛岀敤浜庡鎵樼幇鏈夌敓浜?runtime 鍥炴粴鑴氭湰銆?- 鏂板浠诲姟鍒嗗彂鍒ゆ柇瑙勫垯锛屾槑纭〉闈€佹€ц兘銆佹帴鍙ｃ€佸苟鍙戙€侀儴缃层€佽仈璋冨拰鏋舵瀯绫讳换鍔＄殑璐熻矗浜?Agent銆?- 鏂板鑷姩寮€鍙戦棴鐜紝鏄庣‘鐢ㄦ埛鐩爣鍒?MVP 鎷嗚В銆佸紑鍙戙€佷紭鍖栥€侀儴缃层€佹祴璇曘€佸け璐ヨ繑宸ャ€佹垚鍔熸帹杩涚殑娴佺▼銆?- 鏂板鑷姩鎵ц涓庝汉宸ョ‘璁よ竟鐣岋細寮€鍙戙€佹祴璇曘€佽繑宸ャ€佹祴璇曠幆澧冮儴缃插彲鑷姩鎵ц锛涗骇鍝佹柟鍚戙€佹暟鎹簱鐮村潖鎬у彉鏇淬€佺敓浜у彂甯冦€佷粯璐规帴鍙ｅ瘑閽ュ繀椤讳汉宸ョ‘璁ゃ€?
-### Changed
+### BE-065 Project Binding And Isolation
 
-- 新增后端“最近提取记录”用户隔离：`/api/v1/tools/recent-extractions` 按当前 JWT 用户读写，记录落库 `recent_extractions`（MySQL/SQLite）。
-- 閲嶅啓 `docs/DATABASE.md`锛屼笌褰撳墠 `DatabaseService` 涓殑 MySQL/SQLite 琛ㄧ粨鏋勫拰绱㈠紩瀵归綈銆?- 淇璧勬簮搴撴帹鑽愬瓧骞曟ā鏉垮垵濮嬪寲鏃?`cover_url` / `preview_url` 瀛楁闀垮害涓嶈冻瀵艰嚧鎺ュ彛 500 鐨勯棶棰樸€?
-### Operational Notes
+- 音频资产、字幕轨道、口型产物、包装渲染和 stage-state 全链路增加 `projectId` 归属校验并强绑定写入。
+- `studio-current` 仅保留遗留兼容：未传 `projectId` 时回退到 `studio-current`，并兼容命中 legacy `project_id IS NULL` 记录。
+- `lipsync-assets/resolve` 兼容 legacy 数据查询，但新流程保持 `userId + projectId` 精确匹配，不跨项目复用。
+- 新增后端测试覆盖：跨账号项目访问拦截、跨项目音频引用拦截、缓存逻辑回归。
 
-- 鍓嶇鏃╂湡娌℃湁 `lint` 鑴氭湰鏃讹紝`scripts/check-all.sh` 浼氫互 `npm --prefix frontend run typecheck` 浣滀负 lint 鍏滃簳锛?026-05-18 璧?`package.json` 宸叉彁渚?`lint` gate銆?- 鍚庣 `package.json` 鐨?lint 鑴氭湰鍖呭惈 `--fix`锛宍scripts/check-all.sh` 浣跨敤 `npx eslint` 鍋氶潪鐮村潖鎬?lint锛岄伩鍏嶈嚜鍔ㄦ敼鍐欐枃浠躲€?
+### Video Projects CRUD
 
+- 新增创作任务主表 `video_projects`（SQLite/MySQL），按 `user_id` 隔离。
+- 新增创作任务接口：
+  - `POST /api/v1/video-projects`
+  - `GET /api/v1/video-projects`
+  - `GET /api/v1/video-projects/:projectId`
+  - `PATCH /api/v1/video-projects/:projectId`
+  - `POST /api/v1/video-projects/:projectId/archive`
+- 任务名允许重复，`projectId` 为唯一主键；支持改名和归档，不删除底层音视频资产。
 
+### ARCH-016 Creation Task Container
 
-# 2026-05-19
+- 确定新增 `video_projects` 作为创作任务主实体。
+- 任务名只用于展示和搜索，允许重复；`projectId` 是文案、音频、字幕、口型、模板和包装成片的唯一关联点。
+- 新流程不再使用音频名、文案、数字人视频、爬取链接或画幅自动匹配历史口型结果。
+- `video_project_stage_states` 保留为真实 `projectId` 下的阶段快照，旧 `studio-current` 只作为遗留兼容。
 
-- Deployed release `20260519-003`. Runtime verify and smoke test passed; public `/api/health/deep` now returns summary fields only; static asset cache headers are active online.
-- OPS-PROD-001: Added repo-side production HTTPS hardening. Docker web no longer emits HSTS on internal HTTP; Compose can bind web to loopback with `WEB_BIND_HOST=127.0.0.1`; production deploy rejects non-HTTPS public origins by default; host Nginx HTTPS template/setup script and HTTPS smoke checks were added.
-- OPS-PROD-002: Added production static cache headers. `/assets/*` now returns `Cache-Control: public, max-age=31536000, immutable`; `/index.html` and SPA fallback return `Cache-Control: no-cache`; smoke test now verifies both policies.
-- Documented production health monitoring contract: public `/api/health/deep` monitors should use summary fields only, while detailed diagnostics require `X-Health-Token`.
+### Documentation Cleanup
+
+- 压缩项目状态、任务看板、路线图和核心 docs。
+- 删除历史流水账、乱码段落、旧接口验收记录和已经失效的中间结论。
+- 文档重新对齐当前核心流程：音频资产、字幕时间轴、口型资产、阶段状态恢复、模板编辑和包装成片。
+
+### Package Render Temp Directory
+
+- 修复第三步“立即剪辑”在本地 `uploads/tmp` 不存在时报 `ENOENT mkdtemp ...package-render-XXXXXX` 的问题。
+- 包装成片和音频探测创建临时目录前，会先递归创建运行临时根目录。
+
+### Stage 2 Lipsync Auto Matching
+
+- 移除前端第二步历史口型视频自动匹配逻辑。
+- `/studio` 不再调用 `lipsync-assets/resolve`，刷新后只恢复音频和字幕时间轴。
+- 第三步只使用当前页面本次生成成功得到的 `digitalHumanVideoAssetId`。
+
+### Stage 2 Result Retention
+
+- 增加 `video_project_stage_states` 作为创作台阶段状态。
+- 增加 `GET/PUT /api/v1/video-projects/:projectId/stage-state`。
+- 前端进入第二步或刷新后自动恢复音频试听和字幕时间轴。
+
+### Stage State Cache And Pending Error Code
+
+- `GET /api/v1/video-projects/:projectId/stage-state` 增加 `Cache-Control: no-store` 等响应头，避免浏览器缓存协商返回 `304` 后误用阶段状态。
+- 待审核账号访问业务接口时，后端 `403` 增加结构化错误码 `ACCOUNT_PENDING`，便于前端稳定识别并跳转待审核页。
+
+### Local Lipsync Preview
+
+- 本地 Vite 增加 `/uploads` 预览代理。
+- 第二步生成口型视频后支持大预览弹窗。
+- 口型预览失败时不再静默显示空视频框。
+
+### Audio And ASR Stability
+
+- TTS 音频进入 ASR 前统一转为 `16kHz mono wav`。
+- 音频生成失败时在第二步配音区域展示后端错误。
+- 生成字幕时间轴使用秒级 `startTime/endTime`。
+
+### Template Editing
+
+- 字幕模板采用“公版只读、复制后编辑”的模式。
+- 用户模板保存字幕、标题、封面、画幅和位置样式。
+- 包装成片读取保存后的模板样式。
+
+## 2026-05-24
+
+### V1.0 Baseline
+
+- 线上主流程通过：文案、音频、数字人视频、口型生成、字幕模板、标题素材、最终成片。
+- 项目阶段切换为 V1.0 后优化与稳定性迭代。
+
+### Resource Isolation
+
+- 数字人视频、音色、字幕模板、最近提取记录按当前用户隔离。
+- 私有资源流接口要求鉴权和归属校验。
+- 普通新注册用户默认无权限，需管理员开通后使用。
+
+### Title Assets
+
+- 文案 marks 支持 `title_effect`。
+- 标题素材任务使用异步渲染。
+- 最终成片可叠加透明标题素材。
+
+## Ongoing
+
+- `QA-LIPSYNC-001`：真实口型长任务边界测试待 staging/mock 或人工确认。
+- `OPS-PROD-001`：生产 HTTPS、缓存、发布和回滚路径待人工确认后执行。

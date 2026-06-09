@@ -1,13 +1,13 @@
 <template>
   <section class="subtitle-editor">
-    <div class="order-tip">建议顺序：字幕模板 → 标题 → 剪气口 → 画中画 → 背景音乐 → 文案字幕</div>
+    <div class="order-tip">建议顺序：更换模板 -> 高亮标题 -> 高亮字幕</div>
 
     <header class="editor-header">
       <div class="editor-title">
         <span class="title-bar" />
         <div>
           <h2>字幕编辑</h2>
-          <p>支持划重点</p>
+          <p>仅保留高亮标题与高亮字幕能力</p>
         </div>
       </div>
 
@@ -29,26 +29,66 @@
       </div>
     </header>
 
-    <div class="subtitle-list" :class="{ 'subtitle-list--empty': !editableSubtitles.length }">
-      <div v-for="(subtitle, index) in editableSubtitles" :key="subtitle.id || index" class="subtitle-row">
-        <span class="subtitle-index">{{ String(index + 1).padStart(2, '0') }}</span>
-        <div
-          class="subtitle-text"
-          contenteditable="true"
-          spellcheck="false"
-          @input="updateSubtitleText(index, $event)"
-          @dblclick="$emit('toggle-highlight', subtitle)"
-        >
-          <template v-for="(piece, pieceIndex) in buildPieces(subtitle.text)" :key="`${index}-${pieceIndex}-${piece.text}`">
-            <span :class="{ highlight: piece.highlight }">{{ piece.text }}</span>
-          </template>
-        </div>
-      </div>
-      <div v-if="!editableSubtitles.length" class="empty-subtitles">
-        <strong>暂无字幕</strong>
-        <span>请先在第一步整理文案，进入第三步后会自动生成逐句字幕。</span>
-      </div>
+    <div class="script-editor-block">
+      <HighlightEditor
+        :model-value="scriptText"
+        :highlights="highlights"
+        :highlight-style="currentHighlightStyle"
+        @update:model-value="$emit('update:scriptText', $event)"
+        @update:highlights="$emit('update:highlights', $event)"
+        @mark-title="onMarkTitle"
+        @warn="$emit('warn', $event)"
+      />
     </div>
+
+    <section class="timeline-block">
+      <div class="timeline-head">
+        <strong>字幕时间轴</strong>
+        <span>{{ subtitles.length }} 段</span>
+      </div>
+
+      <div v-if="subtitles.length" class="timeline-scroll">
+        <article
+          v-for="(subtitle, index) in subtitles"
+          :key="subtitle.id || `${index}-${subtitle.startTime}-${subtitle.endTime}`"
+          class="timeline-row"
+        >
+          <span class="timeline-index">{{ String(index + 1).padStart(2, "0") }}</span>
+          <input
+            class="timeline-text"
+            type="text"
+            :value="subtitle.text"
+            @input="onSubtitleTextInput(index, $event)"
+          />
+          <div class="timeline-time-group">
+            <button type="button" @click="nudgeStartTime(index, -0.1)">-0.1</button>
+            <input
+              class="timeline-time-input"
+              type="number"
+              step="0.1"
+              min="0"
+              :value="subtitle.startTime"
+              @change="onStartTimeChange(index, $event)"
+            />
+            <button type="button" @click="nudgeStartTime(index, 0.1)">+0.1</button>
+          </div>
+          <span class="timeline-sep">-</span>
+          <div class="timeline-time-group">
+            <button type="button" @click="nudgeEndTime(index, -0.1)">-0.1</button>
+            <input
+              class="timeline-time-input"
+              type="number"
+              step="0.1"
+              min="0"
+              :value="subtitle.endTime"
+              @change="onEndTimeChange(index, $event)"
+            />
+            <button type="button" @click="nudgeEndTime(index, 0.1)">+0.1</button>
+          </div>
+        </article>
+      </div>
+      <div v-else class="timeline-empty">暂无可编辑字幕，请先生成时间轴</div>
+    </section>
 
     <p v-if="renderDisabledReason && !rendering" class="render-block-reason">
       {{ renderDisabledReason }}
@@ -61,61 +101,145 @@
       :title="renderDisabledReason || undefined"
       @click="$emit('render')"
     >
-      {{ rendering ? '正在生成成片...' : '立即剪辑' }}
+      {{ rendering ? "正在生成成片..." : "立即剪辑" }}
     </button>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { SmartClipSubtitle } from '@/api/task'
+import { computed } from "vue";
+import type { SmartClipSubtitle } from "@/api/task";
+import HighlightEditor from "./HighlightEditor.vue";
+import { type ScriptHighlightRange } from "@/utils/highlightRangeUtils";
 
-const props = defineProps<{
-  subtitles: SmartClipSubtitle[]
-  enabled: boolean
-  rendering: boolean
-  renderDisabledReason?: string
-}>()
+type TitleMarkConfig = {
+  templateId: string;
+  themeId: string;
+  position: "center" | "top" | "bottom";
+  duration: number;
+};
+
+const props = withDefaults(
+  defineProps<{
+    subtitles: SmartClipSubtitle[];
+    enabled: boolean;
+    rendering: boolean;
+    renderDisabledReason?: string;
+    scriptText: string;
+    highlights: ScriptHighlightRange[];
+    highlightColor?: string;
+    titleMarkConfig: TitleMarkConfig;
+  }>(),
+  {
+    highlightColor: "#FFD400",
+  },
+);
 
 const emit = defineEmits<{
-  (event: 'update:enabled', value: boolean): void
-  (event: 'update:subtitles', value: SmartClipSubtitle[]): void
-  (event: 'toggle-highlight', value: SmartClipSubtitle): void
-  (event: 'clear'): void
-  (event: 'pull'): void
-  (event: 'restore'): void
-  (event: 'confirm'): void
-  (event: 'render'): void
-}>()
+  (event: "update:enabled", value: boolean): void;
+  (event: "update:subtitles", value: SmartClipSubtitle[]): void;
+  (event: "update:scriptText", value: string): void;
+  (event: "update:highlights", value: ScriptHighlightRange[]): void;
+  (
+    event: "mark-title",
+    value: {
+      start: number;
+      end: number;
+      text: string;
+      templateId: string;
+      themeId: string;
+      position: "center" | "top" | "bottom";
+      duration: number;
+    },
+  ): void;
+  (event: "clear"): void;
+  (event: "pull"): void;
+  (event: "restore"): void;
+  (event: "confirm"): void;
+  (event: "render"): void;
+  (event: "warn", value: string): void;
+}>();
 
-const highlightKeywords = ['顺心事', '财不露白', '福不自炫', '从没错过', '招贴古人', '托您吉', '评论区聊聊']
+const renderBlocked = computed(() => props.rendering || Boolean(props.renderDisabledReason));
+const currentHighlightStyle = computed(() => ({
+  color: props.highlightColor || "#FFD400",
+  fontSizeScale: 1.18,
+  fontWeight: 900,
+}));
 
-const editableSubtitles = computed(() => props.subtitles ?? [])
-const renderBlocked = computed(() => props.rendering || Boolean(props.renderDisabledReason))
-
-function buildPieces(text = '') {
-  const pieces: Array<{ text: string; highlight: boolean }> = []
-  let cursor = 0
-
-  while (cursor < text.length) {
-    const matched = highlightKeywords.find((keyword) => text.startsWith(keyword, cursor))
-    if (matched) {
-      pieces.push({ text: matched, highlight: true })
-      cursor += matched.length
-    } else {
-      pieces.push({ text: text[cursor], highlight: false })
-      cursor += 1
-    }
-  }
-
-  return pieces
+function onMarkTitle(payload: { start: number; end: number; text: string }) {
+  emit("mark-title", {
+    ...payload,
+    templateId: props.titleMarkConfig.templateId,
+    themeId: props.titleMarkConfig.themeId,
+    position: props.titleMarkConfig.position,
+    duration: props.titleMarkConfig.duration,
+  });
 }
 
-function updateSubtitleText(index: number, event: Event) {
-  const target = event.target as HTMLElement
-  const next = editableSubtitles.value.map((item) => ({ ...item }))
-  next[index].text = target.innerText.replace(/\n/g, '')
-  emit('update:subtitles', next)
+function roundSecond(value: number) {
+  return Math.max(0, Number(value.toFixed(2)));
+}
+
+function patchSubtitle(
+  index: number,
+  patch: Partial<SmartClipSubtitle>,
+) {
+  if (index < 0 || index >= props.subtitles.length) return;
+  const next = [...props.subtitles];
+  const current = next[index];
+  if (!current) return;
+  const merged: SmartClipSubtitle = {
+    ...current,
+    ...patch,
+  };
+  const start = Number.isFinite(merged.startTime)
+    ? roundSecond(Number(merged.startTime))
+    : 0;
+  const endCandidate = Number.isFinite(merged.endTime)
+    ? roundSecond(Number(merged.endTime))
+    : roundSecond(start + 0.1);
+  const end = endCandidate > start ? endCandidate : roundSecond(start + 0.1);
+  merged.startTime = start;
+  merged.endTime = end;
+  merged.text = typeof merged.text === "string" ? merged.text : "";
+  next[index] = merged;
+  emit("update:subtitles", next);
+}
+
+function readNumberFromEvent(event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  if (!target) return Number.NaN;
+  return Number(target.value);
+}
+
+function onSubtitleTextInput(index: number, event: Event) {
+  const target = event.target as HTMLInputElement | null;
+  patchSubtitle(index, { text: target?.value ?? "" });
+}
+
+function onStartTimeChange(index: number, event: Event) {
+  const value = readNumberFromEvent(event);
+  if (!Number.isFinite(value)) return;
+  patchSubtitle(index, { startTime: value });
+}
+
+function onEndTimeChange(index: number, event: Event) {
+  const value = readNumberFromEvent(event);
+  if (!Number.isFinite(value)) return;
+  patchSubtitle(index, { endTime: value });
+}
+
+function nudgeStartTime(index: number, delta: number) {
+  const current = props.subtitles[index];
+  if (!current) return;
+  patchSubtitle(index, { startTime: current.startTime + delta });
+}
+
+function nudgeEndTime(index: number, delta: number) {
+  const current = props.subtitles[index];
+  if (!current) return;
+  patchSubtitle(index, { endTime: current.endTime + delta });
 }
 </script>
 
@@ -123,7 +247,7 @@ function updateSubtitleText(index: number, event: Event) {
 .subtitle-editor {
   position: relative;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-rows: auto auto auto auto;
   width: 100%;
   min-width: 0;
   min-height: 0;
@@ -141,10 +265,10 @@ function updateSubtitleText(index: number, event: Event) {
   max-width: min(100%, 430px);
   border-radius: 999px;
   padding: 8px 14px;
-  color: #64748B;
+  color: #64748b;
   font-size: 11px;
   font-weight: 700;
-  background: #F1F5F9;
+  background: #f1f5f9;
 }
 
 .editor-header {
@@ -154,7 +278,7 @@ function updateSubtitleText(index: number, event: Event) {
   gap: 12px;
   min-height: 60px;
   padding: 14px 18px;
-  border-bottom: 1px solid #F1F5F9;
+  border-bottom: 1px solid #f1f5f9;
 }
 
 .editor-title {
@@ -181,7 +305,7 @@ function updateSubtitleText(index: number, event: Event) {
 
 .editor-title p {
   margin: 3px 0 0;
-  color: #94A3B8;
+  color: #94a3b8;
   font-size: var(--font-small, 12px);
   font-weight: 700;
 }
@@ -204,7 +328,7 @@ function updateSubtitleText(index: number, event: Event) {
   position: relative;
   border: 0;
   border-radius: 999px;
-  background: #CBD5E1;
+  background: #cbd5e1;
   cursor: pointer;
 }
 
@@ -235,7 +359,7 @@ function updateSubtitleText(index: number, event: Event) {
 
 .outline {
   height: var(--button-sm-height, 30px);
-  border: 1px solid #DDD6FE;
+  border: 1px solid #ddd6fe;
   border-radius: 999px;
   padding: 0 10px;
   color: var(--primary);
@@ -246,99 +370,152 @@ function updateSubtitleText(index: number, event: Event) {
 }
 
 .outline.danger {
-  border-color: #FCA5A5;
+  border-color: #fca5a5;
   color: var(--danger);
 }
 
 .outline.success {
-  border-color: #BBF7D0;
-  color: #16A34A;
-  background: #F0FDF4;
+  border-color: #bbf7d0;
+  color: #16a34a;
+  background: #f0fdf4;
 }
 
-.subtitle-list {
+.script-editor-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.timeline-block {
+  display: grid;
+  gap: 10px;
   min-height: 0;
-  overflow-y: auto;
-  padding: 6px 0 12px;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid #f1f5f9;
 }
 
-.subtitle-list--empty {
-  display: grid;
-  place-items: center;
-}
-
-.empty-subtitles {
-  display: grid;
-  justify-items: center;
+.timeline-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 8px;
-  padding: 32px 24px;
-  color: #94A3B8;
-  text-align: center;
 }
 
-.empty-subtitles strong {
-  color: var(--text-main);
-  font-size: 15px;
+.timeline-head strong {
+  color: #0f172a;
+  font-size: 13px;
   font-weight: 900;
 }
 
-.empty-subtitles span {
-  max-width: 320px;
+.timeline-head span {
+  color: #64748b;
   font-size: 12px;
   font-weight: 700;
-  line-height: 1.7;
 }
 
-.subtitle-list::-webkit-scrollbar {
+.timeline-scroll {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.timeline-scroll::-webkit-scrollbar {
   width: 8px;
 }
 
-.subtitle-list::-webkit-scrollbar-thumb {
+.timeline-scroll::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: #CBD5E1;
+  background: #cbd5e1;
 }
 
-.subtitle-row {
+.timeline-row {
   display: grid;
-  grid-template-columns: 42px minmax(0, 1fr);
+  grid-template-columns: 32px minmax(0, 1fr) auto auto auto;
   align-items: center;
-  min-height: 36px;
-  padding: 0 20px;
-  border-bottom: 1px solid #F1F5F9;
+  gap: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px;
+  background: #fff;
 }
 
-.subtitle-index {
-  color: #CBD5E1;
+.timeline-index {
+  color: #94a3b8;
   font-size: 11px;
-  font-weight: 900;
+  font-weight: 800;
+  text-align: center;
 }
 
-.subtitle-text {
+.timeline-text,
+.timeline-time-input {
+  border: 1px solid #dbe4ee;
+  border-radius: 8px;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 700;
+  background: #fff;
+}
+
+.timeline-text {
   min-width: 0;
-  outline: none;
-  color: var(--text-main);
-  font-size: var(--font-body, 13px);
-  font-weight: 900;
-  line-height: 1.35;
-  cursor: text;
-  white-space: pre-wrap;
+  height: 32px;
+  padding: 0 10px;
 }
 
-.highlight {
-  color: var(--warning);
-  text-shadow: 0 1px 0 rgba(217, 119, 6, 0.18);
+.timeline-time-input {
+  width: 74px;
+  height: 30px;
+  padding: 0 8px;
+}
+
+.timeline-time-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.timeline-time-group > button {
+  height: 30px;
+  border: 1px solid #ddd6fe;
+  border-radius: 8px;
+  padding: 0 8px;
+  color: #6d28d9;
+  font-size: 11px;
+  font-weight: 800;
+  background: #fff;
+  cursor: pointer;
+}
+
+.timeline-sep {
+  color: #94a3b8;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.timeline-empty {
+  border: 1px dashed #cbd5e1;
+  border-radius: 10px;
+  padding: 12px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .render-block-reason {
-  margin: 0 18px 10px;
+  margin: 10px 18px;
   padding: 10px 12px;
-  border: 1px solid #FED7AA;
+  border: 1px solid #fed7aa;
   border-radius: 12px;
-  color: #9A3412;
+  color: #9a3412;
   font-size: var(--font-small, 12px);
   font-weight: 800;
   line-height: 1.45;
-  background: #FFF7ED;
+  background: #fff7ed;
 }
 
 .render-btn {
@@ -350,7 +527,7 @@ function updateSubtitleText(index: number, event: Event) {
   color: #fff;
   font-size: 15px;
   font-weight: 900;
-  background: linear-gradient(135deg, #7C3AED, #8B5CF6);
+  background: linear-gradient(135deg, #7c3aed, #8b5cf6);
   box-shadow: 0 14px 28px rgba(124, 58, 237, 0.22);
   cursor: pointer;
 }
@@ -369,29 +546,9 @@ function updateSubtitleText(index: number, event: Event) {
     font-size: 14px;
   }
 
-  .editor-actions {
-    gap: 6px;
-  }
-
   .outline {
     padding: 0 8px;
     font-size: 11px;
-  }
-
-  .subtitle-row {
-    grid-template-columns: 36px minmax(0, 1fr);
-    min-height: 34px;
-    padding: 0 16px;
-  }
-
-  .subtitle-text {
-    font-size: 12px;
-  }
-
-  .order-tip {
-    top: -42px;
-    max-width: 360px;
-    padding: 7px 12px;
   }
 }
 </style>

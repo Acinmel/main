@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { NButton, NCard, NCheckbox, NInput, NTag, NText } from 'naive-ui'
 import type { AvatarResource } from '@/types/resources'
 
@@ -17,10 +17,12 @@ const emit = defineEmits<{
   preview: []
   create: []
   'request-preview': []
+  'preview-error': []
 }>()
 
 const editing = ref(false)
 const draftName = ref(props.item.name)
+const previewFailed = ref(false)
 const hasSourceVideo = computed(() => Boolean(props.item.originalVideoUrl))
 
 function saveName() {
@@ -39,11 +41,24 @@ function pauseVideoPreview(event: Event) {
   video.pause()
 }
 
+function onVideoPreviewError() {
+  if (previewFailed.value) return
+  previewFailed.value = true
+  emit('preview-error')
+}
+
 function requestCardPreview() {
   if (!hasSourceVideo.value) return
-  if (props.previewVideoUrl || props.previewLoading) return
+  if (props.previewVideoUrl || props.previewLoading || previewFailed.value) return
   emit('request-preview')
 }
+
+watch(
+  () => props.previewVideoUrl,
+  () => {
+    previewFailed.value = false
+  },
+)
 
 function formatCreatedAt(value: string) {
   const date = new Date(value)
@@ -57,20 +72,22 @@ function formatCreatedAt(value: string) {
   <n-card class="resource-card" content-style="padding: 0">
     <div
       class="resource-card__media"
-      :class="{ 'resource-card__media--video': previewVideoUrl }"
+      :class="{ 'resource-card__media--video': previewVideoUrl && !previewFailed }"
       @pointerenter="requestCardPreview"
     >
       <video
-        v-if="previewVideoUrl"
+        v-if="previewVideoUrl && !previewFailed"
+        :key="previewVideoUrl"
         :src="previewVideoUrl"
         muted
         playsinline
         preload="metadata"
         @pointerenter="playVideoPreview"
         @pointerleave="pauseVideoPreview"
+        @error="onVideoPreviewError"
       />
       <img v-else :src="item.coverUrl" :alt="item.name" loading="lazy" />
-      <span v-if="previewVideoUrl" class="resource-card__media-label">视频预览</span>
+      <span v-if="previewVideoUrl && !previewFailed" class="resource-card__media-label">视频预览</span>
       <span v-else-if="previewLoading" class="resource-card__media-label">加载预览中</span>
       <n-checkbox
         v-if="item.owner === 'mine'"
@@ -204,12 +221,12 @@ function formatCreatedAt(value: string) {
   left: 14px;
   z-index: 2;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
-  justify-content: flex-end;
+  justify-content: center;
   padding-top: 42px;
   opacity: 0;
-  background: linear-gradient(180deg, transparent, rgba(15, 23, 42, 0.62));
+  background: transparent;
   transform: translateY(10px);
   transition:
     opacity var(--transition-fast),
@@ -225,10 +242,28 @@ function formatCreatedAt(value: string) {
 }
 
 .resource-card__actions :deep(.n-button) {
-  min-width: 58px;
+  min-width: 0;
   border-radius: 999px;
   font-weight: 800;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16);
+  box-shadow: none;
+  --n-color: #374151 !important;
+  --n-color-hover: #1f2937 !important;
+  --n-color-pressed: #111827 !important;
+  --n-color-focus: #1f2937 !important;
+  --n-border: 1px solid #374151 !important;
+  --n-border-hover: 1px solid #1f2937 !important;
+  --n-border-pressed: 1px solid #111827 !important;
+  --n-border-focus: 1px solid #1f2937 !important;
+  --n-text-color: #ffffff !important;
+  --n-text-color-hover: #ffffff !important;
+  --n-text-color-pressed: #ffffff !important;
+  --n-text-color-focus: #ffffff !important;
+  --n-ripple-color: transparent !important;
+  --n-box-shadow: none !important;
+}
+
+.resource-card__actions :deep(.n-button__content) {
+  white-space: nowrap;
 }
 
 .resource-card__meta {

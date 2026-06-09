@@ -544,30 +544,38 @@ export class TranscriptionAiService {
     const timeoutMs = Number(this.config.get('ASR_TIMEOUT_MS') ?? 600_000);
     const scriptPath = this.resolveDashScopeRealtimeScriptPath();
     const python = this.resolveAsrPythonCommand();
-    const args = [
-      ...python.prefixArgs,
-      scriptPath,
-      '--file',
-      filePath,
-      '--model',
-      config.model,
-      '--format',
-      this.resolveRealtimeAudioFormat(
-        meta?.originalname || filePath,
-        meta?.mimetype || '',
-      ),
-      '--sample-rate',
-      String(this.getDashScopeRealtimeSampleRate()),
-    ];
-    const language = this.config.get<string>('QWEN_ASR_LANGUAGE')?.trim();
-    if (language) {
-      args.push('--language', language);
-    }
-    if (this.getDashScopeSemanticPunctuationEnabled()) {
-      args.push('--semantic-punctuation-enabled');
-    }
+    let normalized: {
+      filePath: string;
+      format: string;
+      sampleRate: number;
+      cleanupDir: string;
+    } | null = null;
 
     try {
+      normalized = await this.prepareDashScopeRealtimeAudio(
+        filePath,
+        timeoutMs,
+      );
+      const args = [
+        ...python.prefixArgs,
+        scriptPath,
+        '--file',
+        normalized.filePath,
+        '--model',
+        config.model,
+        '--format',
+        normalized.format,
+        '--sample-rate',
+        String(normalized.sampleRate),
+      ];
+      const language = this.config.get<string>('QWEN_ASR_LANGUAGE')?.trim();
+      if (language) {
+        args.push('--language', language);
+      }
+      if (this.getDashScopeSemanticPunctuationEnabled()) {
+        args.push('--semantic-punctuation-enabled');
+      }
+
       const { stdout } = await execFileAsync(python.command, args, {
         timeout: timeoutMs,
         maxBuffer: 8 * 1024 * 1024,
@@ -604,7 +612,71 @@ export class TranscriptionAiService {
         );
       }
       throw new BadRequestException(`FunASR 实时转写失败：${detail}`);
+    } finally {
+      if (normalized?.cleanupDir) {
+        await fs
+          .rm(normalized.cleanupDir, { recursive: true, force: true })
+          .catch(() => undefined);
+      }
     }
+  }
+
+  private async prepareDashScopeRealtimeAudio(
+    filePath: string,
+    timeoutMs: number,
+  ): Promise<{
+    filePath: string;
+    format: string;
+    sampleRate: number;
+    cleanupDir: string;
+  }> {
+    const tempRoot = this.runtimeTempDir();
+    await fs.mkdir(tempRoot, { recursive: true });
+    const cleanupDir = await fs.mkdtemp(path.join(tempRoot, 'kb-funasr-pcm-'));
+    const outputPath = path.join(cleanupDir, 'input.wav');
+    const sampleRate = this.getDashScopeRealtimeSampleRate();
+    const ffmpeg = this.resolveFfmpegCommand();
+
+    try {
+      await execFileAsync(
+        ffmpeg,
+        [
+          '-y',
+          '-i',
+          filePath,
+          '-ac',
+          '1',
+          '-ar',
+          String(sampleRate),
+          '-vn',
+          '-f',
+          'wav',
+          outputPath,
+        ],
+        {
+          timeout: Math.min(timeoutMs, 180_000),
+          maxBuffer: 8 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+    } catch (e) {
+      const err = e as Error & { stderr?: string | Buffer };
+      const detail =
+        err.stderr?.toString?.().trim().slice(0, 800) ||
+        err.message ||
+        String(e);
+      await fs
+        .rm(cleanupDir, { recursive: true, force: true })
+        .catch(() => undefined);
+      throw new BadRequestException(`FFmpeg 音频规范化失败：${detail}`);
+    }
+
+    return {
+      filePath: outputPath,
+      format: 'wav',
+      sampleRate,
+      cleanupDir,
+    };
   }
 
   private assertAcceptableMedia(file: {
@@ -963,6 +1035,23 @@ export class TranscriptionAiService {
     return { command: 'python3', prefixArgs: [] };
   }
 
+  private resolveFfmpegCommand(): string {
+    const configured =
+      this.config.get<string>('FFMPEG_BIN')?.trim() ||
+      this.config.get<string>('FFMPEG_PATH')?.trim();
+    if (configured) return configured;
+
+    const candidates = [
+      path.join(process.cwd(), 'backend', 'ffmpeg', 'bin', 'ffmpeg.exe'),
+      path.join(process.cwd(), 'ffmpeg', 'bin', 'ffmpeg.exe'),
+      path.join(__dirname, '..', '..', '..', 'ffmpeg', 'bin', 'ffmpeg.exe'),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    return 'ffmpeg';
+  }
+
   private readCommandArgs(key: string): string[] {
     const raw = this.config.get<string>(key)?.trim();
     return raw ? raw.split(/\s+/).filter(Boolean) : [];
@@ -1055,23 +1144,6 @@ export class TranscriptionAiService {
     if (mime === 'audio/ogg') return '.ogg';
     if (mime === 'audio/webm') return '.webm';
     return '.wav';
-  }
-
-  private resolveRealtimeAudioFormat(
-    originalname: string,
-    mimetype: string,
-  ): string {
-    const ext = this.resolveRealtimeAudioExtension(
-      originalname,
-      mimetype,
-    ).replace('.', '');
-    const alias: Record<string, string> = {
-      mpeg: 'mp3',
-      mpga: 'mp3',
-      wave: 'wav',
-      xwav: 'wav',
-    };
-    return alias[ext] ?? (ext || 'wav');
   }
 
   private toAudioDataUrl(file: {

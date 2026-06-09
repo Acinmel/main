@@ -1,96 +1,79 @@
-# Backend Queue Model
+# Queue And Async Tasks
 
-## Current model
+## Principle
 
-The project now uses lightweight in-process queues for the highest-risk workloads:
+所有耗时媒体处理都必须异步化。HTTP 创建接口只负责校验、记录任务、返回 `taskId`，不在请求线程里等待 FFmpeg、ASR、TTS、口型生成或 Remotion/标题渲染完成。
 
-- `ffmpeg`: all ffmpeg/ffprobe calls go through one shared limiter.
-- `ai-api`: major external AI calls go through one shared limiter.
-- `render-final`: final smart-clip render work is queued asynchronously and the API returns a task id immediately.
-- `voice-preview`: TTS preview work is queued asynchronously; repeated clicks by the same user supersede older unfinished preview tasks.
+## Current Task Types
 
-This is intentionally small-scope: it reduces blast radius without changing public routes.
+| Kind | Purpose | Status Source |
+|---|---|---|
+| `video-lipsync` | 音频 + 数字人视频生成口型视频 | `task_statuses` |
+| `video-package` | 字幕、标题、音频和视频包装成片 | `task_statuses` |
+| `video-render` | 兼容旧视频渲染任务 | `task_statuses` |
+| `pd-event` | 兼容旧剪辑/事件任务 | `task_statuses` |
+| `title-asset` | 标题透明素材生成 | `video_title_asset` + render task 状态 |
 
-## Render task lifecycle
+## Status Model
 
-1. API receives final render request.
-2. `VideoProjectRenderService.createFinalRenderTask()` creates `render_xxx`.
-3. Status is stored in memory, `task_statuses`, and Redis when configured.
-4. Background execution enters `render-final` queue.
-5. Progress callbacks update status.
-6. Success/failure writes final status.
-7. Expired rows and in-memory terminal tasks are cleaned by interval.
+通用任务：
 
-Status lookup order:
+- `pending`
+- `processing`
+- `completed`
+- `failed`
 
-1. in-process memory
-2. Redis task status cache
-3. SQL `task_statuses`
+标题素材：
 
-## Database table
+- `pending`
+- `processing`
+- `success`
+- `failed`
 
-`task_statuses`
+每个失败状态必须记录可展示的 `error_message`。
 
-| Column | Purpose |
-| --- | --- |
-| `id` | Public task id, e.g. `render_xxx` |
-| `user_id` | Owner guard for status lookup |
-| `kind` | Task category, currently `video-render` or `voice-preview` |
-| `status` | Render: `pending/processing/completed/failed`; voice preview: `queued/running/succeeded/failed` |
-| `progress` | Integer percentage |
-| `payload_json` | Small task metadata |
-| `result_json` | Output URL/duration/hint |
-| `error` | Failure reason |
-| `expires_at` | Cleanup boundary |
+## Idempotency
 
-Indexes:
+- 前端每次点击生成应生成稳定的 `idempotencyKey`。
+- 用户主动重试才允许创建新的 key 或传 `forceRetry=true`。
+- `video-lipsync` 对近期 completed 任务支持复用，默认窗口由 `LIPSYNC_COMPLETED_DEDUPE_WINDOW_MS` 控制。
+- 复用必须限定当前用户和当前项目，不能跨账号复用。
 
-- `(user_id, updated_at, id)`
-- `(status, updated_at)`
-- `(expires_at)`
+## Worker Boundaries
 
-## Recommended defaults
+### API Layer
 
-```env
-FFMPEG_MAX_CONCURRENCY=2
-FFMPEG_QUEUE_LIMIT=20
-AI_API_MAX_CONCURRENCY=4
-AI_API_QUEUE_LIMIT=100
-AI_API_MAX_RETRIES=0
-AI_API_RETRY_DELAY_MS=500
-RENDER_QUEUE_CONCURRENCY=1
-RENDER_QUEUE_LIMIT=50
-VOICE_PREVIEW_QUEUE_CONCURRENCY=2
-VOICE_PREVIEW_QUEUE_LIMIT=50
-VOICE_PREVIEW_FILE_CONCURRENCY=2
-VOICE_PREVIEW_FILE_QUEUE_LIMIT=20
-VOICE_PREVIEW_TASK_MEMORY_MAX=500
-VOICE_PREVIEW_TASK_MEMORY_TTL_MS=21600000
-PREVIEW_AUDIO_URL_TTL_SECONDS=7200
+- 校验 JWT、账号状态和权限。
+- 校验资源归属。
+- 写入任务记录。
+- 返回 `taskId/status`。
+
+### Worker Or Service Layer
+
+- 下载或读取输入媒体。
+- 调用外部 provider。
+- 执行 FFmpeg 或标题素材渲染。
+- 写入输出资产表。
+- 更新任务状态。
+- 清理临时文件。
+
+## Failure Handling
+
+- provider 超时：任务标记 failed，保留 provider 错误摘要。
+- 输入文件缺失：任务直接 failed，不重试。
+- 输出文件校验失败：任务 failed，不能写入可复用资产。
+- 前端轮询超时：不代表任务失败；当前工作流不再自动按音频和数字人匹配历史口型视频，用户需要重新生成或等待当前任务状态完成。
+
+## Cleanup
+
+- 过期 `pending/processing` 任务需要标记 failed 或清理。
+- 临时文件目录需要定期清理。
+- 不删除已登记且仍被项目引用的用户资产。
+
+## Verification
+
+```bash
+npm --prefix backend run test -- video-project-render.service.spec.ts --runInBand
+npm --prefix backend run test -- title-assets.service.spec.ts --runInBand
+npm --prefix backend run build
 ```
-
-For a 2-core VPS, start lower:
-
-```env
-FFMPEG_MAX_CONCURRENCY=1
-AI_API_MAX_CONCURRENCY=2
-RENDER_QUEUE_CONCURRENCY=1
-```
-
-## When to split workers
-
-Move from in-process queues to a separate worker process when any of these are true:
-
-- API p95 latency rises while render/ASR jobs are active
-- ffmpeg jobs regularly exceed CPU capacity
-- AI provider polling lasts many minutes
-- API and worker need independent deploy/scale cycles
-- memory usage spikes with concurrent uploads
-
-Target split:
-
-- API process: auth, upload validation, task creation, status reads
-- Worker process: ffmpeg, ASR/TTS/image/video provider calls, temp cleanup
-- Shared stores: MySQL + Redis + object storage
-
-Keep provider keys only in server/worker env. Never expose GPU or provider endpoints directly to the browser.

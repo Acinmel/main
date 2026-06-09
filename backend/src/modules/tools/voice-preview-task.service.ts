@@ -195,6 +195,9 @@ export class VoicePreviewTaskService {
       throw new ForbiddenException('预览音频访问令牌已过期');
     }
     const expected = this.signPreviewAudio(userId, fileName, expires);
+    if (!this.isStrictHexToken(token) || !this.isStrictHexToken(expected)) {
+      throw new ForbiddenException('preview audio token invalid');
+    }
     const actualBuffer = Buffer.from(token, 'hex');
     const expectedBuffer = Buffer.from(expected, 'hex');
     if (
@@ -203,6 +206,25 @@ export class VoicePreviewTaskService {
     ) {
       throw new ForbiddenException('预览音频访问令牌无效');
     }
+  }
+
+  async assertSignedAudioFileAccess(
+    fileName: string,
+    token?: string,
+    expires?: string,
+  ): Promise<string> {
+    const ownerIds = await this.findPreviewAudioOwnerIds(fileName);
+    for (const ownerId of ownerIds) {
+      try {
+        this.assertSignedAudioAccess(ownerId, fileName, token, expires);
+        return ownerId;
+      } catch (error) {
+        if (!(error instanceof ForbiddenException)) {
+          throw error;
+        }
+      }
+    }
+    throw new ForbiddenException('preview audio token invalid');
   }
 
   private async runTask(taskId: string): Promise<void> {
@@ -473,6 +495,33 @@ export class VoicePreviewTaskService {
     }
   }
 
+  private async findPreviewAudioOwnerIds(fileName: string): Promise<string[]> {
+    const ownerIds = new Set<string>();
+    for (const task of this.tasks.values()) {
+      if (task.result?.fileName === fileName) {
+        ownerIds.add(task.userId);
+      }
+    }
+    if (ownerIds.size > 0) return [...ownerIds];
+
+    const rows = await this.db.queryAll<
+      Pick<TaskStatusRow, 'user_id' | 'result_json'>
+    >(
+      `SELECT user_id, result_json
+         FROM task_statuses
+        WHERE kind = ? AND result_json LIKE ?
+        ORDER BY updated_at DESC
+        LIMIT 20`,
+      ['voice-preview', `%${fileName}%`],
+    );
+    for (const row of rows) {
+      if (this.parseResult(row.result_json).fileName === fileName) {
+        ownerIds.add(row.user_id);
+      }
+    }
+    return [...ownerIds];
+  }
+
   private updateTask(
     taskId: string,
     patch: Partial<VoicePreviewTaskInternal>,
@@ -622,5 +671,9 @@ export class VoicePreviewTaskService {
     return createHmac('sha256', secret)
       .update(`${userId}:${fileName}:${expires}`)
       .digest('hex');
+  }
+
+  private isStrictHexToken(value: string): boolean {
+    return /^[0-9a-fA-F]{64}$/.test(value);
   }
 }

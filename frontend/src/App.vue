@@ -12,9 +12,30 @@ import { appThemeOverrides } from '@/theme/naive-ui-overrides'
 
 const childError = ref<string | null>(null)
 
-onErrorCaptured((err) => {
-  childError.value = err instanceof Error ? err.message : String(err)
-  console.error('[App] child render error', err)
+function getErrorMessage(err: unknown) {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function isRecoverableVueDomError(message: string) {
+  return (
+    message.includes('insertBefore') ||
+    message.includes("Cannot destructure property 'bum'") ||
+    message.includes('parentNode')
+  )
+}
+
+onErrorCaptured((err, _instance, info) => {
+  const message = getErrorMessage(err)
+  if (isRecoverableVueDomError(message)) {
+    console.warn('[App] recoverable child update error', {
+      message,
+      info,
+    })
+    return false
+  }
+
+  childError.value = message
+  console.error('[App] unrecoverable child error', err)
   return false
 })
 </script>

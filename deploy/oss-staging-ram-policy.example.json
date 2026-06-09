@@ -1,0 +1,19 @@
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "oss:PutObject",
+        "oss:GetObject",
+        "oss:DeleteObject",
+        "oss:HeadObject",
+        "oss:ListObjects"
+      ],
+      "Resource": [
+        "acs:oss:*:*:<STAGING_BUCKET>",
+        "acs:oss:*:*:<STAGING_BUCKET>/staging/*"
+      ]
+    }
+  ]
+}

@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { Express, Request, Response } from 'express';
+import type { Request, Response } from 'express';
 import { diskStorage } from 'multer';
 import { ResourcesService } from './resources.service';
 import { Public } from '../auth/public.decorator';
@@ -48,6 +48,13 @@ class RenameResourceDto {
 
 class BatchDeleteDto {
   ids?: string[];
+}
+
+class SignedUploadUrlRequestDto {
+  purpose?: string;
+  fileName?: string;
+  contentType?: string;
+  fileSize?: number;
 }
 
 function scopeOf(value?: string): ResourceScope {
@@ -80,6 +87,14 @@ export class ResourcesController {
   @Post('avatars')
   createAvatar(@Req() req: Request, @Body() body: Record<string, unknown>) {
     return this.resources.createAvatar(req.userId!, body ?? {});
+  }
+
+  @Post('digital-humans')
+  createDigitalHumanAsset(
+    @Req() req: Request,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.resources.createDigitalHumanAsset(req.userId!, body ?? {});
   }
 
   @Post('avatars/upload')
@@ -150,6 +165,52 @@ export class ResourcesController {
     );
   }
 
+  @Public()
+  @Get('avatar-video-files/:fileName/preview-stream')
+  async streamSignedAvatarUploadVideo(
+    @Param('fileName') fileName: string,
+    @Query('token') token: string | undefined,
+    @Query('expires') expires: string | undefined,
+    @Headers('range') range: string | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<StreamableFile> {
+    const file = await this.resources.openSignedAvatarVideoStreamOrThrow(
+      fileName,
+      token,
+      expires,
+      range,
+    );
+    res.setHeader('Content-Type', file.mimetype);
+    res.setHeader('Cache-Control', 'private, max-age=60');
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (file.rangeNotSatisfiable) {
+      res.status(416);
+      res.setHeader('Content-Range', `bytes */${file.totalSize}`);
+    } else if (file.range) {
+      res.status(206);
+      res.setHeader(
+        'Content-Range',
+        `bytes ${file.range.start}-${file.range.end}/${file.totalSize}`,
+      );
+    }
+    res.setHeader('Content-Length', String(file.contentLength));
+    return new StreamableFile(file.stream);
+  }
+
+  @Public()
+  @Get('avatar-video-files/:fileName/preview-metadata')
+  getSignedAvatarUploadVideoMetadata(
+    @Param('fileName') fileName: string,
+    @Query('token') token: string | undefined,
+    @Query('expires') expires: string | undefined,
+  ) {
+    return this.resources.getSignedAvatarVideoMetadataOrThrow(
+      fileName,
+      token,
+      expires,
+    );
+  }
+
   @Patch('avatars/:id')
   renameAvatar(
     @Req() req: Request,
@@ -175,6 +236,17 @@ export class ResourcesController {
       'avatar_resources',
       req.userId!,
       body?.ids,
+    );
+  }
+
+  @Post('uploads/signed-url')
+  createSignedUploadUrl(
+    @Req() req: Request,
+    @Body() body: SignedUploadUrlRequestDto,
+  ) {
+    return this.resources.createSignedUploadUrl(
+      req.userId!,
+      (body ?? {}) as Record<string, unknown>,
     );
   }
 
@@ -317,11 +389,7 @@ export class ResourcesController {
 
   @Delete('subtitle-templates/:id')
   deleteSubtitleTemplate(@Req() req: Request, @Param('id') id: string) {
-    return this.resources.deleteOne(
-      'subtitle_template_resources',
-      req.userId!,
-      id,
-    );
+    return this.resources.deleteSubtitleTemplate(req.userId!, id);
   }
 
   @Post('subtitle-templates/batch-delete')
@@ -329,10 +397,6 @@ export class ResourcesController {
     @Req() req: Request,
     @Body() body: BatchDeleteDto,
   ) {
-    return this.resources.deleteMany(
-      'subtitle_template_resources',
-      req.userId!,
-      body?.ids,
-    );
+    return this.resources.deleteSubtitleTemplates(req.userId!, body?.ids);
   }
 }

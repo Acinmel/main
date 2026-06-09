@@ -24,17 +24,29 @@ const loading = ref(false)
 const form = reactive({
   email: '',
   password: '',
+  phoneNumber: '',
+  idCardNumber: '',
 })
 
 const proofs = ['数字人形象', '口播任务', 'AI 改写']
 
 async function handleSubmit() {
-  if (!form.email?.trim() || !form.password) {
-    message.warning('请填写邮箱和密码')
+  if (!form.email?.trim() || !form.password || !form.phoneNumber?.trim() || !form.idCardNumber?.trim()) {
+    message.warning('请填写邮箱、密码、手机号和身份证号')
     return
   }
   if (form.password.length < 8) {
     message.warning('密码至少 8 位')
+    return
+  }
+  const normalizedPhone = form.phoneNumber.replace(/\s+/g, '')
+  if (!/^1\d{10}$/.test(normalizedPhone)) {
+    message.warning('请输入 11 位手机号')
+    return
+  }
+  const normalizedIdCard = form.idCardNumber.trim().toUpperCase()
+  if (!/^\d{17}[\dX]$/.test(normalizedIdCard)) {
+    message.warning('请输入 18 位身份证号')
     return
   }
   loading.value = true
@@ -42,6 +54,8 @@ async function handleSubmit() {
     const res = await registerAuth({
       email: form.email.trim(),
       password: form.password,
+      phoneNumber: normalizedPhone,
+      idCardNumber: normalizedIdCard,
     })
     user.setSession(res.token, res.user)
     message.success('注册成功，已自动登录')
@@ -79,7 +93,7 @@ async function handleSubmit() {
         <template #header>
           <div class="auth-page__card-head">
             <span>注册账号</span>
-            <p>使用邮箱创建账号，提交后自动登录并开通基础权限。</p>
+            <p>注册后会自动登录，新账号默认进入待审核状态。</p>
           </div>
         </template>
 
@@ -97,6 +111,22 @@ async function handleSubmit() {
               type="password"
               show-password-on="click"
               placeholder="至少 8 位密码"
+            />
+          </n-form-item>
+          <n-form-item label="手机号">
+            <n-input
+              v-model:value="form.phoneNumber"
+              clearable
+              maxlength="11"
+              placeholder="11 位手机号"
+            />
+          </n-form-item>
+          <n-form-item label="身份证号">
+            <n-input
+              v-model:value="form.idCardNumber"
+              type="password"
+              show-password-on="click"
+              placeholder="18 位身份证号"
             />
           </n-form-item>
 

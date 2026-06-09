@@ -9,7 +9,29 @@
     "test:backend:e2e:deploy": "npm --prefix backend run test:e2e:deploy",
     "test:backend:pipeline": "npm --prefix backend run test:pipeline",
     "restart:docker": "powershell -NoProfile -ExecutionPolicy Bypass -File deploy/restart-all-local.ps1",
+    "check:staged-db": "node scripts/check-staged-workflow-db.js",
+    "migrate:staged-db:sqlite": "node scripts/check-staged-workflow-db.js --migrate",
+    "check:subtitle-template-db": "node scripts/check-subtitle-template-db.js",
+    "migrate:subtitle-template-db:sqlite": "node scripts/check-subtitle-template-db.js --migrate",
+    "backfill:subtitle-template-urls": "node scripts/check-subtitle-template-db.js --backfill-urls",
     "rebuild:sqlite": "npm --prefix backend run rebuild:sqlite",
     "rebuild:sqlite:win": "npm --prefix backend run rebuild:sqlite:win"
-  }
+  },
+  "version": "1.0.0",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Acinmel/main.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Acinmel/main/issues"
+  },
+  "homepage": "https://github.com/Acinmel/main#readme"
 }

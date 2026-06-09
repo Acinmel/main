@@ -2,7 +2,7 @@ import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 const DASHSCOPE_AUDIO_BASE = 'https://dashscope.aliyuncs.com/api/v1';
-const DEFAULT_CLONE_TARGET_MODEL = 'cosyvoice-v3.5-plus';
+const DEFAULT_CLONE_TARGET_MODEL = 'cosyvoice-v2';
 const DEFAULT_DESIGN_TARGET_MODEL = 'cosyvoice-v3.5-plus';
 const LEGACY_UPLOAD_CLONE_FALLBACK_MODEL = 'qwen3-tts-vc-2026-01-22';
 const QWEN_ENROLLMENT_MODEL = 'qwen-voice-enrollment';
@@ -292,58 +292,20 @@ export class QwenVoiceCloneService {
       );
     }
 
-    const model = params.targetModel?.trim() || this.resolveCloneTargetModel();
-    if (this.isCosyVoiceModel(model)) {
-      return this.synthesizeCosyVoice({
+    const model = this.resolveSpeechSynthesisModel(
+      params.targetModel,
+      params.voice,
+    );
+    if (this.isQwenTtsModel(model) || this.isQwenTtsVoiceId(params.voice)) {
+      return this.synthesizeQwenTts({
         ...params,
         model,
       });
     }
-
-    const style = this.buildSynthesisStyle(model, params);
-    const languageType = this.normalizeTtsLanguageType(params.languageType);
-    const payload = {
+    return this.synthesizeCosyVoice({
+      ...params,
       model,
-      input: {
-        text: params.text,
-        voice: params.voice,
-        ...(languageType ? { language_type: languageType } : {}),
-        ...style.input,
-      },
-      ...(Object.keys(style.parameters).length
-        ? { parameters: style.parameters }
-        : {}),
-    };
-
-    const response = await this.postJson(
-      `${this.resolveAudioBaseUrl()}/services/aigc/multimodal-generation/generation`,
-      apiKey,
-      payload,
-    );
-
-    const output = this.readRecord(response.output);
-    const outputAudio = this.readRecord(output?.audio);
-    const audioUrl = this.readString(outputAudio?.url);
-    const requestId = this.readString(response.request_id);
-
-    if (!audioUrl) {
-      throw new BadRequestException('阿里云语音合成未返回音频地址');
-    }
-
-    const synthesizedAudio = await this.fetchBinary(audioUrl);
-    if (synthesizedAudio.buffer.length < 128) {
-      throw new BadRequestException('阿里云语音合成返回的音频内容过小');
-    }
-
-    return {
-      buffer: synthesizedAudio.buffer,
-      mimeType: synthesizedAudio.mimeType,
-      providerVoice: params.voice,
-      requestId,
-      audioUrl,
-      styleApplied: style.applied,
-      styleHint: style.hint,
-    };
+    });
   }
 
   async synthesizeDefaultVoice(params: {
@@ -438,9 +400,6 @@ export class QwenVoiceCloneService {
         language_hints: this.normalizeLanguageHints(params.languageType),
         ...style.input,
       },
-      ...(Object.keys(style.parameters).length
-        ? { parameters: style.parameters }
-        : {}),
     };
 
     const response = await this.postJson(
@@ -475,6 +434,88 @@ export class QwenVoiceCloneService {
     };
   }
 
+  private async synthesizeQwenTts(params: {
+    text: string;
+    voice: string;
+    model: string;
+    languageType?: string | null;
+    speechRate?: number | null;
+  }): Promise<{
+    buffer: Buffer;
+    mimeType: string;
+    providerVoice: string;
+    requestId: string | null;
+    audioUrl: string | null;
+    styleApplied?: boolean;
+    styleHint?: string;
+  }> {
+    const apiKey = this.resolveApiKey();
+    if (!apiKey) {
+      throw new BadRequestException(
+        '请先配置 DASHSCOPE_API_KEY 后再进行语音合成',
+      );
+    }
+
+    const normalizedRate = this.normalizeSpeechRate(params.speechRate);
+    const input: Record<string, unknown> = {
+      text: params.text,
+      voice: params.voice,
+    };
+    const languageType = this.normalizeQwenLanguageType(params.languageType);
+    if (languageType) {
+      input.language_type = languageType;
+    }
+    if (normalizedRate !== null) {
+      input.rate = normalizedRate;
+    }
+
+    const response = await this.postJson(
+      `${this.resolveAudioBaseUrl()}/services/aigc/multimodal-generation/generation`,
+      apiKey,
+      {
+        model: params.model,
+        input,
+      },
+    );
+
+    const output = this.readRecord(response.output);
+    const outputAudio = this.readRecord(output?.audio);
+    const requestId = this.readString(response.request_id);
+    const audioUrl = this.readString(outputAudio?.url);
+    let synthesizedAudio: { buffer: Buffer; mimeType: string } | null = null;
+
+    if (audioUrl) {
+      synthesizedAudio = await this.fetchBinary(audioUrl);
+    } else {
+      const audioData = this.readString(outputAudio?.data);
+      if (audioData) {
+        synthesizedAudio = {
+          buffer: Buffer.from(audioData, 'base64'),
+          mimeType: 'audio/wav',
+        };
+      }
+    }
+
+    if (!synthesizedAudio || synthesizedAudio.buffer.length < 128) {
+      throw new BadRequestException(
+        'Aliyun Qwen-TTS returned empty audio content',
+      );
+    }
+
+    return {
+      buffer: synthesizedAudio.buffer,
+      mimeType: synthesizedAudio.mimeType,
+      providerVoice: params.voice,
+      requestId,
+      audioUrl,
+      styleApplied: normalizedRate !== null,
+      styleHint:
+        normalizedRate !== null
+          ? `speechRate=${normalizedRate.toFixed(2)}`
+          : undefined,
+    };
+  }
+
   private resolveAudioBaseUrl(): string {
     return (
       this.config.get<string>('TTS_API_URL')?.trim() ||
@@ -506,6 +547,37 @@ export class QwenVoiceCloneService {
       this.config.get<string>('DASHSCOPE_TTS_MODEL')?.trim() ||
       'cosyvoice-v2'
     );
+  }
+
+  private resolveSpeechSynthesisModel(
+    preferredModel: string | null | undefined,
+    voice: string,
+  ): string {
+    const preferred = preferredModel?.trim() || null;
+    if (this.isQwenTtsVoiceId(voice)) {
+      const candidates = [
+        preferred,
+        this.resolveDefaultTtsModel(),
+        'qwen3-tts-vc-2026-01-22',
+      ];
+      const qwenModel = candidates.find((item) => this.isQwenTtsModel(item));
+      if (qwenModel?.trim()) return qwenModel.trim();
+    }
+    return this.resolveCosyVoiceSynthesisModel(preferred);
+  }
+
+  private resolveCosyVoiceSynthesisModel(preferred?: string | null): string {
+    const candidates = [
+      preferred,
+      this.config.get<string>('QWEN_COSYVOICE_TTS_MODEL')?.trim(),
+      this.resolveDefaultTtsModel(),
+      this.resolveCloneTargetModel(),
+      DEFAULT_CLONE_TARGET_MODEL,
+      'cosyvoice-v2',
+    ];
+    const model = candidates.find((item) => this.isCosyVoiceModel(item));
+    if (model?.trim()) return model.trim();
+    return DEFAULT_CLONE_TARGET_MODEL;
   }
 
   private resolveVoiceCloneTimeoutMs(): number {
@@ -589,7 +661,6 @@ export class QwenVoiceCloneService {
     },
   ): {
     input: Record<string, unknown>;
-    parameters: Record<string, unknown>;
     applied: boolean;
     hint?: string;
   } {
@@ -598,7 +669,7 @@ export class QwenVoiceCloneService {
     const supportsInstruction = this.supportsInstructionControls(model);
     const supportsParameterControls = this.supportsParameterControls(model);
     const input: Record<string, unknown> = {};
-    const parameters: Record<string, unknown> = {};
+    // CosyVoice HTTP non-streaming API expects rate/volume/pitch inside input.
 
     if (hasInstruction && supportsInstruction) {
       // CosyVoice-style models understand instruction prompts for emotion and delivery.
@@ -610,7 +681,7 @@ export class QwenVoiceCloneService {
       typeof params.speechRate === 'number' &&
       Number.isFinite(params.speechRate)
     ) {
-      parameters.rate = Math.min(
+      input.rate = Math.min(
         2,
         Math.max(0.5, Number(params.speechRate.toFixed(2))),
       );
@@ -621,10 +692,7 @@ export class QwenVoiceCloneService {
       typeof params.volume === 'number' &&
       Number.isFinite(params.volume)
     ) {
-      parameters.volume = Math.min(
-        100,
-        Math.max(0, Math.round(params.volume * 50)),
-      );
+      input.volume = Math.min(100, Math.max(0, Math.round(params.volume * 50)));
     }
 
     if (
@@ -632,18 +700,13 @@ export class QwenVoiceCloneService {
       typeof params.pitch === 'number' &&
       Number.isFinite(params.pitch)
     ) {
-      parameters.pitch = Math.min(
-        2,
-        Math.max(0.5, Number(params.pitch.toFixed(2))),
-      );
+      input.pitch = Math.min(2, Math.max(0.5, Number(params.pitch.toFixed(2))));
     }
 
-    const applied =
-      Object.keys(input).length > 0 || Object.keys(parameters).length > 0;
+    const applied = Object.keys(input).length > 0;
     if (hasInstruction && !supportsInstruction) {
       return {
         input,
-        parameters,
         applied,
         hint: applied
           ? '当前音色模型不支持情绪指令，已应用语速/音量/音调参数生成。'
@@ -653,7 +716,6 @@ export class QwenVoiceCloneService {
 
     return {
       input,
-      parameters,
       applied,
       hint: applied
         ? `已使用 ${model} 的情绪指令或语速/音量/音调参数生成配音。`
@@ -663,6 +725,14 @@ export class QwenVoiceCloneService {
 
   private isCosyVoiceModel(model?: string | null): boolean {
     return /^cosyvoice-/i.test(model?.trim() || '');
+  }
+
+  private isQwenTtsModel(model?: string | null): boolean {
+    return /^(qwen3?-tts|qwen-tts)/i.test(model?.trim() || '');
+  }
+
+  private isQwenTtsVoiceId(voice?: string | null): boolean {
+    return /^qwen-tts-/i.test(voice?.trim() || '');
   }
 
   private supportsInstructionControls(model: string): boolean {
@@ -733,6 +803,17 @@ export class QwenVoiceCloneService {
       russian: 'russian',
     };
     return map[key] ?? 'auto';
+  }
+
+  private normalizeQwenLanguageType(language?: string | null): string | null {
+    const normalized = this.normalizeTtsLanguageType(language);
+    if (!normalized || normalized === 'auto') return null;
+    return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  }
+
+  private normalizeSpeechRate(value?: number | null): number | null {
+    if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+    return Math.min(2, Math.max(0.5, Number(value.toFixed(2))));
   }
 
   private async postJson(

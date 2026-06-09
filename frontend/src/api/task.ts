@@ -348,12 +348,14 @@ export async function createVoicePreview(
     script: string;
     voiceResourceId: string;
   } & VoiceTuningRequest,
+  opts?: { signal?: AbortSignal },
 ) {
   const { data } = await http.post<VoicePreviewResponse>(
     "v1/tools/voice-preview",
     body,
     {
       timeout: 180_000,
+      signal: opts?.signal,
     },
   );
   return data;
@@ -373,6 +375,7 @@ export interface VoicePreviewTaskStatusResponse {
 export async function getVoicePreviewTaskStatus(
   taskId: string,
   statusUrl?: string,
+  opts?: { signal?: AbortSignal },
 ) {
   const target = statusUrl?.trim()
     ? statusUrl
@@ -382,6 +385,7 @@ export async function getVoicePreviewTaskStatus(
     : `v1/tools/voice-preview-tasks/${encodeURIComponent(taskId)}`;
   const { data } = await http.get<VoicePreviewTaskStatusResponse>(target, {
     timeout: 20_000,
+    signal: opts?.signal,
   });
   return data;
 }
@@ -403,6 +407,9 @@ export async function createSubtitleWorkflowPreview(
     subtitleTemplateId?: string;
     subtitlesEnabled?: boolean;
     previewSeconds?: number;
+    subtitles?: SmartClipSubtitle[];
+    subtitleVisualStyle?: SubtitleVisualStyle;
+    titleLayout?: TitleLayout;
   } & VoiceTuningRequest,
   opts?: { signal?: AbortSignal },
 ) {
@@ -437,6 +444,7 @@ export type SmartClipCutMode = "light" | "standard" | "strong";
 export type SmartClipRenderStatus =
   | "pending"
   | "processing"
+  | "provider_running"
   | "completed"
   | "failed";
 
@@ -474,12 +482,155 @@ export interface SmartClipHighlightRange {
   fontWeight?: number;
 }
 
+export type VisualAnchor =
+  | "top-left"
+  | "top-center"
+  | "top-right"
+  | "center-left"
+  | "center"
+  | "center-right"
+  | "bottom-left"
+  | "bottom-center"
+  | "bottom-right";
+
+export interface SubtitleVisualStyle {
+  normalColor: string;
+  highlightColor: string;
+  strokeColor: string;
+  shadowColor: string;
+  xPct: number;
+  yPct: number;
+  anchor: VisualAnchor;
+}
+
+export interface TitleLayout {
+  mode: "preset" | "custom";
+  preset: "center" | "top" | "bottom";
+  xPct: number;
+  yPct: number;
+  anchor: VisualAnchor;
+  scale: number;
+}
+
+export interface VideoScriptHighlightStyle {
+  color: string;
+  fontSizeScale: number;
+  fontWeight: number;
+}
+
+export interface VideoScriptHighlightRange {
+  id: string;
+  start: number;
+  end: number;
+  text: string;
+  style: VideoScriptHighlightStyle;
+}
+
+export interface VideoScriptTitleMarkEffect {
+  templateId: string;
+  themeId: string;
+  position: "center" | "top" | "bottom";
+  duration: number;
+  enterAnimation: "pop";
+  exitAnimation: "fade";
+}
+
+export interface VideoScriptTitleMark {
+  id: string;
+  type: "title_effect";
+  start: number;
+  end: number;
+  text: string;
+  effect: VideoScriptTitleMarkEffect;
+  startTime: number;
+  endTime: number;
+}
+
+export interface VideoScriptData {
+  videoId: number | string;
+  scriptText: string;
+  subtitleTemplateId: string;
+  highlights: VideoScriptHighlightRange[];
+  marks: VideoScriptTitleMark[];
+}
+
+export interface TitleAssetRenderTask {
+  taskId: string;
+  status: "pending" | "processing" | "success" | "failed";
+  assetUrl?: string;
+  previewUrl?: string;
+  errorMessage?: string;
+}
+
 export interface SmartClipSubtitle {
   id: string;
   startTime: number;
   endTime: number;
   text: string;
   highlightRanges?: SmartClipHighlightRange[];
+}
+
+export interface AudioAssetRecord {
+  audioAssetId: string;
+  projectId: string | null;
+  name: string;
+  sourceType: "upload" | "tts";
+  status: "pending" | "processing" | "succeeded" | "failed";
+  audioUrl: string | null;
+  durationSeconds: number | null;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  subtitleTrackId: string | null;
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SubtitleTrackWord {
+  text: string;
+  startTime: number;
+  endTime: number;
+}
+
+export interface SubtitleTrackCue {
+  id: string;
+  startTime: number;
+  endTime: number;
+  text: string;
+  confidence?: number;
+  words?: SubtitleTrackWord[];
+}
+
+export interface SubtitleTrackRecord {
+  subtitleTrackId: string;
+  projectId: string | null;
+  audioAssetId: string;
+  source: "asr" | "tts_alignment" | "manual" | "estimate";
+  language: string;
+  durationSeconds: number;
+  subtitles: SubtitleTrackCue[];
+  status: "pending" | "processing" | "succeeded" | "failed";
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type StageStateRenderMode =
+  | "1080x1920"
+  | "adaptive"
+  | "preserveSourceAspect";
+
+export interface ProjectStageStateRecord {
+  projectId: string;
+  scriptHash: string | null;
+  audioAssetId: string | null;
+  subtitleTrackId: string | null;
+  avatarResourceId: string | null;
+  renderMode: StageStateRenderMode | null;
+  lipsyncTaskId: string | null;
+  digitalHumanVideoAssetId: string | null;
+  videoUrl: string | null;
+  updatedAt: string | null;
 }
 
 export interface SmartClipRenderTask {
@@ -489,6 +640,87 @@ export interface SmartClipRenderTask {
   outputUrl?: string;
   duration?: number;
   error?: string;
+  hint?: string;
+  audioAssetId?: string;
+  subtitleTrackId?: string;
+  digitalHumanVideoAssetId?: string;
+}
+
+export async function saveVideoScript(body: {
+  videoId: number | string;
+  scriptText: string;
+  subtitleTemplateId: string;
+  highlights: VideoScriptHighlightRange[];
+}, opts?: { signal?: AbortSignal }) {
+  const { data } = await http.post<{
+    code: number;
+    message: string;
+    data: VideoScriptData;
+  }>("v1/video-script/save", body, {
+    timeout: 20_000,
+    signal: opts?.signal,
+  });
+  return data;
+}
+
+export async function getVideoScript(videoId: number | string) {
+  const { data } = await http.get<{
+    code: number;
+    message: string;
+    data: VideoScriptData | null;
+  }>(`v1/video-script/${encodeURIComponent(String(videoId))}`, {
+    timeout: 20_000,
+  });
+  return data;
+}
+
+export async function markVideoScriptTitle(body: {
+  videoId: number | string;
+  start: number;
+  end: number;
+  text: string;
+  templateId?: string;
+  themeId?: string;
+  position?: "center" | "top" | "bottom";
+  duration?: number;
+}) {
+  const { data } = await http.post<{
+    code: number;
+    message: string;
+    data: VideoScriptTitleMark;
+  }>("v1/video-script/mark-title", body, {
+    timeout: 20_000,
+  });
+  return data;
+}
+
+export async function createTitleAssetRenderTask(body: {
+  videoId: number | string;
+  markId: string;
+}) {
+  const { data } = await http.post<{
+    code: number;
+    message: string;
+    data: { taskId: string; status: "pending" | "processing" | "success" | "failed" };
+  }>("v1/title-assets/render", body, {
+    timeout: 20_000,
+  });
+  return data;
+}
+
+export async function getTitleAssetRenderTask(
+  taskId: string,
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.get<{
+    code: number;
+    message: string;
+    data: TitleAssetRenderTask;
+  }>(`v1/title-assets/render-tasks/${encodeURIComponent(taskId)}`, {
+    timeout: 20_000,
+    signal: opts?.signal,
+  });
+  return data;
 }
 
 export async function detectSmartClipCutPoints(
@@ -513,14 +745,257 @@ export async function detectSmartClipCutPoints(
   return data;
 }
 
+export async function createSmartClipLipSyncTask(
+  projectId: string,
+  body: {
+    idempotencyKey?: string;
+    forceRetry?: boolean;
+    avatarResourceId?: string;
+    digitalHumanId?: string;
+    audioAssetId?: string;
+    voiceResourceId?: string;
+    inputVoiceId?: string;
+    inputAudioUrl?: string;
+    inputAudioPath?: string;
+    script?: string;
+    renderMode?: "1080x1920" | "adaptive" | "preserveSourceAspect";
+  } & VoiceTuningRequest,
+) {
+  const {
+    voiceLanguage,
+    voiceEmotion,
+    voiceEmotionIntensity,
+    voiceRate,
+    voiceVolume,
+    voicePitch,
+    ...payload
+  } = body;
+  const { data } = await http.post<SmartClipRenderTask>(
+    `v1/video-projects/${encodeURIComponent(projectId)}/lipsync-tasks`,
+    {
+      ...payload,
+      voiceRate,
+      voiceTuning: {
+        language: voiceLanguage,
+        emotion: voiceEmotion,
+        emotionIntensity: voiceEmotionIntensity,
+        speechRate: voiceRate,
+        volume: voiceVolume,
+        pitch: voicePitch,
+      },
+    },
+    { timeout: 120_000 },
+  );
+  return data;
+}
+
+export async function createAudioAssetFromTts(
+  body: {
+    projectId?: string;
+    name?: string;
+    text: string;
+    voiceResourceId?: string;
+    idempotencyKey?: string;
+    forceRetry?: boolean;
+  } & VoiceTuningRequest,
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.post<AudioAssetRecord>(
+    "v1/audio-assets/generate",
+    body,
+    { timeout: 180_000, signal: opts?.signal },
+  );
+  return data;
+}
+
+export async function getAudioAsset(
+  audioAssetId: string,
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.get<AudioAssetRecord>(
+    `v1/audio-assets/${encodeURIComponent(audioAssetId)}`,
+    { timeout: 20_000, signal: opts?.signal },
+  );
+  return data;
+}
+
+export interface CreateSubtitleTrackForAudioAssetBody {
+  projectId?: string;
+  scriptText?: string;
+  scriptSegments?: string[];
+}
+
+export async function createSubtitleTrackForAudioAsset(
+  audioAssetId: string,
+  body: CreateSubtitleTrackForAudioAssetBody = {},
+) {
+  const { data } = await http.post<SubtitleTrackRecord>(
+    `v1/audio-assets/${encodeURIComponent(audioAssetId)}/subtitle-track`,
+    body,
+    { timeout: 180_000 },
+  );
+  return data;
+}
+
+export async function getSubtitleTrack(
+  subtitleTrackId: string,
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.get<SubtitleTrackRecord>(
+    `v1/subtitle-tracks/${encodeURIComponent(subtitleTrackId)}`,
+    { timeout: 20_000, signal: opts?.signal },
+  );
+  return data;
+}
+
+export async function getProjectStageState(
+  projectId: string,
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.get<ProjectStageStateRecord>(
+    `v1/video-projects/${encodeURIComponent(projectId)}/stage-state`,
+    { timeout: 20_000, signal: opts?.signal },
+  );
+  return data;
+}
+
+export async function saveProjectStageState(
+  projectId: string,
+  body: {
+    scriptHash?: string | null;
+    audioAssetId?: string | null;
+    subtitleTrackId?: string | null;
+    avatarResourceId?: string | null;
+    renderMode?: StageStateRenderMode | null;
+    lipsyncTaskId?: string | null;
+    digitalHumanVideoAssetId?: string | null;
+    videoUrl?: string | null;
+  },
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.put<ProjectStageStateRecord>(
+    `v1/video-projects/${encodeURIComponent(projectId)}/stage-state`,
+    body,
+    { timeout: 20_000, signal: opts?.signal },
+  );
+  return data;
+}
+
+export async function updateSubtitleTrackCues(
+  subtitleTrackId: string,
+  subtitles: SmartClipSubtitle[],
+  opts?: { signal?: AbortSignal },
+) {
+  const { data } = await http.patch<SubtitleTrackRecord>(
+    `v1/subtitle-tracks/${encodeURIComponent(subtitleTrackId)}/cues`,
+    { subtitles },
+    { timeout: 60_000, signal: opts?.signal },
+  );
+  return data;
+}
+
+export async function createSmartClipPdEventTask(
+  projectId: string,
+  body: {
+    lipsyncTaskId?: string;
+    subtitleTrackId?: string;
+    script: string;
+    avatarResourceId?: string;
+    digitalHumanId?: string;
+    voiceResourceId?: string;
+    includeTitleAssets?: boolean;
+    subtitleTemplateId: string;
+    subtitles: SmartClipSubtitle[];
+    subtitleVisualStyle?: SubtitleVisualStyle;
+    titleLayout?: TitleLayout;
+    cutConfig: {
+      enabled: boolean;
+      mode: SmartClipCutMode;
+      config: SmartClipCutConfig;
+      cutPoints: SmartClipCutPoint[];
+    };
+    backgroundMusic: {
+      enabled: boolean;
+      musicId: string;
+      volume: number;
+    };
+    pipMaterials: {
+      enabled: boolean;
+      items: unknown[];
+    };
+    renderOptions: {
+      resolution: string;
+      format: "mp4";
+      burnSubtitles: boolean;
+      renderMode?: "1080x1920" | "adaptive" | "preserveSourceAspect";
+    };
+  } & VoiceTuningRequest,
+) {
+  const {
+    voiceLanguage,
+    voiceEmotion,
+    voiceEmotionIntensity,
+    voiceRate,
+    voiceVolume,
+    voicePitch,
+    ...payload
+  } = body;
+  const { data } = await http.post<SmartClipRenderTask>(
+    `v1/video-projects/${encodeURIComponent(projectId)}/pd-events`,
+    {
+      ...payload,
+      voiceRate,
+      voiceTuning: {
+        language: voiceLanguage,
+        emotion: voiceEmotion,
+        emotionIntensity: voiceEmotionIntensity,
+        speechRate: voiceRate,
+        volume: voiceVolume,
+        pitch: voicePitch,
+      },
+    },
+    { timeout: 120_000 },
+  );
+  return data;
+}
+
+export async function createSmartClipPackageRenderTask(
+  projectId: string,
+  body: {
+    digitalHumanVideoAssetId: string;
+    audioAssetId: string;
+    subtitleTrackId?: string;
+    subtitleTemplateId?: string;
+    includeTitleAssets?: boolean;
+    subtitleVisualStyle?: SubtitleVisualStyle;
+    titleLayout?: TitleLayout;
+    renderOptions?: {
+      burnSubtitles?: boolean;
+      renderMode?: "1080x1920" | "adaptive" | "preserveSourceAspect";
+    };
+    idempotencyKey?: string;
+    forceRetry?: boolean;
+  },
+) {
+  const { data } = await http.post<SmartClipRenderTask>(
+    `v1/video-projects/${encodeURIComponent(projectId)}/package-render-tasks`,
+    body,
+    { timeout: 120_000 },
+  );
+  return data;
+}
+
 export async function renderSmartClipFinal(
   projectId: string,
   body: {
     script: string;
     avatarResourceId: string;
     voiceResourceId: string;
+    includeTitleAssets?: boolean;
     subtitleTemplateId: string;
     subtitles: SmartClipSubtitle[];
+    subtitleVisualStyle?: SubtitleVisualStyle;
+    titleLayout?: TitleLayout;
     cutConfig: {
       enabled: boolean;
       mode: SmartClipCutMode;
@@ -571,10 +1046,22 @@ export async function renderSmartClipFinal(
   return data;
 }
 
-export async function getSmartClipRenderTask(taskId: string) {
+export async function getSmartClipRenderTask(
+  taskId: string,
+  opts?: { signal?: AbortSignal },
+) {
   const { data } = await http.get<SmartClipRenderTask>(
     `v1/render-tasks/${encodeURIComponent(taskId)}`,
-    { timeout: 30_000 },
+    {
+      timeout: 30_000,
+      params: { _t: Date.now() },
+      headers: {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      },
+      signal: opts?.signal,
+    },
   );
   return data;
 }
@@ -764,15 +1251,6 @@ export async function downloadSourceVideoFile(body: {
       timeout: 600_000,
     },
   );
-  return data;
-}
-
-/** 保存目录（VIDEO_SAVE_DIR）下的文件名列表 */
-export async function listSavedVideos() {
-  const { data } = await http.get<{
-    directory: string;
-    files: { name: string; size: number; mtime: string }[];
-  }>("v1/tools/saved-videos", { timeout: 15_000 });
   return data;
 }
 

@@ -13,8 +13,8 @@ import { IS_PUBLIC_KEY } from '../auth/public.decorator';
 /**
  * JwtAuthGuard 之后：
  * - 已停用：禁止（与 assertAccountUsable 一致）
- * - 管理员或已开通(active)：全部业务 API
- * - 待审核(pending)：仅 /v1/auth/me；**禁止** tools / tasks / works 等全部业务 API（含专属数字人上传与生成）
+ * - 管理员或已开通(active)：允许业务 API
+ * - 待审核(pending)：仅允许 /v1/auth/me 与 /v1/auth/change-password
  */
 @Injectable()
 export class AccountActiveGuard implements CanActivate {
@@ -29,6 +29,10 @@ export class AccountActiveGuard implements CanActivate {
 
   private isAuthMePath(p: string): boolean {
     return /\/v1\/auth\/me$/.test(p);
+  }
+
+  private isAuthChangePasswordPath(p: string): boolean {
+    return /\/v1\/auth\/change-password$/.test(p);
   }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -51,7 +55,7 @@ export class AccountActiveGuard implements CanActivate {
     }
 
     const p = this.pathName(req);
-    if (this.isAuthMePath(p)) {
+    if (this.isAuthMePath(p) || this.isAuthChangePasswordPath(p)) {
       return true;
     }
 
@@ -70,9 +74,11 @@ export class AccountActiveGuard implements CanActivate {
     }
 
     if (gov.account_status === 'pending') {
-      throw new ForbiddenException(
-        '账号待审核开通，通过后方可使用数字人、口播、任务与作品等功能',
-      );
+      throw new ForbiddenException({
+        code: 'ACCOUNT_PENDING',
+        message:
+          '账号待审核开通，审核通过后方可使用数字人、口播、任务与作品等功能',
+      });
     }
 
     await this.auth.assertAccountUsable(uid);

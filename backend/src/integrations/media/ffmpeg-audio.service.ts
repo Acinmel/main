@@ -40,6 +40,82 @@ export type VideoCutRange = {
   enabled?: boolean;
 };
 
+export type TimedOverlayAsset = {
+  inputPath: string;
+  startTime: number;
+  endTime: number;
+};
+
+export type VideoAlphaProbeResult = {
+  pixFmt: string | null;
+  alphaMode: string | null;
+};
+
+export type VideoFormatContractVideoStream = {
+  codecName: string | null;
+  width: number | null;
+  height: number | null;
+  codedWidth: number | null;
+  codedHeight: number | null;
+  sampleAspectRatio: string | null;
+  displayAspectRatio: string | null;
+  avgFrameRate: number | null;
+  avgFrameRateRaw: string | null;
+  rFrameRate: number | null;
+  rFrameRateRaw: string | null;
+  pixFmt: string | null;
+  colorRange: string | null;
+  colorSpace: string | null;
+  colorTransfer: string | null;
+  colorPrimaries: string | null;
+};
+
+export type VideoFormatContractAudioStream = {
+  codecName: string | null;
+  sampleRate: number | null;
+  channels: number | null;
+  channelLayout: string | null;
+  isDefault: boolean;
+};
+
+export type VideoFormatContract = {
+  formatName: string | null;
+  durationSeconds: number | null;
+  video: VideoFormatContractVideoStream | null;
+  audioStreams: VideoFormatContractAudioStream[];
+};
+
+export type MediaProbeSummary = {
+  formatName: string | null;
+  durationSeconds: number | null;
+  sizeBytes: number | null;
+  bitRate: number | null;
+  video: {
+    codecName: string | null;
+    width: number | null;
+    height: number | null;
+    pixFmt: string | null;
+    avgFrameRate: number | null;
+    colorSpace: string | null;
+    colorRange: string | null;
+  } | null;
+  audio: {
+    codecName: string | null;
+    sampleRate: number | null;
+    channels: number | null;
+    channelLayout: string | null;
+    bitRate: number | null;
+  } | null;
+};
+
+type VideoEncodingHint = {
+  pixFmt: string | null;
+  colorRange: string | null;
+  colorSpace: string | null;
+  colorTransfer: string | null;
+  colorPrimaries: string | null;
+};
+
 /**
  * 视频 → FFmpeg 抽音轨（16kHz mono MP3）再送 ASR API，减轻上游解码压力、统一格式。
  * 可执行文件：FFMPEG_BIN → backend/ffmpeg/bin（Windows/Linux）→ PATH 中的 ffmpeg。
@@ -373,6 +449,222 @@ export class FfmpegAudioService {
     return null;
   }
 
+  async probeVideoFormatContract(
+    inputPath: string,
+  ): Promise<VideoFormatContract | null> {
+    const bin = this.resolveFfprobeBinary();
+    try {
+      const { stdout } = await this.execMediaTool(
+        bin,
+        [
+          '-v',
+          'error',
+          '-show_entries',
+          'format=format_name,duration:stream=index,codec_type,codec_name,width,height,coded_width,coded_height,sample_aspect_ratio,display_aspect_ratio,avg_frame_rate,r_frame_rate,pix_fmt,color_range,color_space,color_transfer,color_primaries,sample_rate,channels,channel_layout:stream_disposition=default',
+          '-of',
+          'json',
+          inputPath,
+        ],
+        {
+          timeout: 20_000,
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+      const parsed = JSON.parse(stdout.toString()) as {
+        format?: Record<string, unknown>;
+        streams?: Array<Record<string, unknown>>;
+      };
+      const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+      const videoStream = streams.find(
+        (stream) => String(stream.codec_type || '').toLowerCase() === 'video',
+      );
+      const audioStreams = streams.filter(
+        (stream) => String(stream.codec_type || '').toLowerCase() === 'audio',
+      );
+      const video: VideoFormatContractVideoStream | null = videoStream
+        ? {
+            codecName: this.safeString(videoStream.codec_name),
+            width: this.safeInt(videoStream.width),
+            height: this.safeInt(videoStream.height),
+            codedWidth: this.safeInt(videoStream.coded_width),
+            codedHeight: this.safeInt(videoStream.coded_height),
+            sampleAspectRatio: this.normalizeAspectRatio(
+              this.safeString(videoStream.sample_aspect_ratio),
+            ),
+            displayAspectRatio: this.normalizeAspectRatio(
+              this.safeString(videoStream.display_aspect_ratio),
+            ),
+            avgFrameRate: this.parseFrameRate(videoStream.avg_frame_rate),
+            avgFrameRateRaw: this.normalizeFrameRateRaw(
+              this.safeString(videoStream.avg_frame_rate),
+            ),
+            rFrameRate: this.parseFrameRate(videoStream.r_frame_rate),
+            rFrameRateRaw: this.normalizeFrameRateRaw(
+              this.safeString(videoStream.r_frame_rate),
+            ),
+            pixFmt: this.safeString(videoStream.pix_fmt),
+            colorRange: this.safeString(videoStream.color_range),
+            colorSpace: this.safeString(videoStream.color_space),
+            colorTransfer: this.safeString(videoStream.color_transfer),
+            colorPrimaries: this.safeString(videoStream.color_primaries),
+          }
+        : null;
+      return {
+        formatName: this.safeString(parsed.format?.format_name),
+        durationSeconds: this.safeNumber(parsed.format?.duration),
+        video,
+        audioStreams: audioStreams.map((stream) => {
+          const disposition =
+            stream.disposition && typeof stream.disposition === 'object'
+              ? (stream.disposition as Record<string, unknown>)
+              : {};
+          return {
+            codecName: this.safeString(stream.codec_name),
+            sampleRate: this.safeInt(stream.sample_rate),
+            channels: this.safeInt(stream.channels),
+            channelLayout: this.safeString(stream.channel_layout),
+            isDefault: Number(disposition.default || 0) === 1,
+          };
+        }),
+      };
+    } catch (error) {
+      this.logger.warn(
+        `FFprobe video format contract failed for ${path.basename(inputPath)}: ${this.stringifyUnknown(error)}`,
+      );
+      return null;
+    }
+  }
+
+  async probeMediaSummary(
+    inputPath: string,
+  ): Promise<MediaProbeSummary | null> {
+    const bin = this.resolveFfprobeBinary();
+    try {
+      const { stdout } = await this.execMediaTool(
+        bin,
+        [
+          '-v',
+          'error',
+          '-show_entries',
+          'format=format_name,duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,pix_fmt,avg_frame_rate,color_range,color_space,sample_rate,channels,channel_layout,bit_rate',
+          '-of',
+          'json',
+          inputPath,
+        ],
+        {
+          timeout: 20_000,
+          maxBuffer: 4 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+      const parsed = JSON.parse(stdout.toString()) as {
+        format?: Record<string, unknown>;
+        streams?: Array<Record<string, unknown>>;
+      };
+      const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+      const videoStream = streams.find(
+        (stream) => String(stream.codec_type || '').toLowerCase() === 'video',
+      );
+      const audioStream = streams.find(
+        (stream) => String(stream.codec_type || '').toLowerCase() === 'audio',
+      );
+      return {
+        formatName: this.safeString(parsed.format?.format_name),
+        durationSeconds: this.safeNumber(parsed.format?.duration),
+        sizeBytes: this.safeInt(parsed.format?.size),
+        bitRate: this.safeInt(parsed.format?.bit_rate),
+        video: videoStream
+          ? {
+              codecName: this.safeString(videoStream.codec_name),
+              width: this.safeInt(videoStream.width),
+              height: this.safeInt(videoStream.height),
+              pixFmt: this.safeString(videoStream.pix_fmt),
+              avgFrameRate: this.parseFrameRate(videoStream.avg_frame_rate),
+              colorSpace: this.safeString(videoStream.color_space),
+              colorRange: this.safeString(videoStream.color_range),
+            }
+          : null,
+        audio: audioStream
+          ? {
+              codecName: this.safeString(audioStream.codec_name),
+              sampleRate: this.safeInt(audioStream.sample_rate),
+              channels: this.safeInt(audioStream.channels),
+              channelLayout: this.safeString(audioStream.channel_layout),
+              bitRate: this.safeInt(audioStream.bit_rate),
+            }
+          : null,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `FFprobe media summary failed for ${path.basename(inputPath)}: ${this.stringifyUnknown(error)}`,
+      );
+      return null;
+    }
+  }
+
+  async restoreVideoToSourceContract(params: {
+    inputVideoPath: string;
+    outputVideoPath: string;
+    sourceContract: VideoFormatContract;
+  }): Promise<void> {
+    const sourceVideo = params.sourceContract.video;
+    if (!sourceVideo?.width || !sourceVideo?.height) {
+      throw new Error('source video contract is missing width/height');
+    }
+    const sourceHasAudio = params.sourceContract.audioStreams.length > 0;
+    const frameRateRaw =
+      sourceVideo.avgFrameRateRaw ||
+      sourceVideo.rFrameRateRaw ||
+      (sourceVideo.avgFrameRate
+        ? this.formatFrameRate(sourceVideo.avgFrameRate)
+        : null);
+    const sar = sourceVideo.sampleAspectRatio || '1:1';
+    const filter = `scale=${sourceVideo.width}:${sourceVideo.height}:flags=lanczos,setsar=${sar}`;
+    const colorArgs = this.buildColorMetadataArgs({
+      pixFmt: sourceVideo.pixFmt,
+      colorRange: sourceVideo.colorRange,
+      colorSpace: sourceVideo.colorSpace,
+      colorTransfer: sourceVideo.colorTransfer,
+      colorPrimaries: sourceVideo.colorPrimaries,
+    });
+    const outputPixFmt = this.resolvePreferredOutputPixFmt(sourceVideo.pixFmt);
+    const bin = this.resolveFfmpegBinary();
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      params.inputVideoPath,
+      '-map',
+      '0:v:0',
+      '-map_metadata',
+      '0',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '18',
+      '-vf',
+      filter,
+      ...(frameRateRaw ? ['-r', frameRateRaw] : []),
+      ...(outputPixFmt ? ['-pix_fmt', outputPixFmt] : []),
+      ...colorArgs,
+      ...(sourceHasAudio ? ['-map', '0:a:0?', '-c:a', 'copy'] : ['-an']),
+      '-movflags',
+      '+faststart',
+      params.outputVideoPath,
+    ];
+    await this.execMediaTool(bin, args, {
+      timeout: this.ffmpegTimeoutMs(),
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
   private parseFirstPositiveDuration(output: unknown): number | null {
     const text = this.stringifyExecOutput(output);
     const parts = text
@@ -509,6 +801,9 @@ export class FfmpegAudioService {
     clipSeconds?: number;
   }): Promise<void> {
     const bin = this.resolveFfmpegBinary();
+    const hint = await this.probeVideoEncodingHint(params.inputVideoPath);
+    const colorArgs = this.buildColorMetadataArgs(hint);
+    const outputPixFmt = this.resolvePreferredOutputPixFmt(hint.pixFmt);
     const filter = `subtitles='${this.escapeFilterPath(params.subtitleAssPath)}'`;
     const args = [
       '-nostdin',
@@ -520,12 +815,16 @@ export class FfmpegAudioService {
       params.inputVideoPath,
       '-vf',
       filter,
+      '-map_metadata',
+      '0',
       '-c:v',
       'libx264',
       '-preset',
       'veryfast',
       '-crf',
-      '20',
+      '18',
+      ...(outputPixFmt ? ['-pix_fmt', outputPixFmt] : []),
+      ...colorArgs,
       '-c:a',
       'copy',
     ];
@@ -536,6 +835,422 @@ export class FfmpegAudioService {
     await this.execMediaTool(bin, args, {
       timeout: this.ffmpegTimeoutMs(),
       maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
+  async probeVideoPixelFormat(inputPath: string): Promise<string | null> {
+    const bin = this.resolveFfprobeBinary();
+    try {
+      const { stdout } = await this.execMediaTool(
+        bin,
+        [
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-show_entries',
+          'stream=pix_fmt',
+          '-of',
+          'default=noprint_wrappers=1:nokey=1',
+          inputPath,
+        ],
+        {
+          timeout: 20_000,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+      const value = stdout?.toString().trim();
+      return value || null;
+    } catch {
+      return null;
+    }
+  }
+
+  async probeVideoAlphaInfo(inputPath: string): Promise<VideoAlphaProbeResult> {
+    const bin = this.resolveFfprobeBinary();
+    try {
+      const { stdout } = await this.execMediaTool(
+        bin,
+        [
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-show_entries',
+          'stream=pix_fmt:stream_tags=alpha_mode',
+          '-of',
+          'default=noprint_wrappers=1',
+          inputPath,
+        ],
+        {
+          timeout: 20_000,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+      const lines = stdout
+        ?.toString()
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      let pixFmt: string | null = null;
+      let alphaMode: string | null = null;
+      for (const line of lines || []) {
+        const pixMatch = line.match(/^pix_fmt=(.+)$/i);
+        if (pixMatch?.[1]) {
+          pixFmt = pixMatch[1].trim();
+          continue;
+        }
+        const alphaMatch = line.match(/^TAG:alpha_mode=(.+)$/i);
+        if (alphaMatch?.[1]) {
+          alphaMode = alphaMatch[1].trim();
+        }
+      }
+      return { pixFmt, alphaMode };
+    } catch {
+      return { pixFmt: null, alphaMode: null };
+    }
+  }
+
+  async renderTransparentTitleCardWebm(params: {
+    text: string;
+    durationSeconds: number;
+    outputWebmPath: string;
+    width?: number;
+    height?: number;
+    fps?: number;
+    fontFile?: string | null;
+    fontFamily?: string | null;
+    fontSize?: number;
+    fontColor?: string;
+    borderColor?: string;
+    borderWidth?: number;
+    boxColor?: string;
+    boxBorderWidth?: number;
+    xExpression?: string;
+    yExpression?: string;
+    timeoutMs?: number;
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const width = Math.max(320, Math.floor(params.width ?? 1080));
+    const height = Math.max(320, Math.floor(params.height ?? 1920));
+    const fps = Math.max(1, Math.floor(params.fps ?? 30));
+    const durationSeconds = Math.max(0.2, params.durationSeconds);
+    const fontSize = Math.max(18, Math.floor(params.fontSize ?? 62));
+    const borderWidth = Math.max(0, Math.floor(params.borderWidth ?? 3));
+    const boxBorderWidth = Math.max(0, Math.floor(params.boxBorderWidth ?? 24));
+    const xExpression = params.xExpression?.trim() || '(w-text_w)/2';
+    const yExpression = params.yExpression?.trim() || '(h-text_h)/2';
+
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-title-card-'),
+    );
+    const textFile = path.join(tmpDir, 'title.txt');
+    const safeText = params.text.replace(/\r\n/g, '\n').trim() || ' ';
+    await fs.writeFile(textFile, safeText, 'utf8');
+    const drawTextParts = [
+      `textfile='${this.escapeFilterPath(textFile)}'`,
+      `fontsize=${fontSize}`,
+      `fontcolor=${params.fontColor || '0xFFFFFF'}`,
+      `borderw=${borderWidth}`,
+      `bordercolor=${params.borderColor || '0x000000'}`,
+      `box=1`,
+      `boxcolor=${params.boxColor || '0x00FF66@0.35'}`,
+      `boxborderw=${boxBorderWidth}`,
+      `x=${xExpression}`,
+      `y=${yExpression}`,
+      `line_spacing=8`,
+      `shadowx=0`,
+      `shadowy=0`,
+      `alpha=1`,
+    ];
+    const fontFile = params.fontFile?.trim();
+    if (fontFile) {
+      drawTextParts.unshift(
+        `fontfile='${this.escapeFilterPath(path.resolve(fontFile))}'`,
+      );
+    } else if (params.fontFamily?.trim()) {
+      drawTextParts.unshift(`font='${params.fontFamily.trim()}'`);
+    }
+    const filter = `format=rgba,drawtext=${drawTextParts.join(':')}`;
+
+    try {
+      await this.execMediaTool(
+        bin,
+        [
+          '-nostdin',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-f',
+          'lavfi',
+          '-i',
+          `color=c=black@0.0:s=${width}x${height}:r=${fps}`,
+          '-t',
+          this.formatSeconds(durationSeconds),
+          '-vf',
+          filter,
+          '-an',
+          '-c:v',
+          'libvpx-vp9',
+          '-pix_fmt',
+          'yuva420p',
+          '-auto-alt-ref',
+          '0',
+          '-b:v',
+          '0',
+          '-crf',
+          '26',
+          params.outputWebmPath,
+        ],
+        {
+          timeout:
+            readPositiveInt(params.timeoutMs, 0) || this.ffmpegTimeoutMs(),
+          maxBuffer: 32 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+    } finally {
+      await fs
+        .rm(tmpDir, { recursive: true, force: true })
+        .catch(() => undefined);
+    }
+  }
+
+  async renderTitleFallbackPngFrame(params: {
+    text: string;
+    outputPngPath: string;
+    width?: number;
+    height?: number;
+    fontFile?: string | null;
+    fontFamily?: string | null;
+    fontSize?: number;
+    fontColor?: string;
+    borderColor?: string;
+    borderWidth?: number;
+    boxColor?: string;
+    boxBorderWidth?: number;
+    xExpression?: string;
+    yExpression?: string;
+    timeoutMs?: number;
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const width = Math.max(320, Math.floor(params.width ?? 1080));
+    const height = Math.max(320, Math.floor(params.height ?? 1920));
+    const fontSize = Math.max(18, Math.floor(params.fontSize ?? 62));
+    const borderWidth = Math.max(0, Math.floor(params.borderWidth ?? 3));
+    const boxBorderWidth = Math.max(0, Math.floor(params.boxBorderWidth ?? 24));
+    const xExpression = params.xExpression?.trim() || '(w-text_w)/2';
+    const yExpression = params.yExpression?.trim() || '(h-text_h)/2';
+
+    const tmpDir = await fs.mkdtemp(
+      path.join(this.runtimeTempDir(), 'kb-title-png-'),
+    );
+    const textFile = path.join(tmpDir, 'title.txt');
+    const safeText = params.text.replace(/\r\n/g, '\n').trim() || ' ';
+    await fs.writeFile(textFile, safeText, 'utf8');
+    const drawTextParts = [
+      `textfile='${this.escapeFilterPath(textFile)}'`,
+      `fontsize=${fontSize}`,
+      `fontcolor=${params.fontColor || '0xFFFFFF'}`,
+      `borderw=${borderWidth}`,
+      `bordercolor=${params.borderColor || '0x000000'}`,
+      `box=1`,
+      `boxcolor=${params.boxColor || '0x00FF66@0.35'}`,
+      `boxborderw=${boxBorderWidth}`,
+      `x=${xExpression}`,
+      `y=${yExpression}`,
+      `line_spacing=8`,
+      `shadowx=0`,
+      `shadowy=0`,
+      `alpha=1`,
+    ];
+    const fontFile = params.fontFile?.trim();
+    if (fontFile) {
+      drawTextParts.unshift(
+        `fontfile='${this.escapeFilterPath(path.resolve(fontFile))}'`,
+      );
+    } else if (params.fontFamily?.trim()) {
+      drawTextParts.unshift(`font='${params.fontFamily.trim()}'`);
+    }
+    const filter = `format=rgba,drawtext=${drawTextParts.join(':')}`;
+
+    try {
+      await this.execMediaTool(
+        bin,
+        [
+          '-nostdin',
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-f',
+          'lavfi',
+          '-i',
+          `color=c=black@0.0:s=${width}x${height}:r=1`,
+          '-frames:v',
+          '1',
+          '-vf',
+          filter,
+          '-c:v',
+          'png',
+          params.outputPngPath,
+        ],
+        {
+          timeout:
+            readPositiveInt(params.timeoutMs, 0) || this.ffmpegTimeoutMs(),
+          maxBuffer: 32 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+    } finally {
+      await fs
+        .rm(tmpDir, { recursive: true, force: true })
+        .catch(() => undefined);
+    }
+  }
+
+  async buildPreviewMp4FromTransparentWebm(params: {
+    inputWebmPath: string;
+    outputMp4Path: string;
+    durationSeconds?: number;
+    width?: number;
+    height?: number;
+    timeoutMs?: number;
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const width = Math.max(320, Math.floor(params.width ?? 1080));
+    const height = Math.max(320, Math.floor(params.height ?? 1920));
+    const durationSeconds =
+      typeof params.durationSeconds === 'number' &&
+      Number.isFinite(params.durationSeconds) &&
+      params.durationSeconds > 0
+        ? params.durationSeconds
+        : null;
+    await this.execMediaTool(
+      bin,
+      [
+        '-nostdin',
+        '-hide_banner',
+        '-loglevel',
+        'error',
+        '-y',
+        '-f',
+        'lavfi',
+        '-i',
+        `color=c=black:s=${width}x${height}:r=30`,
+        '-i',
+        params.inputWebmPath,
+        ...(durationSeconds ? ['-t', this.formatSeconds(durationSeconds)] : []),
+        '-filter_complex',
+        '[0:v][1:v]overlay=0:0:eof_action=pass:format=auto[vout]',
+        '-map',
+        '[vout]',
+        '-an',
+        '-shortest',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '22',
+        '-pix_fmt',
+        'yuv420p',
+        '-movflags',
+        '+faststart',
+        params.outputMp4Path,
+      ],
+      {
+        timeout: readPositiveInt(params.timeoutMs, 0) || this.ffmpegTimeoutMs(),
+        maxBuffer: 32 * 1024 * 1024,
+        windowsHide: true,
+      },
+    );
+  }
+
+  async overlayTimedVideoAssets(params: {
+    inputVideoPath: string;
+    outputVideoPath: string;
+    overlays: TimedOverlayAsset[];
+  }): Promise<void> {
+    const validOverlays = params.overlays
+      .filter(
+        (item) =>
+          item &&
+          typeof item.inputPath === 'string' &&
+          item.inputPath.trim() &&
+          Number.isFinite(item.startTime) &&
+          Number.isFinite(item.endTime) &&
+          item.endTime > item.startTime,
+      )
+      .map((item) => ({
+        inputPath: item.inputPath,
+        startTime: Math.max(0, item.startTime),
+        endTime: Math.max(0.05, item.endTime),
+      }));
+    if (!validOverlays.length) {
+      await fs.copyFile(params.inputVideoPath, params.outputVideoPath);
+      return;
+    }
+
+    const bin = this.resolveFfmpegBinary();
+    const hint = await this.probeVideoEncodingHint(params.inputVideoPath);
+    const colorArgs = this.buildColorMetadataArgs(hint);
+    const outputPixFmt = this.resolvePreferredOutputPixFmt(hint.pixFmt);
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-i',
+      params.inputVideoPath,
+      ...validOverlays.flatMap((item) => ['-i', item.inputPath]),
+    ];
+    const graphParts: string[] = ['[0:v]setpts=PTS-STARTPTS[base0]'];
+    validOverlays.forEach((item, index) => {
+      const inputLabel = index + 1;
+      const delayed = `ov${index + 1}`;
+      const baseIn = `base${index}`;
+      const baseOut = `base${index + 1}`;
+      graphParts.push(
+        `[${inputLabel}:v]setpts=PTS-STARTPTS+${this.formatSeconds(item.startTime)}/TB[${delayed}]`,
+      );
+      graphParts.push(
+        `[${baseIn}][${delayed}]overlay=0:0:eof_action=pass:enable='between(t,${this.formatSeconds(item.startTime)},${this.formatSeconds(item.endTime)})'[${baseOut}]`,
+      );
+    });
+    const finalLabel = `base${validOverlays.length}`;
+
+    args.push(
+      '-filter_complex',
+      graphParts.join(';'),
+      '-map',
+      `[${finalLabel}]`,
+      '-map',
+      '0:a?',
+      '-map_metadata',
+      '0',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '18',
+      ...(outputPixFmt ? ['-pix_fmt', outputPixFmt] : []),
+      ...colorArgs,
+      '-c:a',
+      'copy',
+      '-movflags',
+      '+faststart',
+      params.outputVideoPath,
+    );
+    await this.execMediaTool(bin, args, {
+      timeout: this.ffmpegTimeoutMs(),
+      maxBuffer: 64 * 1024 * 1024,
       windowsHide: true,
     });
   }
@@ -573,8 +1288,12 @@ export class FfmpegAudioService {
     outputVideoPath: string;
     clipSeconds?: number;
     targetSeconds?: number;
+    renderMode?: '1080x1920' | 'adaptive' | 'preserveSourceAspect';
   }): Promise<void> {
     const bin = this.resolveFfmpegBinary();
+    const hint = await this.probeVideoEncodingHint(params.inputVideoPath);
+    const colorArgs = this.buildColorMetadataArgs(hint);
+    const outputPixFmt = this.resolvePreferredOutputPixFmt(hint.pixFmt);
     const normalizedClipSeconds =
       typeof params.clipSeconds === 'number' && params.clipSeconds > 0
         ? params.clipSeconds
@@ -584,12 +1303,20 @@ export class FfmpegAudioService {
         ? params.targetSeconds
         : null;
     const outputSeconds = normalizedClipSeconds ?? normalizedTargetSeconds;
+    const renderMode = params.renderMode ?? 'preserveSourceAspect';
+    const sourceContract =
+      renderMode === 'preserveSourceAspect'
+        ? await this.probeVideoFormatContract(params.inputVideoPath)
+        : null;
+    const preserveScaleFilter =
+      this.resolvePreserveSourceScaleFilter(sourceContract);
     const args = [
       '-nostdin',
       '-hide_banner',
       '-loglevel',
       'error',
       '-y',
+      ...(renderMode === 'preserveSourceAspect' ? ['-noautorotate'] : []),
       ...(normalizedTargetSeconds && !normalizedClipSeconds
         ? ['-stream_loop', '-1']
         : []),
@@ -599,18 +1326,21 @@ export class FfmpegAudioService {
     if (outputSeconds) {
       args.push('-t', String(outputSeconds));
     }
+    const scaleFilter =
+      preserveScaleFilter ?? this.resolveRenderModeScaleFilter(renderMode);
     args.push(
       '-an',
-      '-vf',
-      "scale=w=2048:h=2048:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=w='max(iw,640)':h='max(ih,640)':x='(ow-iw)/2':y='(oh-ih)/2':color=black,setsar=1",
+      '-map_metadata',
+      '0',
       '-c:v',
       'libx264',
       '-preset',
       'veryfast',
       '-crf',
-      '20',
-      '-pix_fmt',
-      'yuv420p',
+      '18',
+      ...(scaleFilter ? ['-vf', scaleFilter] : []),
+      ...(outputPixFmt ? ['-pix_fmt', outputPixFmt] : []),
+      ...colorArgs,
       '-movflags',
       '+faststart',
       params.outputVideoPath,
@@ -620,6 +1350,127 @@ export class FfmpegAudioService {
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
     });
+  }
+
+  async normalizeVideoForRenderMode(params: {
+    inputVideoPath: string;
+    outputVideoPath: string;
+    renderMode?: '1080x1920' | 'adaptive' | 'preserveSourceAspect';
+  }): Promise<void> {
+    const bin = this.resolveFfmpegBinary();
+    const hint = await this.probeVideoEncodingHint(params.inputVideoPath);
+    const colorArgs = this.buildColorMetadataArgs(hint);
+    const outputPixFmt = this.resolvePreferredOutputPixFmt(hint.pixFmt);
+    const renderMode = params.renderMode ?? 'preserveSourceAspect';
+    const sourceContract =
+      renderMode === 'preserveSourceAspect'
+        ? await this.probeVideoFormatContract(params.inputVideoPath)
+        : null;
+    const preserveScaleFilter =
+      this.resolvePreserveSourceScaleFilter(sourceContract);
+    const scaleFilter =
+      preserveScaleFilter ?? this.resolveRenderModeScaleFilter(renderMode);
+    const args = [
+      '-nostdin',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      ...(renderMode === 'preserveSourceAspect' ? ['-noautorotate'] : []),
+      '-i',
+      params.inputVideoPath,
+      '-map_metadata',
+      '0',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '18',
+      ...(scaleFilter ? ['-vf', scaleFilter] : []),
+      ...(outputPixFmt ? ['-pix_fmt', outputPixFmt] : []),
+      ...colorArgs,
+      '-c:a',
+      'copy',
+      '-movflags',
+      '+faststart',
+      params.outputVideoPath,
+    ];
+    await this.execMediaTool(bin, args, {
+      timeout: this.ffmpegTimeoutMs(),
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+  }
+
+  private safeString(value: unknown): string | null {
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
+
+  private safeNumber(value: unknown): number | null {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  private safeInt(value: unknown): number | null {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.trunc(n) : null;
+  }
+
+  private parseFrameRate(value: unknown): number | null {
+    const raw = this.safeString(value);
+    if (!raw) return null;
+    if (/^\d+(\.\d+)?$/.test(raw)) {
+      const numeric = Number(raw);
+      return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+    }
+    const match = raw.match(/^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/);
+    if (!match) return null;
+    const num = Number(match[1]);
+    const den = Number(match[2]);
+    if (!Number.isFinite(num) || !Number.isFinite(den) || den <= 0) return null;
+    const rate = num / den;
+    return Number.isFinite(rate) && rate > 0 ? rate : null;
+  }
+
+  private normalizeFrameRateRaw(value: string | null): string | null {
+    if (!value) return null;
+    if (value === '0/0' || value === 'N/A') return null;
+    return value;
+  }
+
+  private normalizeAspectRatio(value: string | null): string | null {
+    if (!value) return null;
+    const normalized = value.trim();
+    if (!normalized || normalized === 'N/A' || normalized === '0:1')
+      return null;
+    return normalized;
+  }
+
+  private formatFrameRate(value: number): string {
+    if (!Number.isFinite(value) || value <= 0) return '';
+    return Number(value.toFixed(6)).toString();
+  }
+
+  private resolveRenderModeScaleFilter(
+    renderMode: '1080x1920' | 'adaptive' | 'preserveSourceAspect',
+  ): string | null {
+    if (renderMode === '1080x1920') {
+      return 'scale=1080:1920:force_original_aspect_ratio=decrease:flags=lanczos,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black,setsar=1';
+    }
+    if (renderMode === 'preserveSourceAspect') {
+      return null;
+    }
+    return "scale='trunc(iw/2)*2':'trunc(ih/2)*2':flags=lanczos,setsar=1";
+  }
+
+  private resolvePreserveSourceScaleFilter(
+    sourceContract: VideoFormatContract | null,
+  ): string | null {
+    const sourceVideo = sourceContract?.video;
+    if (!sourceVideo?.width || !sourceVideo?.height) return null;
+    const sar = sourceVideo.sampleAspectRatio || '1:1';
+    return `scale=${sourceVideo.width}:${sourceVideo.height}:flags=lanczos,setsar=${sar}`;
   }
 
   async clipAudio(params: {
@@ -763,6 +1614,9 @@ export class FfmpegAudioService {
     }
 
     const bin = this.resolveFfmpegBinary();
+    const hint = await this.probeVideoEncodingHint(params.inputVideoPath);
+    const colorArgs = this.buildColorMetadataArgs(hint);
+    const outputPixFmt = this.resolvePreferredOutputPixFmt(hint.pixFmt);
     const tmpDir = await fs.mkdtemp(
       path.join(this.runtimeTempDir(), 'kb-ffmpeg-cut-'),
     );
@@ -792,12 +1646,16 @@ export class FfmpegAudioService {
             '0:v:0',
             '-map',
             '0:a?',
+            '-map_metadata',
+            '0',
             '-c:v',
             'libx264',
             '-preset',
             'veryfast',
             '-crf',
-            '20',
+            '18',
+            ...(outputPixFmt ? ['-pix_fmt', outputPixFmt] : []),
+            ...colorArgs,
             '-c:a',
             'aac',
             '-movflags',
@@ -858,6 +1716,88 @@ export class FfmpegAudioService {
         .rm(tmpDir, { recursive: true, force: true })
         .catch(() => undefined);
     }
+  }
+
+  private async probeVideoEncodingHint(
+    inputPath: string,
+  ): Promise<VideoEncodingHint> {
+    const fallback: VideoEncodingHint = {
+      pixFmt: null,
+      colorRange: null,
+      colorSpace: null,
+      colorTransfer: null,
+      colorPrimaries: null,
+    };
+    const bin = this.resolveFfprobeBinary();
+    try {
+      const { stdout } = await this.execMediaTool(
+        bin,
+        [
+          '-v',
+          'error',
+          '-select_streams',
+          'v:0',
+          '-show_entries',
+          'stream=pix_fmt,color_range,color_space,color_transfer,color_primaries',
+          '-of',
+          'json',
+          inputPath,
+        ],
+        {
+          timeout: 20_000,
+          maxBuffer: 2 * 1024 * 1024,
+          windowsHide: true,
+        },
+      );
+      const parsed = JSON.parse(stdout.toString()) as {
+        streams?: Array<Record<string, unknown>>;
+      };
+      const stream = Array.isArray(parsed.streams) ? parsed.streams[0] : null;
+      if (!stream) return fallback;
+      const asText = (value: unknown): string | null =>
+        typeof value === 'string' && value.trim() ? value.trim() : null;
+      return {
+        pixFmt: asText(stream.pix_fmt),
+        colorRange: asText(stream.color_range),
+        colorSpace: asText(stream.color_space),
+        colorTransfer: asText(stream.color_transfer),
+        colorPrimaries: asText(stream.color_primaries),
+      };
+    } catch {
+      return fallback;
+    }
+  }
+
+  private buildColorMetadataArgs(hint: VideoEncodingHint): string[] {
+    const args: string[] = [];
+    if (hint.colorRange) args.push('-color_range', hint.colorRange);
+    if (hint.colorSpace) args.push('-colorspace', hint.colorSpace);
+    if (hint.colorTransfer) args.push('-color_trc', hint.colorTransfer);
+    if (hint.colorPrimaries) args.push('-color_primaries', hint.colorPrimaries);
+    return args;
+  }
+
+  private resolvePreferredOutputPixFmt(pixFmt: string | null): string | null {
+    if (!pixFmt) return 'yuv420p';
+    const normalized = pixFmt.toLowerCase();
+    const supported = new Set([
+      'yuv420p',
+      'yuvj420p',
+      'yuv422p',
+      'yuvj422p',
+      'yuv444p',
+      'yuvj444p',
+      'nv12',
+      'nv16',
+      'nv21',
+      'yuv420p10le',
+      'yuv422p10le',
+      'yuv444p10le',
+      'nv20le',
+      'gray',
+      'gray10le',
+    ]);
+    return supported.has(normalized) ? normalized : 'yuv420p';
   }
 
   private escapeFilterPath(filePath: string): string {
@@ -924,6 +1864,12 @@ export class FfmpegAudioService {
 
   private ffmpegTimeoutMs(): number {
     return readPositiveInt(this.config.get('FFMPEG_TIMEOUT_MS'), 20 * 60_000);
+  }
+
+  private formatSeconds(value: number): string {
+    return Math.max(0, value)
+      .toFixed(3)
+      .replace(/\.?0+$/, '');
   }
 
   private runtimeTempDir(): string {

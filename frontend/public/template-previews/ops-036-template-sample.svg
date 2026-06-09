@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1280" viewBox="0 0 720 1280" role="img" aria-label="public subtitle template sample">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#F8FAFC"/>
+      <stop offset="100%" stop-color="#EDE9FE"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F5F3FF"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="1280" rx="42" fill="url(#bg)"/>
+  <circle cx="572" cy="180" r="126" fill="#C4B5FD" opacity="0.35"/>
+  <circle cx="118" cy="1072" r="150" fill="#A78BFA" opacity="0.22"/>
+  <rect x="76" y="128" width="568" height="902" rx="38" fill="url(#panel)" stroke="#E5E7EB" stroke-width="2"/>
+  <circle cx="360" cy="364" r="122" fill="#DDD6FE"/>
+  <path d="M268 492c24-50 71-78 92-78s68 28 92 78" fill="none" stroke="#7C3AED" stroke-width="32" stroke-linecap="round"/>
+  <circle cx="304" cy="348" r="24" fill="#7C3AED"/>
+  <circle cx="416" cy="348" r="24" fill="#7C3AED"/>
+  <path d="M306 592h108c45 0 82 37 82 82v110H224V674c0-45 37-82 82-82z" fill="#C4B5FD"/>
+  <text x="360" y="146" text-anchor="middle" fill="#7C3AED" font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif" font-size="28" font-weight="800">PUBLIC TEMPLATE SAMPLE</text>
+  <text x="360" y="894" text-anchor="middle" fill="#0F172A" font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif" font-size="46" font-weight="900">福气别乱说</text>
+  <text x="360" y="956" text-anchor="middle" fill="#FFFFFF" stroke="#0F172A" stroke-width="5" paint-order="stroke" font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif" font-size="34" font-weight="800">小心招损！</text>
+  <rect x="88" y="1094" width="544" height="82" rx="24" fill="#7C3AED"/>
+  <text x="360" y="1148" text-anchor="middle" fill="#FFFFFF" font-family="Noto Sans CJK SC, Noto Sans SC, Arial, sans-serif" font-size="30" font-weight="800">受控静态资源 / OSS / CDN</text>
+</svg>

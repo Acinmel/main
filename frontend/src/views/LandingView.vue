@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
+import type { RouteLocationRaw } from 'vue-router'
 import { NButton, NTag } from 'naive-ui'
 import creatorAvatar1 from '@/assets/p1.webp'
 import creatorAvatar2 from '@/assets/p2.webp'
@@ -16,6 +17,7 @@ import womenTalkImage from '@/assets/women-talk.webp'
 import { useUserStore } from '@/stores/user'
 
 const user = useUserStore()
+const router = useRouter()
 
 const primaryTo = computed(() =>
   user.isLoggedIn ? { name: 'studio' as const } : { name: 'register' as const },
@@ -84,6 +86,10 @@ const creationSteps: CreationStep[] = [
     tone: 'mint',
   },
 ]
+
+function navigate(to: RouteLocationRaw) {
+  void router.push(to)
+}
 </script>
 
 <template>
@@ -108,7 +114,13 @@ const creationSteps: CreationStep[] = [
       <aside class="landing__float-card surface-card">
         <span class="landing__float-title">立即开始协作</span>
         <RouterLink :to="primaryTo">
-          <n-button type="primary" round class="landing__float-button">{{ primaryText }}</n-button>
+          <n-button
+            type="primary"
+            round
+            class="landing__float-button"
+            @click.prevent="navigate(primaryTo)"
+            >{{ primaryText }}</n-button
+          >
         </RouterLink>
         <div class="landing__social-proof">
           <div class="landing__avatars">
@@ -199,9 +211,14 @@ const creationSteps: CreationStep[] = [
       <div class="landing__cta">
         <span>READY TO CREATE?</span>
         <RouterLink :to="primaryTo">
-          <n-button type="primary" round size="large" class="landing__cta-button">
-            {{ primaryText }}
-          </n-button>
+          <n-button
+            type="primary"
+            round
+            size="large"
+            class="landing__cta-button"
+            @click.prevent="navigate(primaryTo)"
+            >{{ primaryText }}</n-button
+          >
         </RouterLink>
       </div>
     </div>

@@ -58,6 +58,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/CreativeStudioView.vue'),
       },
       {
+        path: 'projects',
+        name: 'video-projects',
+        meta: { title: '创作任务', requiresActiveAccount: true },
+        component: () => import('@/views/projects/VideoProjectListView.vue'),
+      },
+      {
         path: 'lip-sync',
         name: 'lip-sync',
         meta: { title: '视频对口型', requiresActiveAccount: true },
@@ -157,7 +163,6 @@ const routes: RouteRecordRaw[] = [
   },
   {
     path: '/admin',
-    name: 'admin',
     meta: { requiresAdmin: true },
     component: () => import('@/views/admin/AdminErpLayout.vue'),
     children: [

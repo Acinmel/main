@@ -15,7 +15,10 @@ import { pipeline } from 'node:stream/promises';
 import { normalizeSourceVideoUrl } from '../../common/douyin-share-url.util';
 import { resolveConfiguredDir } from '../../common/resource-paths.util';
 import { assertUrlSafeForServerFetch } from '../../common/url-safety.util';
-import { AliLipSyncService } from '../../integrations/ai/ali-lip-sync.service';
+import {
+  AliLipSyncService,
+  type AliLipSyncProviderState,
+} from '../../integrations/ai/ali-lip-sync.service';
 import {
   SpeechAiService,
   type VoiceTuningOptions,
@@ -24,6 +27,8 @@ import { TranscriptionAiService } from '../../integrations/ai/transcription-ai.s
 import type { TranscriptSegmentDto } from '../../integrations/transcription/transcript.types';
 import {
   FfmpegAudioService,
+  type MediaProbeSummary,
+  type VideoFormatContract,
   type TranscribeMediaInput,
   type SilenceSegment,
   type VideoCutRange,
@@ -33,6 +38,7 @@ import { ResourcesService } from '../resources/resources.service';
 import type { SubtitleTemplateResourceDto } from '../resources/resources.types';
 import {
   CUT_MODE_CONFIGS,
+  type CreateLipSyncTaskBody,
   type CutDetectionConfig,
   type CutMode,
   type CutPointDto,
@@ -42,11 +48,35 @@ import {
   type HighlightRangeDto,
   type RenderFinalBody,
   type RenderSubtitleDto,
+  type SubtitleVisualStyleDto,
+  type VisualOverlayAnchor,
+  type VisualOverlayLayoutDto,
 } from './video-project-render.types';
 import { normalizeVoiceTuning } from './voice-tuning.util';
+import {
+  normalizeScriptHighlights,
+  projectHighlightsToSubtitle,
+  type ScriptHighlightRange,
+  type SubtitleHighlightRange,
+} from './highlight-range-utils';
+import { TitleAssetsService } from './title-assets.service';
 
 type TimelineSource = 'asr-fallback' | 'local-estimate';
 type TtsMode = 'provider' | 'mock';
+type OssClient = {
+  put: (...args: unknown[]) => Promise<unknown>;
+  signatureUrl: (name: string, options?: Record<string, unknown>) => string;
+};
+
+const ASS_CANVAS_WIDTH = 720;
+const ASS_CANVAS_HEIGHT = 1280;
+
+type NormalizedVisualLayout = {
+  xPct: number;
+  yPct: number;
+  anchor: VisualOverlayAnchor;
+  safeAreaPct: number;
+};
 
 export interface SubtitleCueDto {
   id: string;
@@ -100,14 +130,39 @@ type DraftMeta = {
   finalFileName?: string;
 };
 
+type LipSyncFormatContractTrace = {
+  renderMode: '1080x1920' | 'adaptive' | 'preserveSourceAspect';
+  source: VideoFormatContract | null;
+  preparedInput: VideoFormatContract | null;
+  providerOutput: VideoFormatContract | null;
+  finalOutput: VideoFormatContract | null;
+  restored: boolean;
+};
+
+type LipSyncMediaPreflightTrace = {
+  sourceVideo: Record<string, unknown>;
+  preparedVideo: Record<string, unknown>;
+  audioInput: Record<string, unknown>;
+  normalizedAudio: {
+    converted: boolean;
+    reason: string | null;
+    mimeType: string;
+    fileName: string;
+  };
+  limits: Record<string, unknown>;
+};
+
 const NO_SUBTITLE_TEMPLATE: SubtitleTemplateResourceDto = {
   id: 'no-subtitle',
   name: '无字幕',
   owner: 'recommended',
   recommended: true,
+  editable: false,
+  baseTemplateId: null,
   coverUrl: '',
   previewCoverUrl: '',
   styleJson: {},
+  styleConfig: {},
   createdAt: '',
   updatedAt: '',
 };
@@ -171,6 +226,7 @@ function guessMimeFromFilename(filename: string): string {
 @Injectable()
 export class SubtitleWorkflowService {
   private readonly logger = new Logger(SubtitleWorkflowService.name);
+  private renderOutputOssClient: OssClient | null = null;
 
   constructor(
     private readonly config: ConfigService,
@@ -180,6 +236,7 @@ export class SubtitleWorkflowService {
     private readonly ffmpegAudio: FfmpegAudioService,
     private readonly aliLipSync: AliLipSyncService,
     private readonly videoMediaDownload: VideoMediaDownloadService,
+    private readonly titleAssets: TitleAssetsService,
   ) {}
 
   async detectCutPoints(
@@ -232,6 +289,349 @@ export class SubtitleWorkflowService {
     }
   }
 
+  async createLipSyncAsset(
+    userId: string,
+    body: CreateLipSyncTaskBody,
+    opts: {
+      onProgress?: (progress: number) => void;
+      onProviderEvent?: (state: AliLipSyncProviderState) => void;
+    } = {},
+  ): Promise<{
+    videoUrl: string;
+    duration: number;
+    hint: string;
+    metadataJson?: Record<string, unknown>;
+  }> {
+    const avatarResourceId =
+      body.avatarResourceId?.trim() || body.digitalHumanId?.trim() || '';
+    if (!avatarResourceId) {
+      throw new BadRequestException('avatarResourceId/digitalHumanId 不能为空');
+    }
+    const report = (progress: number) => opts.onProgress?.(progress);
+    const effectiveRenderMode = body.renderMode ?? 'preserveSourceAspect';
+    report(8);
+
+    const avatar = await this.resources.getAvatar(userId, avatarResourceId);
+    if (!avatar.originalVideoUrl?.trim()) {
+      throw new BadRequestException('当前数字人视频未绑定可用源视频');
+    }
+    const sourceVideo = await this.readVideoFromSourceRef(
+      avatar.originalVideoUrl,
+    );
+    this.aliLipSync.ensureConfigured();
+
+    const voiceResourceId =
+      body.voiceResourceId?.trim() || body.inputVoiceId?.trim() || '';
+    const hasCustomAudio = Boolean(
+      body.inputAudioPath?.trim() || body.inputAudioUrl?.trim(),
+    );
+    if (!hasCustomAudio && !voiceResourceId) {
+      throw new BadRequestException(
+        'voiceResourceId/inputVoiceId 或 inputAudioPath/inputAudioUrl 至少提供一项',
+      );
+    }
+
+    const speechResolved = hasCustomAudio
+      ? await this.readAudioFromSource({
+          inputAudioPath: body.inputAudioPath,
+          inputAudioUrl: body.inputAudioUrl,
+        })
+      : await (async () => {
+          if (!voiceResourceId) {
+            throw new BadRequestException(
+              'voiceResourceId/inputVoiceId 不能为空',
+            );
+          }
+          const script = this.sanitizeUserScript(body.script?.trim() || '');
+          if (!script) {
+            throw new BadRequestException(
+              '未提供 inputAudio 时，script 不能为空',
+            );
+          }
+          const voice = await this.resources.getVoice(userId, voiceResourceId);
+          return this.buildSpeechAudio(
+            script,
+            {
+              id: voice.id,
+              name: voice.name,
+              cloneStatus: voice.cloneStatus,
+              canUseForRender: voice.canUseForRender,
+              renderUnavailableReason: voice.renderUnavailableReason,
+              provider: voice.provider,
+              providerVoice: voice.providerVoice,
+              providerModel: voice.providerModel,
+              audioUrl: voice.audioUrl,
+            },
+            normalizeVoiceTuning(body),
+          );
+        })();
+
+    const draftId = randomUUID();
+    const draftDir = this.draftDir(draftId);
+    await fs.mkdir(draftDir, { recursive: true });
+    const sourceVideoPath = path.join(
+      draftDir,
+      this.draftMediaFileName(
+        'lipsync-source',
+        sourceVideo.originalname,
+        '.mp4',
+      ),
+    );
+    const speechAudioPath = path.join(
+      draftDir,
+      this.draftMediaFileName(
+        'lipsync-audio',
+        speechResolved.originalname,
+        this.audioExtensionForMime(speechResolved.mimeType),
+      ),
+    );
+    await Promise.all([
+      fs.writeFile(sourceVideoPath, sourceVideo.buffer),
+      fs.writeFile(speechAudioPath, speechResolved.buffer),
+    ]);
+    report(24);
+
+    const durationPlan = await this.resolveFinalDurationPlan({
+      sourceVideoPath,
+      speechAudioPath,
+      subtitleJson: {
+        version: 1,
+        language: 'zh-CN',
+        durationMs: 0,
+        generatedAt: nowIso(),
+        source: {
+          script: '',
+          avatarResourceId,
+          voiceResourceId,
+          subtitleTemplateId: 'no-subtitle',
+        },
+        template: { id: 'no-subtitle', name: 'no-subtitle', styleJson: {} },
+        cues: [],
+      },
+    });
+    const aliSourceVideoPath = path.join(
+      draftDir,
+      `ali-lipsync-source_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`,
+    );
+    await this.ffmpegAudio.prepareVideoForAliLipSync({
+      inputVideoPath: sourceVideoPath,
+      outputVideoPath: aliSourceVideoPath,
+      targetSeconds: durationPlan.targetSeconds,
+      renderMode: effectiveRenderMode,
+    });
+    const {
+      audioPath: providerAudioPath,
+      audioMimeType: providerAudioMimeType,
+      audioFileName: providerAudioFileName,
+      preflightTrace,
+    } = await this.runLipSyncMediaPreflight({
+      sourceVideoPath,
+      preparedVideoPath: aliSourceVideoPath,
+      speechAudioPath,
+      speechAudioMimeType: speechResolved.mimeType,
+      speechAudioOriginalName: speechResolved.originalname,
+      draftDir,
+      renderMode: effectiveRenderMode,
+    });
+    const [videoBuffer, audioBuffer] = await Promise.all([
+      fs.readFile(aliSourceVideoPath),
+      fs.readFile(providerAudioPath),
+    ]);
+    const [sourceContract, preparedContract] = await Promise.all([
+      this.ffmpegAudio.probeVideoFormatContract(sourceVideoPath),
+      this.ffmpegAudio.probeVideoFormatContract(aliSourceVideoPath),
+    ]);
+    const providerInputMeta: Record<string, unknown> = {
+      avatarResourceId,
+      audioAssetId: body.audioAssetId?.trim() || null,
+      voiceResourceId: voiceResourceId || null,
+      renderMode: effectiveRenderMode,
+    };
+    report(52);
+
+    const lipSyncResult = await this.aliLipSync.submitLipSync({
+      video: {
+        buffer: videoBuffer,
+        filename: path.basename(aliSourceVideoPath),
+        mimeType: 'video/mp4',
+      },
+      audio: {
+        buffer: audioBuffer,
+        filename: providerAudioFileName,
+        mimeType: providerAudioMimeType,
+      },
+      videoExtension: durationPlan.shouldExtendVideo ? true : undefined,
+      onProviderEvent: (state) =>
+        opts.onProviderEvent?.({
+          ...state,
+          inputMeta: state.inputMeta ?? providerInputMeta,
+          sourceContract:
+            state.sourceContract ??
+            this.formatContractLogSummary(sourceContract),
+          preparedContract:
+            state.preparedContract ??
+            this.formatContractLogSummary(preparedContract),
+          audioContract: state.audioContract ?? preflightTrace.audioInput,
+        }),
+    });
+    if (!lipSyncResult.videoUrl?.trim()) {
+      throw new BadRequestException('VideoReTalk 未返回成片地址');
+    }
+    const providerVideoPath = await this.persistResultVideoToDraft(
+      lipSyncResult.videoUrl,
+      draftDir,
+    );
+    const { finalPath: workingVideoPath, trace: contractTrace } =
+      await this.applyLipSyncSourceFormatContract({
+        sourceVideoPath,
+        preparedVideoPath: aliSourceVideoPath,
+        providerVideoPath,
+        draftDir,
+        renderMode: effectiveRenderMode,
+        context: 'createLipSyncAsset',
+      });
+    report(78);
+
+    const finalFileName = this.outputFileName('lipsync-final', '.mp4');
+    const finalPath = path.join(this.finalOutputDir(), finalFileName);
+    await fs.mkdir(this.finalOutputDir(), { recursive: true });
+    await fs.copyFile(workingVideoPath, finalPath);
+    const duration =
+      (await this.ffmpegAudio.probeFileDurationSeconds(finalPath)) ?? 0;
+    const published = await this.publishRenderOutput(finalPath, finalFileName);
+    report(100);
+    return {
+      videoUrl: published.url,
+      duration: Number(duration.toFixed(2)),
+      metadataJson: this.buildLipSyncAssetMetadata(
+        contractTrace,
+        preflightTrace,
+      ),
+      hint:
+        published.storage === 'oss'
+          ? '口型同步已完成并上传 OSS'
+          : '口型同步已完成并保存本地 output 目录',
+    };
+  }
+
+  async recoverLipSyncAsset(
+    userId: string,
+    params: {
+      avatarResourceId: string;
+      providerTaskId: string;
+      recoverUntil?: string | null;
+      renderMode?: '1080x1920' | 'adaptive' | 'preserveSourceAspect';
+    },
+    opts: {
+      onProgress?: (progress: number) => void;
+      onProviderEvent?: (state: AliLipSyncProviderState) => void;
+    } = {},
+  ): Promise<{
+    videoUrl: string;
+    duration: number;
+    hint: string;
+    metadataJson?: Record<string, unknown>;
+    providerState?: AliLipSyncProviderState;
+  }> {
+    const avatarResourceId = params.avatarResourceId?.trim();
+    const providerTaskId = params.providerTaskId?.trim();
+    if (!avatarResourceId) {
+      throw new BadRequestException('avatarResourceId 涓嶈兘涓虹┖');
+    }
+    if (!providerTaskId) {
+      throw new BadRequestException('providerTaskId 涓嶈兘涓虹┖');
+    }
+
+    const report = (progress: number) => opts.onProgress?.(progress);
+    const effectiveRenderMode = params.renderMode ?? 'preserveSourceAspect';
+    report(8);
+
+    const avatar = await this.resources.getAvatar(userId, avatarResourceId);
+    if (!avatar.originalVideoUrl?.trim()) {
+      throw new BadRequestException(
+        'Current avatar is missing original source video.',
+      );
+    }
+    this.aliLipSync.ensureConfigured();
+    const sourceVideo = await this.readVideoFromSourceRef(
+      avatar.originalVideoUrl,
+    );
+
+    const draftId = randomUUID();
+    const draftDir = this.draftDir(draftId);
+    await fs.mkdir(draftDir, { recursive: true });
+    const sourceVideoPath = path.join(
+      draftDir,
+      this.draftMediaFileName(
+        'lipsync-recover-source',
+        sourceVideo.originalname,
+        '.mp4',
+      ),
+    );
+    await fs.writeFile(sourceVideoPath, sourceVideo.buffer);
+    report(26);
+
+    const sourceContract =
+      await this.ffmpegAudio.probeVideoFormatContract(sourceVideoPath);
+    const recoverResult = await this.aliLipSync.recoverAliyunTask({
+      taskId: providerTaskId,
+      recoverUntil: params.recoverUntil ?? null,
+      onProviderEvent: (state) =>
+        opts.onProviderEvent?.({
+          ...state,
+          inputMeta: state.inputMeta ?? {
+            avatarResourceId,
+            renderMode: effectiveRenderMode,
+          },
+          sourceContract:
+            state.sourceContract ??
+            this.formatContractLogSummary(sourceContract),
+        }),
+    });
+    if (!recoverResult.videoUrl?.trim()) {
+      throw new BadRequestException(
+        'VideoReTalk 鎭㈠鎴愬姛浣嗘湭杩斿洖瑙嗛鍦板潃',
+      );
+    }
+    report(62);
+
+    const providerVideoPath = await this.persistResultVideoToDraft(
+      recoverResult.videoUrl,
+      draftDir,
+    );
+    const { finalPath, trace } = await this.applyLipSyncSourceFormatContract({
+      sourceVideoPath,
+      preparedVideoPath: sourceVideoPath,
+      providerVideoPath,
+      draftDir,
+      renderMode: effectiveRenderMode,
+      context: 'recoverLipSyncAsset',
+    });
+    report(84);
+
+    const finalFileName = this.outputFileName('lipsync-final', '.mp4');
+    const finalPathAbs = path.join(this.finalOutputDir(), finalFileName);
+    await fs.mkdir(this.finalOutputDir(), { recursive: true });
+    await fs.copyFile(finalPath, finalPathAbs);
+    const duration =
+      (await this.ffmpegAudio.probeFileDurationSeconds(finalPathAbs)) ?? 0;
+    const published = await this.publishRenderOutput(
+      finalPathAbs,
+      finalFileName,
+    );
+    report(100);
+    return {
+      videoUrl: published.url,
+      duration: Number(duration.toFixed(2)),
+      metadataJson: this.buildLipSyncAssetMetadata(trace),
+      providerState: recoverResult.providerState,
+      hint:
+        published.storage === 'oss'
+          ? '鍙ｅ瀷鎭㈠宸插畬鎴愬苟涓婁紶 OSS'
+          : '鍙ｅ瀷鎭㈠宸插畬鎴愬苟淇濆瓨鏈湴 output 鐩綍',
+    };
+  }
+
   async renderFinalSmartClip(
     userId: string,
     body: RenderFinalBody,
@@ -273,6 +673,10 @@ export class SubtitleWorkflowService {
           )
         : Promise.resolve(NO_SUBTITLE_TEMPLATE),
     ]);
+    const effectiveSubtitleTemplate = this.applySubtitleVisualStyleToTemplate(
+      subtitleTemplate,
+      body.subtitleVisualStyle,
+    );
     if (!avatar.originalVideoUrl?.trim()) {
       throw new BadRequestException('当前数字人视频没有绑定原始视频素材');
     }
@@ -325,13 +729,23 @@ export class SubtitleWorkflowService {
     let subtitles = this.normalizeRenderSubtitles(
       body.subtitles,
       script,
-      subtitleTemplate.styleJson,
+      effectiveSubtitleTemplate.styleJson,
+    );
+    const scriptHighlights = this.normalizeScriptHighlightsForRender(
+      body.highlights,
+      script,
+      effectiveSubtitleTemplate.styleJson,
+    );
+    subtitles = this.applyScriptHighlightsToSubtitles(
+      subtitles,
+      script,
+      scriptHighlights,
     );
     let subtitleJson = this.buildSubtitleJsonFromRenderSubtitles({
       script,
       avatarResourceId: avatar.id,
       voiceResourceId: voice.id,
-      subtitleTemplate,
+      subtitleTemplate: effectiveSubtitleTemplate,
       subtitles,
     });
 
@@ -344,10 +758,13 @@ export class SubtitleWorkflowService {
       draftDir,
       `ali-lipsync-source_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`,
     );
+    const effectiveRenderMode =
+      body.renderOptions?.renderMode ?? 'preserveSourceAspect';
     await this.ffmpegAudio.prepareVideoForAliLipSync({
       inputVideoPath: sourceVideoPath,
       outputVideoPath: aliSourceVideoPath,
       targetSeconds: durationPlan.targetSeconds,
+      renderMode: effectiveRenderMode,
     });
     const [videoBuffer, audioBuffer] = await Promise.all([
       fs.readFile(aliSourceVideoPath),
@@ -371,10 +788,20 @@ export class SubtitleWorkflowService {
     if (!lipSyncResult.videoUrl?.trim()) {
       throw new BadRequestException('VideoReTalk 服务未返回视频地址');
     }
-    let workingVideoPath = await this.persistResultVideoToDraft(
+    const providerVideoPath = await this.persistResultVideoToDraft(
       lipSyncResult.videoUrl,
       draftDir,
     );
+    let workingVideoPath = (
+      await this.applyLipSyncSourceFormatContract({
+        sourceVideoPath,
+        preparedVideoPath: aliSourceVideoPath,
+        providerVideoPath,
+        draftDir,
+        renderMode: effectiveRenderMode,
+        context: 'renderFinalSmartClip',
+      })
+    ).finalPath;
     report(58);
 
     const cutMode = this.normalizeCutMode(body.cutConfig?.mode);
@@ -416,7 +843,7 @@ export class SubtitleWorkflowService {
           script,
           avatarResourceId: avatar.id,
           voiceResourceId: voice.id,
-          subtitleTemplate,
+          subtitleTemplate: effectiveSubtitleTemplate,
           subtitles,
         });
       }
@@ -445,11 +872,40 @@ export class SubtitleWorkflowService {
     } else {
       await fs.copyFile(workingVideoPath, finalPath);
     }
+
+    if (body.includeTitleAssets) {
+      try {
+        const overlays = await this.titleAssets.listActiveSuccessAssetsForVideo(
+          userId,
+          body.videoId ?? '',
+        );
+        if (overlays.length > 0) {
+          const overlaidPath = path.join(
+            this.finalOutputDir(),
+            this.outputFileName('smart-clip-final-title-overlay', '.mp4'),
+          );
+          await this.titleAssets.overlayAssetsOnVideo({
+            inputVideoPath: finalPath,
+            outputVideoPath: overlaidPath,
+            overlays,
+          });
+          await fs.rename(overlaidPath, finalPath);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Overlay title assets failed: ${message}`);
+      }
+    }
     report(94);
 
     const duration =
       (await this.ffmpegAudio.probeFileDurationSeconds(finalPath)) ?? 0;
     const hints = ['成片已生成，可以下载使用'];
+    if (body.includeTitleAssets) {
+      hints.push(
+        'includeTitleAssets 已接收；标题素材由 title-asset-render 队列处理后参与最终叠加。',
+      );
+    }
     if (body.backgroundMusic?.enabled) {
       hints.push(
         '背景音乐配置已记录，当前未绑定可混音的音乐素材时会跳过混音。',
@@ -459,11 +915,12 @@ export class SubtitleWorkflowService {
       hints.push('画中画素材配置已记录，当前未上传分镜素材时会跳过叠加。');
     }
 
+    const published = await this.publishRenderOutput(finalPath, finalFileName);
     report(100);
     return {
-      videoUrl: this.toOutputUrl(finalFileName),
+      videoUrl: published.url,
       duration: Number(duration.toFixed(2)),
-      hint: hints.join(' '),
+      hint: `${hints.join(' ')} ${published.storage === 'oss' ? '成片已上传 OSS。' : '成片已保存本地 output。'}`.trim(),
     };
   }
 
@@ -476,6 +933,9 @@ export class SubtitleWorkflowService {
       subtitleTemplateId?: string;
       subtitlesEnabled?: boolean;
       previewSeconds?: number;
+      subtitleVisualStyle?: SubtitleVisualStyleDto;
+      subtitles?: RenderSubtitleDto[];
+      highlights?: unknown;
       voiceTuning?: VoiceTuningOptions;
     },
   ): Promise<{
@@ -513,6 +973,10 @@ export class SubtitleWorkflowService {
           )
         : Promise.resolve(NO_SUBTITLE_TEMPLATE),
     ]);
+    const effectiveSubtitleTemplate = this.applySubtitleVisualStyleToTemplate(
+      subtitleTemplate,
+      body.subtitleVisualStyle,
+    );
 
     if (!avatar.originalVideoUrl?.trim()) {
       throw new BadRequestException('当前数字人视频没有绑定原始视频素材');
@@ -548,13 +1012,40 @@ export class SubtitleWorkflowService {
       if (speech.styleHint) hints.push(speech.styleHint);
     }
 
-    const timeline = await this.buildSubtitleTimeline(
+    let timeline = await this.buildSubtitleTimeline(
       script,
       speech,
       body.avatarResourceId.trim(),
       body.voiceResourceId.trim(),
-      subtitleTemplate,
+      effectiveSubtitleTemplate,
     );
+    const payloadSubtitles = this.normalizeRenderSubtitles(
+      body.subtitles,
+      script,
+      effectiveSubtitleTemplate.styleJson,
+    );
+    if (payloadSubtitles.length > 0) {
+      const scriptHighlights = this.normalizeScriptHighlightsForRender(
+        body.highlights,
+        script,
+        effectiveSubtitleTemplate.styleJson,
+      );
+      const mergedSubtitles = this.applyScriptHighlightsToSubtitles(
+        payloadSubtitles,
+        script,
+        scriptHighlights,
+      );
+      timeline = {
+        subtitleJson: this.buildSubtitleJsonFromRenderSubtitles({
+          script,
+          avatarResourceId: body.avatarResourceId.trim(),
+          voiceResourceId: body.voiceResourceId.trim(),
+          subtitleTemplate: effectiveSubtitleTemplate,
+          subtitles: mergedSubtitles,
+        }),
+        timelineSource: 'local-estimate',
+      };
+    }
     if (!subtitlesEnabled) {
       hints.push('当前已关闭字幕叠加，只生成无字幕对口型视频。');
     } else if (timeline.timelineSource === 'asr-fallback') {
@@ -714,6 +1205,7 @@ export class SubtitleWorkflowService {
           inputVideoPath: params.sourceVideoPath,
           outputVideoPath: sourcePreviewPath,
           clipSeconds: params.previewSeconds,
+          renderMode: 'preserveSourceAspect',
         }),
         this.ffmpegAudio.clipAudio({
           inputAudioPath: params.speechAudioPath,
@@ -742,10 +1234,19 @@ export class SubtitleWorkflowService {
       if (!result.videoUrl?.trim()) {
         throw new Error('VideoReTalk 服务未返回预览视频地址');
       }
-      const videoPath = await this.persistResultVideoToDraft(
+      const providerVideoPath = await this.persistResultVideoToDraft(
         result.videoUrl,
         params.draftDir,
       );
+      const { finalPath: videoPath } =
+        await this.applyLipSyncSourceFormatContract({
+          sourceVideoPath: params.sourceVideoPath,
+          preparedVideoPath: sourcePreviewPath,
+          providerVideoPath,
+          draftDir: params.draftDir,
+          renderMode: 'preserveSourceAspect',
+          context: 'buildLipSyncedPreviewVideo',
+        });
       return {
         videoPath,
         providerResponse: result.providerResponse,
@@ -815,6 +1316,7 @@ export class SubtitleWorkflowService {
           inputVideoPath: sourceVideoPath,
           outputVideoPath: aliSourceVideoPath,
           targetSeconds: durationPlan.targetSeconds,
+          renderMode: 'preserveSourceAspect',
         });
         const [videoBuffer, audioBuffer] = await Promise.all([
           fs.readFile(aliSourceVideoPath),
@@ -839,10 +1341,20 @@ export class SubtitleWorkflowService {
         if (!result.videoUrl?.trim()) {
           throw new Error('VideoReTalk 服务未返回视频地址');
         }
-        workingVideoPath = await this.persistResultVideoToDraft(
+        const providerVideoPath = await this.persistResultVideoToDraft(
           result.videoUrl,
           draftDir,
         );
+        workingVideoPath = (
+          await this.applyLipSyncSourceFormatContract({
+            sourceVideoPath,
+            preparedVideoPath: aliSourceVideoPath,
+            providerVideoPath,
+            draftDir,
+            renderMode: 'preserveSourceAspect',
+            context: 'finalizeDraft',
+          })
+        ).finalPath;
         fallback = false;
         if (durationPlan.shouldExtendVideo) {
           hints.push(
@@ -1091,6 +1603,127 @@ export class SubtitleWorkflowService {
       .filter((cut): cut is CutPointDto => Boolean(cut));
   }
 
+  private applySubtitleVisualStyleToTemplate(
+    template: SubtitleTemplateResourceDto,
+    input: SubtitleVisualStyleDto | undefined,
+  ): SubtitleTemplateResourceDto {
+    if (!input) return template;
+    const nextStyle: Record<string, unknown> = {
+      ...(template.styleJson || {}),
+    };
+    if (
+      typeof input.normalColor === 'string' &&
+      this.isSafeColor(input.normalColor)
+    ) {
+      nextStyle.color = input.normalColor.trim();
+    }
+    if (
+      typeof input.highlightColor === 'string' &&
+      this.isSafeColor(input.highlightColor)
+    ) {
+      nextStyle.highlightColor = input.highlightColor.trim();
+    }
+    if (
+      typeof input.strokeColor === 'string' &&
+      this.isSafeColor(input.strokeColor)
+    ) {
+      nextStyle.stroke = input.strokeColor.trim();
+    }
+    if (
+      typeof input.backgroundColor === 'string' &&
+      this.isSafeColor(input.backgroundColor)
+    ) {
+      nextStyle.background = input.backgroundColor.trim();
+    }
+    const fontSize = this.readFiniteSeconds(input.fontSize as number);
+    if (fontSize !== null) {
+      nextStyle.size = this.clampNumber(fontSize, 20, 96);
+    }
+    const strokeWidth = this.readFiniteSeconds(input.strokeWidth as number);
+    if (strokeWidth !== null) {
+      nextStyle.strokeWidth = this.clampNumber(strokeWidth, 0, 12);
+    }
+    const fontWeight = this.readFiniteSeconds(input.fontWeight as number);
+    if (fontWeight !== null) {
+      nextStyle.weight = this.clampNumber(fontWeight, 300, 900);
+    }
+    const lineHeight = this.readFiniteSeconds(input.lineHeight as number);
+    if (lineHeight !== null) {
+      nextStyle.lineHeight = this.clampNumber(lineHeight, 1, 2.2);
+    }
+    const layout = this.normalizeVisualLayout(input.layout);
+    if (layout) {
+      nextStyle.layout = layout;
+    }
+    return { ...template, styleJson: nextStyle };
+  }
+
+  private normalizeVisualLayout(
+    layout: VisualOverlayLayoutDto | undefined,
+  ): VisualOverlayLayoutDto | undefined {
+    if (!layout) return undefined;
+    const x = Number(layout.xPct);
+    const y = Number(layout.yPct);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return undefined;
+    const anchor = this.normalizeVisualAnchor(layout.anchor);
+    const safeAreaPct = this.clampNumber(
+      Number.isFinite(Number(layout.safeAreaPct))
+        ? Number(layout.safeAreaPct)
+        : 6,
+      0,
+      24,
+    );
+    const scale = this.clampNumber(
+      Number.isFinite(Number(layout.scale)) ? Number(layout.scale) : 1,
+      0.7,
+      1.8,
+    );
+    const maxWidthPct = this.clampNumber(
+      Number.isFinite(Number(layout.maxWidthPct))
+        ? Number(layout.maxWidthPct)
+        : 82,
+      20,
+      100,
+    );
+    const minPct = safeAreaPct;
+    const maxPct = 100 - safeAreaPct;
+    return {
+      xPct: this.clampNumber(x, minPct, maxPct),
+      yPct: this.clampNumber(y, minPct, maxPct),
+      anchor,
+      safeAreaPct,
+      scale,
+      maxWidthPct,
+    };
+  }
+
+  private normalizeVisualAnchor(anchor: unknown): VisualOverlayAnchor {
+    if (typeof anchor !== 'string') return 'bottom-center';
+    const value = anchor.trim().toLowerCase();
+    switch (value) {
+      case 'center':
+      case 'top-center':
+      case 'bottom-center':
+      case 'top-left':
+      case 'top-right':
+      case 'bottom-left':
+      case 'bottom-right':
+      case 'left-center':
+      case 'right-center':
+        return value;
+      default:
+        return 'bottom-center';
+    }
+  }
+
+  private isSafeColor(value: string): boolean {
+    const text = value.trim();
+    if (/^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(text)) return true;
+    return /^rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|0?\.\d+|1))?\s*\)$/.test(
+      text,
+    );
+  }
+
   private normalizeRenderSubtitles(
     subtitles: RenderSubtitleDto[] | undefined,
     script: string,
@@ -1130,11 +1763,6 @@ export class SubtitleWorkflowService {
       return fromPayload.sort((a, b) => a.startTime - b.startTime);
     }
 
-    const lineChars = this.clampNumber(
-      this.readNumber(styleJson.lineChars, 14),
-      8,
-      18,
-    );
     return this.normalizeCues(
       this.buildEstimatedSegments(script),
       script,
@@ -1144,17 +1772,7 @@ export class SubtitleWorkflowService {
       startTime: this.roundSeconds(cue.startMs / 1000),
       endTime: this.roundSeconds(cue.endMs / 1000),
       text: cue.text,
-      highlightRanges:
-        cue.text.length > lineChars
-          ? [
-              {
-                start: 0,
-                end: Math.min(4, cue.text.length),
-                color: '#FFD94A',
-                fontWeight: 900,
-              },
-            ]
-          : [],
+      highlightRanges: [],
     }));
   }
 
@@ -1236,6 +1854,73 @@ export class SubtitleWorkflowService {
     return Math.max(0, originalTime - removed);
   }
 
+  private legacyPositionToAnchor(position: string): VisualOverlayAnchor {
+    const value = (position || '').trim().toLowerCase();
+    if (value === 'top') return 'top-center';
+    if (value === 'middle') return 'center';
+    return 'bottom-center';
+  }
+
+  private resolveNormalizedSubtitleLayout(
+    layoutRaw: unknown,
+  ): NormalizedVisualLayout | null {
+    if (!layoutRaw || typeof layoutRaw !== 'object') return null;
+    const data = layoutRaw as Record<string, unknown>;
+    const normalized = this.normalizeVisualLayout({
+      xPct: Number(data.xPct),
+      yPct: Number(data.yPct),
+      anchor: data.anchor as VisualOverlayAnchor | undefined,
+      safeAreaPct: Number(data.safeAreaPct),
+      scale: Number(data.scale),
+      maxWidthPct: Number(data.maxWidthPct),
+    });
+    if (!normalized) return null;
+    return {
+      xPct: normalized.xPct,
+      yPct: normalized.yPct,
+      anchor: normalized.anchor ?? 'bottom-center',
+      safeAreaPct: normalized.safeAreaPct ?? 6,
+    };
+  }
+
+  private anchorToAssAlignment(anchor: VisualOverlayAnchor): number {
+    switch (anchor) {
+      case 'top-left':
+        return 7;
+      case 'top-center':
+        return 8;
+      case 'top-right':
+        return 9;
+      case 'left-center':
+        return 4;
+      case 'center':
+        return 5;
+      case 'right-center':
+        return 6;
+      case 'bottom-left':
+        return 1;
+      case 'bottom-center':
+        return 2;
+      case 'bottom-right':
+        return 3;
+      default:
+        return 2;
+    }
+  }
+
+  private buildAssPositionTag(layout: NormalizedVisualLayout | null): string {
+    if (!layout) return '';
+    const safe = this.clampNumber(layout.safeAreaPct, 0, 24);
+    const minPct = safe;
+    const maxPct = 100 - safe;
+    const xPct = this.clampNumber(layout.xPct, minPct, maxPct);
+    const yPct = this.clampNumber(layout.yPct, minPct, maxPct);
+    const x = Math.round((xPct / 100) * ASS_CANVAS_WIDTH);
+    const y = Math.round((yPct / 100) * ASS_CANVAS_HEIGHT);
+    const an = this.anchorToAssAlignment(layout.anchor);
+    return `{\\an${an}\\pos(${x},${y})}`;
+  }
+
   private buildAssScriptFromRenderSubtitles(
     subtitleJson: SubtitleJsonDto,
     subtitles: RenderSubtitleDto[],
@@ -1263,7 +1948,11 @@ export class SubtitleWorkflowService {
     const hasBackground =
       typeof style.background === 'string' &&
       style.background.trim().length > 0;
-    const alignment = position === 'top' ? 8 : position === 'middle' ? 5 : 2;
+    const resolvedLayout = this.resolveNormalizedSubtitleLayout(style.layout);
+    const fallbackAnchor = this.legacyPositionToAnchor(position);
+    const alignment = this.anchorToAssAlignment(
+      resolvedLayout?.anchor ?? fallbackAnchor,
+    );
     const subtitleById = new Map(
       subtitles.map((subtitle) => [subtitle.id, subtitle]),
     );
@@ -1317,8 +2006,9 @@ export class SubtitleWorkflowService {
     const events = subtitleJson.cues
       .map((cue) => {
         const subtitle = subtitleById.get(cue.id);
-        const text = this.buildAssDialogueText(cue, subtitle, style);
-        return `Dialogue: 0,${this.toAssTime(cue.startMs)},${this.toAssTime(cue.endMs)},Default,,0,0,0,,${text}`;
+        const text = this.buildAssDialogueText(cue, subtitle, style, fontSize);
+        const withPos = `${this.buildAssPositionTag(resolvedLayout)}${text}`;
+        return `Dialogue: 0,${this.toAssTime(cue.startMs)},${this.toAssTime(cue.endMs)},Default,,0,0,0,,${withPos}`;
       })
       .join('\n');
 
@@ -1329,6 +2019,7 @@ export class SubtitleWorkflowService {
     cue: SubtitleCueDto,
     subtitle: RenderSubtitleDto | undefined,
     style: Record<string, unknown>,
+    baseFontSize: number,
   ): string {
     const ranges = subtitle?.highlightRanges ?? [];
     if (!ranges.length) return this.escapeAssText(cue.lines.join('\\N'));
@@ -1346,6 +2037,14 @@ export class SubtitleWorkflowService {
         end: Math.max(0, Math.min(cue.text.length, Math.ceil(range.end))),
         color: range.color || defaultHighlightColor,
         fontWeight: range.fontWeight ?? 900,
+        fontSizeScale: this.clampNumber(
+          this.readNumber(
+            range.fontSizeScale,
+            this.readNumber(style.highlightFontSizeScale, 1.18),
+          ),
+          1,
+          1.6,
+        ),
       }))
       .filter((range) => range.end > range.start)
       .sort((a, b) => a.start - b.start);
@@ -1354,13 +2053,14 @@ export class SubtitleWorkflowService {
     let output = '';
     for (const range of sorted) {
       if (range.start > cursor) {
-        output += `{\\c${normalColor}\\b0}${this.escapeAssSegment(cue.text.slice(cursor, range.start))}`;
+        output += `{\\c${normalColor}\\fs${Math.round(baseFontSize)}\\b0}${this.escapeAssSegment(cue.text.slice(cursor, range.start))}`;
       }
-      output += `{\\c${this.toAssOverrideColor(range.color)}\\b${range.fontWeight >= 700 ? 1 : 0}}${this.escapeAssSegment(cue.text.slice(range.start, range.end))}`;
+      const highlightFs = Math.round(baseFontSize * range.fontSizeScale);
+      output += `{\\c${this.toAssOverrideColor(range.color)}\\fs${highlightFs}\\b${range.fontWeight >= 700 ? 1 : 0}}${this.escapeAssSegment(cue.text.slice(range.start, range.end))}`;
       cursor = Math.max(cursor, range.end);
     }
     if (cursor < cue.text.length) {
-      output += `{\\c${normalColor}\\b0}${this.escapeAssSegment(cue.text.slice(cursor))}`;
+      output += `{\\c${normalColor}\\fs${Math.round(baseFontSize)}\\b0}${this.escapeAssSegment(cue.text.slice(cursor))}`;
     }
     return output || this.escapeAssText(cue.lines.join('\\N'));
   }
@@ -1389,8 +2089,158 @@ export class SubtitleWorkflowService {
           400,
           900,
         ),
+        fontSizeScale: this.clampNumber(
+          this.readNumber(range.fontSizeScale, 1.18),
+          1,
+          1.6,
+        ),
       }))
       .filter((range) => range.end > range.start);
+  }
+
+  private normalizeScriptHighlightsForRender(
+    highlightsRaw: unknown,
+    script: string,
+    styleJson: Record<string, unknown>,
+  ): ScriptHighlightRange[] {
+    return normalizeScriptHighlights({
+      highlights: highlightsRaw,
+      scriptText: script,
+      defaultColor: this.readString(styleJson.highlightColor, '#FFD400'),
+      defaultFontSizeScale: this.clampNumber(
+        this.readNumber(styleJson.highlightFontSizeScale, 1.18),
+        1,
+        1.6,
+      ),
+      defaultFontWeight: this.clampNumber(
+        this.readNumber(styleJson.highlightFontWeight, 900),
+        400,
+        900,
+      ),
+    });
+  }
+
+  private applyScriptHighlightsToSubtitles(
+    subtitles: RenderSubtitleDto[],
+    script: string,
+    highlights: ScriptHighlightRange[],
+  ): RenderSubtitleDto[] {
+    if (!highlights.length) return subtitles;
+    let searchCursor = 0;
+    return subtitles.map((subtitle, index) => {
+      const scriptStart = this.findSubtitleTextStart(
+        script,
+        subtitle.text,
+        searchCursor,
+      );
+      if (scriptStart >= 0) {
+        searchCursor = scriptStart + subtitle.text.length;
+      }
+      const fromScript =
+        scriptStart >= 0
+          ? projectHighlightsToSubtitle({
+              subtitleText: subtitle.text,
+              subtitleScriptStart: scriptStart,
+              highlights,
+            })
+          : this.estimateSubtitleHighlightsByOrder(
+              subtitle,
+              subtitles,
+              highlights,
+              script.length,
+              index,
+            );
+      const fromPayload = this.normalizeHighlightRanges(
+        subtitle.highlightRanges,
+        subtitle.text,
+      );
+      const merged = this.mergeSubtitleHighlightRanges(
+        [...fromPayload, ...fromScript],
+        subtitle.text.length,
+      );
+      return {
+        ...subtitle,
+        highlightRanges: merged,
+      };
+    });
+  }
+
+  private estimateSubtitleHighlightsByOrder(
+    subtitle: RenderSubtitleDto,
+    allSubtitles: RenderSubtitleDto[],
+    highlights: ScriptHighlightRange[],
+    scriptLength: number,
+    index: number,
+  ): SubtitleHighlightRange[] {
+    if (!subtitle.text || scriptLength <= 0) return [];
+    const totalChars = allSubtitles.reduce(
+      (sum, item) => sum + Math.max(0, item.text.length),
+      0,
+    );
+    if (totalChars <= 0) return [];
+    const charsBefore = allSubtitles
+      .slice(0, index)
+      .reduce((sum, item) => sum + Math.max(0, item.text.length), 0);
+    const start = Math.floor((charsBefore / totalChars) * scriptLength);
+    return projectHighlightsToSubtitle({
+      subtitleText: subtitle.text,
+      subtitleScriptStart: start,
+      highlights,
+    });
+  }
+
+  private findSubtitleTextStart(
+    script: string,
+    subtitleText: string,
+    from: number,
+  ): number {
+    const text = subtitleText.trim();
+    if (!text) return -1;
+    const primary = script.indexOf(text, Math.max(0, from));
+    if (primary >= 0) return primary;
+    return script.indexOf(text);
+  }
+
+  private mergeSubtitleHighlightRanges(
+    ranges: HighlightRangeDto[],
+    textLength: number,
+  ): HighlightRangeDto[] {
+    const normalized = ranges
+      .map((range) => ({
+        start: Math.max(0, Math.min(textLength, Math.floor(range.start))),
+        end: Math.max(0, Math.min(textLength, Math.ceil(range.end))),
+        color: range.color,
+        fontWeight: range.fontWeight,
+        fontSizeScale: range.fontSizeScale,
+      }))
+      .filter((range) => range.end > range.start)
+      .sort((a, b) =>
+        a.start === b.start ? a.end - b.end : a.start - b.start,
+      );
+    if (!normalized.length) return [];
+    const merged: HighlightRangeDto[] = [];
+    for (const current of normalized) {
+      const last = merged[merged.length - 1];
+      if (!last) {
+        merged.push(current);
+        continue;
+      }
+      if (current.start <= last.end) {
+        last.end = Math.max(last.end, current.end);
+        last.color = current.color || last.color;
+        last.fontWeight = Math.max(
+          this.readNumber(last.fontWeight, 900),
+          this.readNumber(current.fontWeight, 900),
+        );
+        last.fontSizeScale = Math.max(
+          this.readNumber(last.fontSizeScale, 1.18),
+          this.readNumber(current.fontSizeScale, 1.18),
+        );
+      } else {
+        merged.push(current);
+      }
+    }
+    return merged;
   }
 
   private escapeAssSegment(text: string): string {
@@ -1765,7 +2615,11 @@ export class SubtitleWorkflowService {
     const hasBackground =
       typeof style.background === 'string' &&
       style.background.trim().length > 0;
-    const alignment = position === 'top' ? 8 : position === 'middle' ? 5 : 2;
+    const resolvedLayout = this.resolveNormalizedSubtitleLayout(style.layout);
+    const fallbackAnchor = this.legacyPositionToAnchor(position);
+    const alignment = this.anchorToAssAlignment(
+      resolvedLayout?.anchor ?? fallbackAnchor,
+    );
 
     const header = [
       '[Script Info]',
@@ -1816,7 +2670,7 @@ export class SubtitleWorkflowService {
     const events = subtitleJson.cues
       .map(
         (cue) =>
-          `Dialogue: 0,${this.toAssTime(cue.startMs)},${this.toAssTime(cue.endMs)},Default,,0,0,0,,${this.escapeAssText(cue.lines.join('\\N'))}`,
+          `Dialogue: 0,${this.toAssTime(cue.startMs)},${this.toAssTime(cue.endMs)},Default,,0,0,0,,${this.buildAssPositionTag(resolvedLayout)}${this.escapeAssText(cue.lines.join('\\N'))}`,
       )
       .join('\n');
 
@@ -1911,30 +2765,6 @@ export class SubtitleWorkflowService {
   ): string {
     if (typeof value === 'string' && value.trim()) return value.trim();
     return fallback2 ?? fallback;
-  }
-
-  private buildSilentWav(durationSeconds: number): Buffer {
-    const sampleRate = 16_000;
-    const channels = 1;
-    const bitsPerSample = 16;
-    const totalSamples = Math.max(1, Math.round(sampleRate * durationSeconds));
-    const dataSize = totalSamples * channels * (bitsPerSample / 8);
-    const buffer = Buffer.alloc(44 + dataSize);
-
-    buffer.write('RIFF', 0);
-    buffer.writeUInt32LE(36 + dataSize, 4);
-    buffer.write('WAVE', 8);
-    buffer.write('fmt ', 12);
-    buffer.writeUInt32LE(16, 16);
-    buffer.writeUInt16LE(1, 20);
-    buffer.writeUInt16LE(channels, 22);
-    buffer.writeUInt32LE(sampleRate, 24);
-    buffer.writeUInt32LE(sampleRate * channels * (bitsPerSample / 8), 28);
-    buffer.writeUInt16LE(channels * (bitsPerSample / 8), 32);
-    buffer.writeUInt16LE(bitsPerSample, 34);
-    buffer.write('data', 36);
-    buffer.writeUInt32LE(dataSize, 40);
-    return buffer;
   }
 
   private async readVideoFromSourceRef(
@@ -2046,6 +2876,506 @@ export class SubtitleWorkflowService {
     return full;
   }
 
+  private async applyLipSyncSourceFormatContract(params: {
+    sourceVideoPath: string;
+    preparedVideoPath: string;
+    providerVideoPath: string;
+    draftDir: string;
+    renderMode: '1080x1920' | 'adaptive' | 'preserveSourceAspect';
+    context: string;
+  }): Promise<{ finalPath: string; trace: LipSyncFormatContractTrace }> {
+    const sourceContract = await this.ffmpegAudio.probeVideoFormatContract(
+      params.sourceVideoPath,
+    );
+    const preparedContract = await this.ffmpegAudio.probeVideoFormatContract(
+      params.preparedVideoPath,
+    );
+    const providerContract = await this.ffmpegAudio.probeVideoFormatContract(
+      params.providerVideoPath,
+    );
+    const trace: LipSyncFormatContractTrace = {
+      renderMode: params.renderMode,
+      source: sourceContract,
+      preparedInput: preparedContract,
+      providerOutput: providerContract,
+      finalOutput: providerContract,
+      restored: false,
+    };
+    if (params.renderMode !== 'preserveSourceAspect') {
+      return { finalPath: params.providerVideoPath, trace };
+    }
+    if (!sourceContract?.video || !providerContract?.video) {
+      throw new BadRequestException(
+        'Unable to validate lip-sync output against source video format contract.',
+      );
+      /*
+      throw new BadRequestException(
+        '鏃犳硶鏍￠獙鍙ｅ瀷杈撳嚭涓庢簮瑙嗛鏍煎紡鍚堝悓锛岃绋嶅悗閲嶈瘯',
+      );
+      */
+    }
+    if (this.isVideoResolutionAligned(sourceContract, providerContract)) {
+      return { finalPath: params.providerVideoPath, trace };
+    }
+
+    const restoredPath = path.join(
+      params.draftDir,
+      `lip-sync-contract-restored_${Date.now()}_${randomUUID().slice(0, 8)}.mp4`,
+    );
+    await this.ffmpegAudio.restoreVideoToSourceContract({
+      inputVideoPath: params.providerVideoPath,
+      outputVideoPath: restoredPath,
+      sourceContract,
+    });
+    const restoredContract =
+      await this.ffmpegAudio.probeVideoFormatContract(restoredPath);
+    trace.restored = true;
+    trace.finalOutput = restoredContract;
+    if (
+      !restoredContract ||
+      !this.isVideoResolutionAligned(sourceContract, restoredContract)
+    ) {
+      this.logger.warn(
+        `[${params.context}] lip-sync resolution mismatch after restore: source=${JSON.stringify(
+          this.formatContractLogSummary(sourceContract),
+        )} provider=${JSON.stringify(this.formatContractLogSummary(providerContract))} final=${JSON.stringify(this.formatContractLogSummary(restoredContract))}`,
+      );
+      throw new BadRequestException(
+        'Lip-sync output resolution could not be aligned to source video.',
+      );
+      /*
+      throw new BadRequestException(
+        '鍙ｅ瀷杈撳嚭鏈繚鎸佹簮瑙嗛鏍煎紡锛岃鏇存崲绱犳潗鎴栫◢鍚庨噸璇?,
+      );
+      */
+    }
+    return { finalPath: restoredPath, trace };
+  }
+
+  private isVideoResolutionAligned(
+    source: VideoFormatContract,
+    target: VideoFormatContract,
+  ): boolean {
+    if (!source.video || !target.video) return false;
+    const sourceVideo = source.video;
+    const targetVideo = target.video;
+    const eqNumber = (a: number | null, b: number | null): boolean =>
+      a === b || (a === null && b === null);
+    return (
+      eqNumber(sourceVideo.width, targetVideo.width) &&
+      eqNumber(sourceVideo.height, targetVideo.height)
+    );
+  }
+
+  private formatContractLogSummary(
+    contract: VideoFormatContract | null,
+  ): Record<string, unknown> {
+    return {
+      formatName: contract?.formatName ?? null,
+      durationSeconds: contract?.durationSeconds ?? null,
+      video: contract?.video
+        ? {
+            width: contract.video.width,
+            height: contract.video.height,
+            codedWidth: contract.video.codedWidth,
+            codedHeight: contract.video.codedHeight,
+            sar: contract.video.sampleAspectRatio,
+            dar: contract.video.displayAspectRatio,
+            fps: contract.video.avgFrameRate,
+            pixFmt: contract.video.pixFmt,
+            colorRange: contract.video.colorRange,
+            colorSpace: contract.video.colorSpace,
+            colorTransfer: contract.video.colorTransfer,
+            colorPrimaries: contract.video.colorPrimaries,
+          }
+        : null,
+      audioStreamCount: contract?.audioStreams.length ?? 0,
+      audioStreams:
+        contract?.audioStreams.map((stream) => ({
+          codecName: stream.codecName,
+          sampleRate: stream.sampleRate,
+          channels: stream.channels,
+          channelLayout: stream.channelLayout,
+          isDefault: stream.isDefault,
+        })) ?? [],
+    };
+  }
+
+  private async runLipSyncMediaPreflight(params: {
+    sourceVideoPath: string;
+    preparedVideoPath: string;
+    speechAudioPath: string;
+    speechAudioMimeType: string;
+    speechAudioOriginalName: string;
+    draftDir: string;
+    renderMode: '1080x1920' | 'adaptive' | 'preserveSourceAspect';
+  }): Promise<{
+    audioPath: string;
+    audioMimeType: string;
+    audioFileName: string;
+    preflightTrace: LipSyncMediaPreflightTrace;
+  }> {
+    const limits = this.readLipSyncPreflightLimits();
+    const [sourceSummary, preparedSummary] = await Promise.all([
+      this.ffmpegAudio.probeMediaSummary(params.sourceVideoPath),
+      this.ffmpegAudio.probeMediaSummary(params.preparedVideoPath),
+    ]);
+    if (!sourceSummary) {
+      throw new BadRequestException(
+        '口型任务提交前体检失败：无法读取源视频媒体信息',
+      );
+    }
+    if (!preparedSummary) {
+      throw new BadRequestException(
+        '口型任务提交前体检失败：无法读取预处理视频媒体信息',
+      );
+    }
+
+    this.assertLipSyncMediaThreshold('源视频', sourceSummary, {
+      maxDurationSeconds: limits.maxSourceDurationSeconds,
+      maxSizeBytes: limits.maxSourceSizeBytes,
+    });
+    this.assertLipSyncMediaThreshold('预处理视频', preparedSummary, {
+      maxDurationSeconds: limits.maxPreparedDurationSeconds,
+      maxSizeBytes: limits.maxPreparedSizeBytes,
+      maxWidth: limits.maxPreparedWidth,
+      maxHeight: limits.maxPreparedHeight,
+    });
+
+    const preparedPixFmt = preparedSummary.video?.pixFmt?.toLowerCase() || null;
+    if (
+      preparedPixFmt &&
+      limits.allowedPreparedPixFmts.size > 0 &&
+      !limits.allowedPreparedPixFmts.has(preparedPixFmt)
+    ) {
+      throw new BadRequestException(
+        `预处理视频像素格式不支持：pix_fmt=${preparedPixFmt}，允许=${Array.from(
+          limits.allowedPreparedPixFmts,
+        ).join(',')}`,
+      );
+    }
+
+    const normalizedAudio = await this.normalizeLipSyncAudioInput({
+      audioPath: params.speechAudioPath,
+      mimeType: params.speechAudioMimeType,
+      originalName: params.speechAudioOriginalName,
+      draftDir: params.draftDir,
+    });
+    this.assertLipSyncMediaThreshold('输入音频', normalizedAudio.summary, {
+      maxDurationSeconds: limits.maxAudioDurationSeconds,
+      maxSizeBytes: limits.maxAudioSizeBytes,
+    });
+
+    const trace: LipSyncMediaPreflightTrace = {
+      sourceVideo: this.formatMediaSummaryLog(sourceSummary),
+      preparedVideo: this.formatMediaSummaryLog(preparedSummary),
+      audioInput: this.formatMediaSummaryLog(normalizedAudio.summary),
+      normalizedAudio: {
+        converted: normalizedAudio.converted,
+        reason: normalizedAudio.reason,
+        mimeType: normalizedAudio.mimeType,
+        fileName: normalizedAudio.fileName,
+      },
+      limits: {
+        maxSourceDurationSeconds: limits.maxSourceDurationSeconds,
+        maxSourceSizeBytes: limits.maxSourceSizeBytes,
+        maxPreparedDurationSeconds: limits.maxPreparedDurationSeconds,
+        maxPreparedSizeBytes: limits.maxPreparedSizeBytes,
+        maxPreparedWidth: limits.maxPreparedWidth,
+        maxPreparedHeight: limits.maxPreparedHeight,
+        allowedPreparedPixFmts: Array.from(limits.allowedPreparedPixFmts),
+        maxAudioDurationSeconds: limits.maxAudioDurationSeconds,
+        maxAudioSizeBytes: limits.maxAudioSizeBytes,
+      },
+    };
+    this.logger.log(
+      `[lipsync-preflight] mode=${params.renderMode} source=${JSON.stringify(
+        trace.sourceVideo,
+      )} prepared=${JSON.stringify(trace.preparedVideo)} audio=${JSON.stringify(
+        trace.audioInput,
+      )} normalized=${JSON.stringify(trace.normalizedAudio)}`,
+    );
+    return {
+      audioPath: normalizedAudio.audioPath,
+      audioMimeType: normalizedAudio.mimeType,
+      audioFileName: normalizedAudio.fileName,
+      preflightTrace: trace,
+    };
+  }
+
+  private readLipSyncPreflightLimits(): {
+    maxSourceDurationSeconds: number;
+    maxSourceSizeBytes: number;
+    maxPreparedDurationSeconds: number;
+    maxPreparedSizeBytes: number;
+    maxPreparedWidth: number;
+    maxPreparedHeight: number;
+    allowedPreparedPixFmts: Set<string>;
+    maxAudioDurationSeconds: number;
+    maxAudioSizeBytes: number;
+  } {
+    const readInt = (key: string, fallback: number): number => {
+      const raw = this.config.get<string>(key);
+      if (!raw?.trim()) return fallback;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) return fallback;
+      return Math.floor(n);
+    };
+    // VideoRetalk documented limits:
+    // - video: <=300MB, duration 2-120s, side length <=2048
+    // - audio: <=30MB, duration 2-120s
+    const VIDEO_MAX_DURATION_SECONDS = 120;
+    const VIDEO_MAX_SIZE_BYTES = 300 * 1024 * 1024;
+    const VIDEO_MAX_SIDE_PX = 2048;
+    const AUDIO_MAX_DURATION_SECONDS = 120;
+    const AUDIO_MAX_SIZE_BYTES = 30 * 1024 * 1024;
+    const allowedPixFmtsRaw =
+      this.config.get<string>('ALI_VIDEORETALK_MEDIA_ALLOWED_PIX_FMTS') || '';
+    const allowedPreparedPixFmts = new Set(
+      allowedPixFmtsRaw
+        .split(',')
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean),
+    );
+    return {
+      maxSourceDurationSeconds: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_SOURCE_DURATION_SECONDS',
+        VIDEO_MAX_DURATION_SECONDS,
+      ),
+      maxSourceSizeBytes: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_SOURCE_SIZE_BYTES',
+        VIDEO_MAX_SIZE_BYTES,
+      ),
+      maxPreparedDurationSeconds: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_PREPARED_DURATION_SECONDS',
+        VIDEO_MAX_DURATION_SECONDS,
+      ),
+      maxPreparedSizeBytes: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_PREPARED_SIZE_BYTES',
+        VIDEO_MAX_SIZE_BYTES,
+      ),
+      maxPreparedWidth: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_PREPARED_WIDTH',
+        VIDEO_MAX_SIDE_PX,
+      ),
+      maxPreparedHeight: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_PREPARED_HEIGHT',
+        VIDEO_MAX_SIDE_PX,
+      ),
+      allowedPreparedPixFmts,
+      maxAudioDurationSeconds: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_AUDIO_DURATION_SECONDS',
+        AUDIO_MAX_DURATION_SECONDS,
+      ),
+      maxAudioSizeBytes: readInt(
+        'ALI_VIDEORETALK_MEDIA_MAX_AUDIO_SIZE_BYTES',
+        AUDIO_MAX_SIZE_BYTES,
+      ),
+    };
+  }
+
+  private assertLipSyncMediaThreshold(
+    label: string,
+    summary: MediaProbeSummary,
+    limits: {
+      maxDurationSeconds?: number;
+      maxSizeBytes?: number;
+      maxWidth?: number;
+      maxHeight?: number;
+    },
+  ): void {
+    const duration = summary.durationSeconds ?? null;
+    if (
+      duration !== null &&
+      limits.maxDurationSeconds &&
+      duration > limits.maxDurationSeconds
+    ) {
+      throw new BadRequestException(
+        `${label}时长过长：${duration.toFixed(2)}s，最大允许 ${limits.maxDurationSeconds}s`,
+      );
+    }
+    const sizeBytes = summary.sizeBytes ?? null;
+    if (
+      sizeBytes !== null &&
+      limits.maxSizeBytes &&
+      sizeBytes > limits.maxSizeBytes
+    ) {
+      throw new BadRequestException(
+        `${label}体积过大：${this.formatBytes(sizeBytes)}，最大允许 ${this.formatBytes(
+          limits.maxSizeBytes,
+        )}`,
+      );
+    }
+    if (summary.video && limits.maxWidth && summary.video.width) {
+      if (summary.video.width > limits.maxWidth) {
+        throw new BadRequestException(
+          `${label}宽度过大：${summary.video.width}px，最大允许 ${limits.maxWidth}px`,
+        );
+      }
+    }
+    if (summary.video && limits.maxHeight && summary.video.height) {
+      if (summary.video.height > limits.maxHeight) {
+        throw new BadRequestException(
+          `${label}高度过大：${summary.video.height}px，最大允许 ${limits.maxHeight}px`,
+        );
+      }
+    }
+  }
+
+  private resolveSummaryBitRate(summary: MediaProbeSummary): number | null {
+    if (summary.bitRate && summary.bitRate > 0) return summary.bitRate;
+    if (
+      !summary.sizeBytes ||
+      !summary.durationSeconds ||
+      summary.durationSeconds <= 0
+    ) {
+      return null;
+    }
+    const estimated = Math.round(
+      (summary.sizeBytes * 8) / summary.durationSeconds,
+    );
+    return Number.isFinite(estimated) && estimated > 0 ? estimated : null;
+  }
+
+  private formatBytes(bytes: number): string {
+    return `${(bytes / (1024 * 1024)).toFixed(2)}MB`;
+  }
+
+  private formatMediaSummaryLog(
+    summary: MediaProbeSummary,
+  ): Record<string, unknown> {
+    return {
+      formatName: summary.formatName,
+      durationSeconds: summary.durationSeconds,
+      sizeBytes: summary.sizeBytes,
+      bitRate: this.resolveSummaryBitRate(summary),
+      video: summary.video,
+      audio: summary.audio,
+    };
+  }
+
+  private parseContainerFromFormatName(
+    formatName: string | null,
+  ): string | null {
+    if (!formatName) return null;
+    const first = formatName
+      .split(',')
+      .map((item) => item.trim().toLowerCase())
+      .find(Boolean);
+    if (!first) return null;
+    if (first === 'mov') return 'mp4';
+    return first;
+  }
+
+  private containerToMime(container: string): string | null {
+    if (container === 'wav') return 'audio/wav';
+    if (container === 'aac') return 'audio/aac';
+    if (container === 'mp4' || container === 'm4a') return 'audio/mp4';
+    return null;
+  }
+
+  private containerToExtension(container: string): string | null {
+    if (container === 'wav') return '.wav';
+    if (container === 'aac') return '.aac';
+    if (container === 'mp4' || container === 'm4a') return '.m4a';
+    return null;
+  }
+
+  private async normalizeLipSyncAudioInput(params: {
+    audioPath: string;
+    mimeType: string;
+    originalName: string;
+    draftDir: string;
+  }): Promise<{
+    audioPath: string;
+    mimeType: string;
+    fileName: string;
+    summary: MediaProbeSummary;
+    converted: boolean;
+    reason: string | null;
+  }> {
+    const summary = await this.ffmpegAudio.probeMediaSummary(params.audioPath);
+    if (!summary) {
+      throw new BadRequestException(
+        '口型任务提交前体检失败：无法读取输入音频媒体信息',
+      );
+    }
+    const detectedContainer = this.parseContainerFromFormatName(
+      summary.formatName,
+    );
+    const expectedExt = detectedContainer
+      ? this.containerToExtension(detectedContainer)
+      : null;
+    const expectedMime = detectedContainer
+      ? this.containerToMime(detectedContainer)
+      : null;
+    const actualExt = path.extname(params.audioPath).toLowerCase();
+    const normalizedMime = (params.mimeType || '')
+      .split(';')[0]
+      .trim()
+      .toLowerCase();
+    const supportedContainer =
+      detectedContainer === 'wav' || detectedContainer === 'aac';
+    const extMatched =
+      expectedExt !== null ? expectedExt === actualExt : actualExt.length > 0;
+    const mimeMatched =
+      expectedMime !== null
+        ? normalizedMime === expectedMime
+        : normalizedMime.startsWith('audio/');
+
+    if (supportedContainer && extMatched) {
+      return {
+        audioPath: params.audioPath,
+        mimeType: expectedMime || params.mimeType || 'audio/wav',
+        fileName: path.basename(params.audioPath),
+        summary,
+        converted: false,
+        reason: mimeMatched ? null : 'mime-normalized',
+      };
+    }
+
+    const normalizedPath = path.join(
+      params.draftDir,
+      `lipsync-audio-normalized_${Date.now()}_${randomUUID().slice(0, 8)}.wav`,
+    );
+    await this.ffmpegAudio.clipAudio({
+      inputAudioPath: params.audioPath,
+      outputAudioPath: normalizedPath,
+    });
+    const normalizedSummary =
+      await this.ffmpegAudio.probeMediaSummary(normalizedPath);
+    if (!normalizedSummary) {
+      throw new BadRequestException('输入音频规范化后无法读取媒体信息');
+    }
+    return {
+      audioPath: normalizedPath,
+      mimeType: 'audio/wav',
+      fileName: path.basename(normalizedPath),
+      summary: normalizedSummary,
+      converted: true,
+      reason: supportedContainer
+        ? 'extension-mismatch'
+        : 'unsupported-container',
+    };
+  }
+
+  private buildLipSyncAssetMetadata(
+    trace: LipSyncFormatContractTrace,
+    preflightTrace?: LipSyncMediaPreflightTrace,
+  ): Record<string, unknown> {
+    return {
+      formatContract: {
+        renderMode: trace.renderMode,
+        restored: trace.restored,
+        source: this.formatContractLogSummary(trace.source),
+        preparedInput: this.formatContractLogSummary(trace.preparedInput),
+        providerOutput: this.formatContractLogSummary(trace.providerOutput),
+        finalOutput: this.formatContractLogSummary(trace.finalOutput),
+      },
+      ...(preflightTrace ? { mediaPreflight: preflightTrace } : {}),
+    };
+  }
+
   private async persistResultVideoToDraft(
     videoUrl: string,
     draftDir: string,
@@ -2094,6 +3424,193 @@ export class SubtitleWorkflowService {
       createWriteStream(outPath),
     );
     return outPath;
+  }
+
+  private async readAudioFromSource(params: {
+    inputAudioPath?: string;
+    inputAudioUrl?: string;
+  }): Promise<{
+    buffer: Buffer;
+    mimeType: string;
+    originalname: string;
+    ttsMode: TtsMode;
+  }> {
+    const directPath = params.inputAudioPath?.trim();
+    if (directPath) {
+      const resolved = path.resolve(directPath);
+      const stat = await fs.stat(resolved).catch(() => null);
+      if (!stat?.isFile()) {
+        throw new BadRequestException('inputAudioPath 文件不存在');
+      }
+      const buffer = await fs.readFile(resolved);
+      return {
+        buffer,
+        mimeType: guessMimeFromFilename(resolved),
+        originalname: path.basename(resolved),
+        ttsMode: 'provider',
+      };
+    }
+
+    const inputAudioUrl = params.inputAudioUrl?.trim();
+    if (!inputAudioUrl) {
+      throw new BadRequestException(
+        '请提供 inputAudioPath 或 inputAudioUrl，或改用 voiceResourceId + script',
+      );
+    }
+    if (inputAudioUrl.startsWith('data:')) {
+      const match = inputAudioUrl.match(/^data:([^;,]+)?(;base64)?,(.*)$/i);
+      if (!match?.[3]) {
+        throw new BadRequestException('inputAudioUrl data URL 无效');
+      }
+      const buffer = Buffer.from(match[3], match[2] ? 'base64' : 'utf8');
+      return {
+        buffer,
+        mimeType: match[1] || 'audio/mpeg',
+        originalname: 'input-audio',
+        ttsMode: 'provider',
+      };
+    }
+
+    const localMatch = inputAudioUrl.match(
+      /\/uploads\/audio\/([^/?#]+)(?:[?#].*)?$/i,
+    );
+    if (localMatch?.[1]) {
+      const fileName = decodeURIComponent(localMatch[1]);
+      const localPath = path.join(
+        getUploadRoot(this.config),
+        'audio',
+        fileName,
+      );
+      const stat = await fs.stat(localPath).catch(() => null);
+      if (stat?.isFile()) {
+        const buffer = await fs.readFile(localPath);
+        return {
+          buffer,
+          mimeType: guessMimeFromFilename(localPath),
+          originalname: fileName,
+          ttsMode: 'provider',
+        };
+      }
+    }
+
+    const remoteUrl = new URL(inputAudioUrl);
+    assertUrlSafeForServerFetch(remoteUrl);
+    const timeoutMs = Number(
+      this.config.get('AUDIO_FETCH_TIMEOUT_MS') ??
+        this.config.get('REMOTE_MEDIA_FETCH_TIMEOUT_MS') ??
+        120_000,
+    );
+    const maxBytes = Number(
+      this.config.get('AUDIO_FETCH_MAX_BYTES') ?? 100 * 1024 * 1024,
+    );
+    const res = await fetch(remoteUrl, {
+      method: 'GET',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      throw new BadRequestException(`远程音频拉取失败: HTTP ${res.status}`);
+    }
+    const contentLength = Number(res.headers.get('content-length') ?? 0);
+    if (contentLength > maxBytes) {
+      throw new BadRequestException(`远程音频过大，超过 ${maxBytes} 字节限制`);
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer.length) {
+      throw new BadRequestException('远程音频内容为空');
+    }
+    if (buffer.length > maxBytes) {
+      throw new BadRequestException(`远程音频过大，超过 ${maxBytes} 字节限制`);
+    }
+    const fileName = sanitizeFilenameForDisk(
+      path.basename(new URL(res.url || inputAudioUrl).pathname) ||
+        'input-audio.wav',
+    );
+    return {
+      buffer,
+      mimeType: guessMimeFromFilename(fileName),
+      originalname: fileName,
+      ttsMode: 'provider',
+    };
+  }
+
+  private renderOutputStorage(): 'local' | 'oss' {
+    const mode =
+      this.config.get<string>('RENDER_OUTPUT_STORAGE')?.trim().toLowerCase() ||
+      'local';
+    return mode === 'oss' ? 'oss' : 'local';
+  }
+
+  private async publishRenderOutput(
+    localPath: string,
+    fileName: string,
+  ): Promise<{ storage: 'local' | 'oss'; url: string }> {
+    if (this.renderOutputStorage() === 'local') {
+      return { storage: 'local', url: this.toOutputUrl(fileName) };
+    }
+
+    const datePrefix = new Date().toISOString().slice(0, 10);
+    const basePrefix =
+      this.config.get<string>('RENDER_OUTPUT_OSS_PREFIX')?.trim() ||
+      this.config.get<string>('ALI_OSS_UPLOAD_PREFIX')?.trim() ||
+      'runtime-assets/result';
+    const objectKey = `${basePrefix.replace(/^\/+|\/+$/g, '')}/${datePrefix}/${fileName}`;
+    const client = this.getRenderOutputOssClient();
+    await client.put(objectKey, localPath, {
+      headers: { 'Content-Type': 'video/mp4' },
+    });
+
+    const publicBase = this.config
+      .get<string>('RENDER_OUTPUT_OSS_PUBLIC_BASE_URL')
+      ?.trim();
+    if (publicBase) {
+      return {
+        storage: 'oss',
+        url: `${publicBase.replace(/\/+$/, '')}/${encodeURIComponent(objectKey)}`,
+      };
+    }
+    const signedTtl = Math.max(
+      60,
+      Number(this.config.get('RENDER_OUTPUT_OSS_SIGNED_URL_TTL_SECONDS')) ||
+        7 * 24 * 60 * 60,
+    );
+    return {
+      storage: 'oss',
+      url: client.signatureUrl(objectKey, {
+        method: 'GET',
+        expires: signedTtl,
+      }),
+    };
+  }
+
+  private getRenderOutputOssClient(): OssClient {
+    if (this.renderOutputOssClient) return this.renderOutputOssClient;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const OSS = require('ali-oss') as new (
+      options: Record<string, unknown>,
+    ) => OssClient;
+    const accessKeyId = this.config
+      .get<string>('ALI_OSS_ACCESS_KEY_ID')
+      ?.trim();
+    const accessKeySecret = this.config
+      .get<string>('ALI_OSS_ACCESS_KEY_SECRET')
+      ?.trim();
+    const bucket = this.config.get<string>('ALI_OSS_BUCKET')?.trim();
+    const endpoint = this.config.get<string>('ALI_OSS_ENDPOINT')?.trim();
+    const region = this.config.get<string>('ALI_OSS_REGION')?.trim();
+    if (!accessKeyId || !accessKeySecret || !bucket) {
+      throw new BadRequestException(
+        'RENDER_OUTPUT_STORAGE=oss requires ALI_OSS_ACCESS_KEY_ID/ALI_OSS_ACCESS_KEY_SECRET/ALI_OSS_BUCKET',
+      );
+    }
+    this.renderOutputOssClient = new OSS({
+      accessKeyId,
+      accessKeySecret,
+      bucket,
+      ...(endpoint ? { endpoint } : {}),
+      ...(region ? { region } : {}),
+    });
+    return this.renderOutputOssClient;
   }
 
   private outputDir(): string {

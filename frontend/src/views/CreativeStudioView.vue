@@ -3,6 +3,7 @@ import {
   NAlert,
   NButton,
   NInput,
+  NModal,
   NProgress,
   NSelect,
   NSlider,
@@ -20,49 +21,74 @@ import {
   ref,
   watch,
 } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import axios from "axios";
 import VideoLinkInput from "@/components/home/VideoLinkInput.vue";
 import {
-  avatarVideoStreamUrl,
   cloneVoiceResource,
   cloneVoiceResourceUpload,
+  copySubtitleTemplateResourceWithName,
   createAvatarResource,
+  getAvatarUploadVideoMetadata,
   listAvatarResources,
   listSubtitleTemplateResources,
   listVoiceResources,
+  updateSubtitleTemplateResource,
   uploadAvatarResource,
 } from "@/api/resources";
+import { createVideoProject, getVideoProject } from "@/api/videoProjects";
 import {
+  createAudioAssetFromTts,
+  createSmartClipPackageRenderTask,
   createSubtitleWorkflowPreview,
-  createVoicePreview,
+  createSubtitleTrackForAudioAsset,
+  createSmartClipLipSyncTask,
   detectSmartClipCutPoints,
   downloadSourceVideoFile,
   fetchVideoMeta,
+  getAudioAsset,
   getSmartClipRenderTask,
+  getSubtitleTrack,
+  getVideoScript,
   getDyDownloaderCookieConfigured,
+  getTitleAssetRenderTask,
   getVoicePreviewTaskStatus,
   listRecentExtractions,
+  markVideoScriptTitle,
   optimizeOralScript,
+  createTitleAssetRenderTask,
   saveRecentExtraction,
+  saveVideoScript,
   getTranscribePipelineHealth,
+  updateSubtitleTrackCues,
   learnDouyinHomepage,
   finalizeSubtitleWorkflow,
-  renderSmartClipFinal,
+  getProjectStageState,
   transcribeSavedVideo,
   transcribeFromUrl,
+  saveProjectStageState,
 } from "@/api/task";
 import type {
   DouyinHomepageLearnedPost,
   DouyinHomepageLearnedProfile,
+  ProjectStageStateRecord,
   SmartClipCutConfig,
   SmartClipCutMode,
   SmartClipCutPoint,
   SmartClipCutSummary,
   RecentExtractionRecord,
+  StageStateRenderMode,
   SmartClipRenderTask,
   SmartClipSubtitle,
+  SubtitleTrackRecord,
+  SubtitleVisualStyle,
+  TitleLayout,
+  VisualAnchor,
+  VideoScriptTitleMark,
 } from "@/api/task";
+import {
+  resolveSubtitleTemplateStyle,
+} from "@/constants/subtitleColorTemplates";
 import { useSingleAudioPlayer } from "@/composables/useSingleAudioPlayer";
 import { useTranscriptDraftStream } from "@/composables/useTranscriptDraftStream";
 import { useTaskDraftStore } from "@/stores/taskDraft";
@@ -70,6 +96,8 @@ import { useUserStore } from "@/stores/user";
 import type {
   AvatarResource,
   CreateAvatarResourceDraft,
+  SubtitleTemplateAspectRatio,
+  SubtitleTemplateStyleConfig,
   CreateVoiceResourceDraft,
   SubtitleTemplateResource,
   VoiceResource,
@@ -84,6 +112,11 @@ import {
   describeHttpOrNetworkError,
   describeHttpOrNetworkErrorMaybeBlob,
 } from "@/utils/httpErrorMessage";
+import type { ScriptHighlightRange } from "@/utils/highlightRangeUtils";
+import {
+  mapHighlightsToSubtitleRanges,
+  mergeHighlightRanges,
+} from "@/utils/highlightRangeUtils";
 
 const StepThreeSmartEdit = defineAsyncComponent(
   () => import("@/components/studio/StepThreeSmartEdit.vue"),
@@ -110,6 +143,136 @@ type VoiceGenerationState = {
   ready: boolean;
   reason: string;
 };
+
+type TitleMarkConfig = {
+  templateId: string;
+  themeId: string;
+  position: "center" | "top" | "bottom";
+  duration: number;
+};
+
+type TitleAssetStatus = "idle" | "pending" | "processing" | "success" | "failed";
+
+type TitleAssetItem = {
+  markId: string;
+  text: string;
+  templateId: string;
+  themeId: string;
+  startTime: number;
+  endTime: number;
+  status: TitleAssetStatus;
+  previewUrl?: string;
+  errorMessage?: string;
+};
+
+type VisualCustomizationState = {
+  colorsCustomized: boolean;
+  subtitlePositionCustomized: boolean;
+  titleLayoutCustomized: boolean;
+};
+
+type StageTwoAudioSourceMeta = {
+  scriptHash: string;
+  scriptPreview: string;
+  durationSeconds: number;
+  audioAssetId: string;
+  subtitleTrackId: string;
+  generatedAt: number;
+};
+
+function createDefaultSubtitleVisualStyle(
+  colorStyle?: ReturnType<typeof resolveSubtitleTemplateStyle>,
+): SubtitleVisualStyle {
+  return {
+    normalColor: colorStyle?.normalColor ?? "#FFFFFF",
+    highlightColor: colorStyle?.highlightColor ?? "#FFD400",
+    strokeColor: colorStyle?.strokeColor ?? "#000000",
+    shadowColor: colorStyle?.shadowColor ?? "rgba(0,0,0,0.75)",
+    xPct: 50,
+    yPct: 86,
+    anchor: "bottom-center",
+  };
+}
+
+function createDefaultTitleLayout(position: "center" | "top" | "bottom" = "center"): TitleLayout {
+  const positionY: Record<"center" | "top" | "bottom", number> = {
+    center: 50,
+    top: 28,
+    bottom: 80,
+  };
+  return {
+    mode: "preset",
+    preset: position,
+    xPct: 50,
+    yPct: positionY[position],
+    anchor: "center",
+    scale: 1,
+  };
+}
+
+function mapAspectRatioToRenderMode(
+  ratio: SubtitleTemplateAspectRatio,
+): "1080x1920" | "adaptive" | "preserveSourceAspect" {
+  if (ratio === "9:16") return "1080x1920";
+  return "adaptive";
+}
+
+function toNumber(value: unknown, fallback: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+  return value;
+}
+
+function mapTemplateStyleConfigToVisual(
+  styleConfig: SubtitleTemplateStyleConfig | null | undefined,
+  fallbackSubtitle: SubtitleVisualStyle,
+  fallbackTitle: TitleLayout,
+) {
+  const subtitleStyle = styleConfig?.subtitle?.style;
+  const titleStyle = styleConfig?.title?.style;
+  const coverStyle = styleConfig?.cover?.style;
+  const normalColor =
+    typeof subtitleStyle?.textColor === "string" && subtitleStyle.textColor.trim()
+      ? subtitleStyle.textColor
+      : fallbackSubtitle.normalColor;
+  const highlightColor =
+    typeof coverStyle?.textColor === "string" && coverStyle.textColor.trim()
+      ? coverStyle.textColor
+      : fallbackSubtitle.highlightColor;
+  const nextSubtitle: SubtitleVisualStyle = {
+    ...fallbackSubtitle,
+    normalColor,
+    highlightColor,
+    xPct: toNumber(subtitleStyle?.xPct, fallbackSubtitle.xPct),
+    yPct: toNumber(subtitleStyle?.yPct, fallbackSubtitle.yPct),
+    anchor: isAnchor((subtitleStyle?.anchor as string) || "")
+      ? (subtitleStyle!.anchor as VisualAnchor)
+      : fallbackSubtitle.anchor,
+  };
+  const nextTitle: TitleLayout = {
+    ...fallbackTitle,
+    mode: "custom",
+    xPct: toNumber(titleStyle?.xPct, fallbackTitle.xPct),
+    yPct: toNumber(titleStyle?.yPct, fallbackTitle.yPct),
+    anchor: isAnchor((titleStyle?.anchor as string) || "")
+      ? (titleStyle!.anchor as VisualAnchor)
+      : fallbackTitle.anchor,
+  };
+  return { subtitleVisualStyle: nextSubtitle, titleLayout: nextTitle };
+}
+
+function isAnchor(value: string): value is VisualAnchor {
+  return [
+    "top-left",
+    "top-center",
+    "top-right",
+    "center-left",
+    "center",
+    "center-right",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
+  ].includes(value);
+}
 
 const hiddenRecommendedVoiceIds = new Set([
   "rec-voice-female",
@@ -171,7 +334,7 @@ type OralScriptPolishState = {
 const steps: CreationStep[] = [
   { no: 1, title: "搞定文案", desc: "抓链接、转文案、手动润稿" },
   { no: 2, title: "配音 & 数字人", desc: "挑选音色与出镜视频" },
-  { no: 3, title: "一键成片", desc: "整段生成对口型视频" },
+  { no: 3, title: "打包成片", desc: "执行字幕与标题包装输出" },
   { no: 4, title: "自动发布", desc: "预留发布账号与计划" },
 ];
 
@@ -246,12 +409,14 @@ const selectedAvatarId = ref("");
 const selectedAvatarIds = ref<string[]>([]);
 const selectedVoiceId = ref("");
 const selectedSubtitleTemplateId = ref("");
+const selectedSubtitleTemplateAspectRatio = ref<SubtitleTemplateAspectRatio>("9:16");
 const voiceSourceMode = ref<VoiceSourceMode>("tts");
 const selectedVoiceLanguage = ref("zh-CN");
 const selectedVoiceEmotion = ref("自然");
 const selectedVoicePower = ref(1.03);
 const selectedVoiceRate = ref(1);
 const selectedVoiceVolume = ref(1);
+const selectedVoicePitch = ref(1);
 const renderModelChoice = ref<RenderModelChoice>("new");
 const renderResolutionChoice = ref<RenderResolutionChoice>("1080p");
 const voicePreviewLoading = ref(false);
@@ -276,6 +441,7 @@ const voicePreviewError = ref("");
 let voicePreviewProgressTimer: number | null = null;
 let voicePreviewPollTimer: number | null = null;
 let voicePreviewRequestSeq = 0;
+let voicePreviewAbortController: AbortController | null = null;
 const voiceShellRef = ref<HTMLElement | null>(null);
 const requestedAvatarUnavailable = ref(false);
 const consumedRouteAvatarId = ref("");
@@ -330,13 +496,445 @@ const smartClipBackgroundMusicId = ref("cozy_vibes");
 const smartClipBackgroundMusicVolume = ref(0.1);
 const smartClipPipEnabled = ref(false);
 const smartClipTextSubtitlesEnabled = ref(true);
+const smartClipScriptText = ref("");
+const smartClipHighlights = ref<ScriptHighlightRange[]>([]);
+const smartClipTitleMarkConfig = ref<TitleMarkConfig>({
+  templateId: "tech_card_pop",
+  themeId: "tech_green",
+  position: "center",
+  duration: 1.8,
+});
+const smartClipSubtitleVisualStyle = ref<SubtitleVisualStyle>(
+  createDefaultSubtitleVisualStyle(),
+);
+const smartClipTitleLayout = ref<TitleLayout>(createDefaultTitleLayout("center"));
+const smartClipDefaultSubtitleVisualStyle = ref<SubtitleVisualStyle>(
+  createDefaultSubtitleVisualStyle(),
+);
+const smartClipDefaultTitleLayout = ref<TitleLayout>(createDefaultTitleLayout("center"));
+const smartClipVisualCustomization = ref<VisualCustomizationState>({
+  colorsCustomized: false,
+  subtitlePositionCustomized: false,
+  titleLayoutCustomized: false,
+});
+const smartClipIncludeTitleAssets = ref(true);
+const smartClipTitleAssets = ref<TitleAssetItem[]>([]);
 const smartClipRenderTask = ref<SmartClipRenderTask | null>(null);
 const smartClipRendering = ref(false);
+const smartClipSubmitLocked = ref(false);
 const smartClipTitleLines = ref(["7步让AI写出爆款", "直播话术!"]);
 const smartClipSubtitleSourceText = ref("");
+const stepTwoScriptLines = ref<string[]>([]);
+const stepTwoScriptLinesScriptHash = ref("");
+const stepTwoScriptLinesDirty = ref(false);
+const audioAssetId = ref("");
+const subtitleTrackId = ref("");
+const subtitleTimelineAligned = ref(false);
+const subtitleTimelineGenerating = ref(false);
+const subtitleTimelineStatus = ref<"idle" | "generating" | "ready" | "failed">("idle");
+const subtitleTimelineError = ref("");
+let subtitleTimelineAbortController: AbortController | null = null;
+const stageTwoAudioSourceMeta = ref<StageTwoAudioSourceMeta | null>(null);
+const stageTwoLipSyncTask = ref<SmartClipRenderTask | null>(null);
+const stageTwoLipSyncRunning = ref(false);
+const stageTwoDigitalHumanVideoAssetId = ref("");
+const stageTwoLipSyncVideoUrl = ref<string | null>(null);
+const stageTwoLipSyncError = ref("");
+const stageTwoLipSyncRecoverable = ref(false);
+const stageTwoLipSyncRecoverableHint = ref("");
+const stageTwoLipSyncGenerationSeq = ref(0);
+const stageTwoLipSyncBoundTaskId = ref("");
+const stageTwoLipSyncRegenerationVersion = ref(0);
+const stageTwoLipSyncForceRetryPending = ref(false);
+const stageTwoReuseState = ref<"idle" | "restored" | "mismatch">("idle");
+const stageTwoReuseHint = ref("");
+const stageTwoRestoreLoading = ref(false);
+let stageTwoRestoreSeq = 0;
+let stageTwoRestoreAbortController: AbortController | null = null;
+let stageTwoRestoreDebounceTimer: number | null = null;
+const stageTwoLipSyncPreviewOpen = ref(false);
+let stageTwoLipSyncPollTimer: number | null = null;
+let stageTwoLipSyncPollSeq = 0;
+let stageTwoLipSyncPollPending = false;
+let stageTwoLipSyncPollAbortController: AbortController | null = null;
 let smartClipPollTimer: number | null = null;
+let smartClipPollSeq = 0;
+let smartClipActiveTaskId = "";
+let smartClipPollAttempts = 0;
+let smartClipPollStartedAt = 0;
+let smartClipPollPending = false;
+let smartClipPollAbortController: AbortController | null = null;
+const smartClipTitleAssetPollTimers = new Map<string, number>();
+const smartClipTitleAssetPollControllers = new Map<string, AbortController>();
+const smartClipTitleAssetPollPending = new Set<string>();
+const smartClipTitleAssetPollAttempts = new Map<string, number>();
+const smartClipTitleAssetPollStartedAt = new Map<string, number>();
+const SMART_CLIP_POLL_INTERVAL_MS = 2500;
+const SMART_CLIP_POLL_MAX_ATTEMPTS = 240;
+const SMART_CLIP_POLL_MAX_DURATION_MS = 10 * 60 * 1000;
+const STAGE_TWO_LIPSYNC_POLL_MAX_DURATION_MS = 20 * 60 * 1000;
+const TITLE_ASSET_POLL_INTERVAL_MS = 2000;
+const TITLE_ASSET_POLL_MAX_ATTEMPTS = 150;
+const TITLE_ASSET_POLL_MAX_DURATION_MS = 5 * 60 * 1000;
+const TITLE_ASSET_POLL_MAX_ACTIVE = 6;
+const SAVE_DEDUPE_PENDING = "pending";
+const SAVE_DEDUPE_DONE = "done";
+const STAGE_TWO_RESTORE_DEBOUNCE_MS = 260;
+const STAGE_TWO_LIPSYNC_RECOVERABLE_FALLBACK_HINT =
+  "口型服务仍在处理中，可稍后恢复或继续查询，无需重新上传素材。";
+const STAGE_TWO_LIPSYNC_TIMEOUT_ERROR =
+  "口型任务轮询超时，请点击“生成数字人口型视频”继续查询结果";
 const avatarCoverVideoUrls = ref<Record<string, string>>({});
 const pendingAvatarCoverIds = new Set<string>();
+const activeProjectId = ref("");
+const createProjectModalVisible = ref(false);
+const createProjectName = ref("");
+const createProjectSubmitting = ref(false);
+const projectRestoreLoading = ref(false);
+const projectRestoreError = ref("");
+const projectRestoreHint = ref("");
+let projectRestoreSeq = 0;
+let projectRestoreAbortController: AbortController | null = null;
+let stageStateSaveSeq = 0;
+let videoScriptSaveSeq = 0;
+let subtitleTrackSaveSeq = 0;
+const stageStateSaveKeys = new Map<string, "pending" | "done">();
+const videoScriptSaveKeys = new Map<string, "pending" | "done">();
+const subtitleTrackSaveKeys = new Map<string, "pending" | "done">();
+
+type StageStatePatchPayload = Parameters<typeof saveProjectStageState>[1];
+
+interface StageStateSaveRequest {
+  projectId: string;
+  patch: StageStatePatchPayload;
+  saveKey: string;
+  seq: number;
+  silent: boolean;
+  resolve: () => void;
+}
+
+let stageStateSavePendingRequest: StageStateSaveRequest | null = null;
+let stageStateSaveInFlightRequest: StageStateSaveRequest | null = null;
+let stageStateSaveAbortController: AbortController | null = null;
+
+function normalizeProjectId(value: unknown) {
+  if (Array.isArray(value)) {
+    const first = value[0];
+    return typeof first === "string" ? first.trim() : "";
+  }
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function getCurrentProjectId() {
+  return normalizeProjectId(activeProjectId.value);
+}
+
+function clearProjectRestoreStatus() {
+  projectRestoreLoading.value = false;
+  projectRestoreError.value = "";
+  projectRestoreHint.value = "";
+}
+
+function cancelProjectRestoreRequest() {
+  projectRestoreAbortController?.abort();
+  projectRestoreAbortController = null;
+  projectRestoreSeq += 1;
+  projectRestoreLoading.value = false;
+}
+
+function resetProjectScopedState() {
+  cancelStageStateSaveQueue();
+  cancelStageTwoRestoreRequest();
+  cancelVoicePreviewStage();
+  subtitleTimelineAbortController?.abort();
+  subtitleTimelineAbortController = null;
+  resetVoicePreviewState({ cancelPending: true });
+  clearSmartClipPollTimer();
+  stopStageTwoLipSyncPolling();
+  clearSmartClipTitleAssetPollTimers();
+  resetSmartClipResultState();
+  stageTwoAudioSourceMeta.value = null;
+  stageTwoLipSyncTask.value = null;
+  stageTwoLipSyncRunning.value = false;
+  stageTwoDigitalHumanVideoAssetId.value = "";
+  stageTwoLipSyncVideoUrl.value = null;
+  stageTwoLipSyncError.value = "";
+  stageTwoLipSyncPreviewOpen.value = false;
+  clearStageTwoReuseState();
+  audioAssetId.value = "";
+  subtitleTrackId.value = "";
+  subtitleTimelineAligned.value = false;
+  subtitleTimelineStatus.value = "idle";
+  subtitleTimelineError.value = "";
+  stepTwoScriptLines.value = [];
+  stepTwoScriptLinesScriptHash.value = "";
+  stepTwoScriptLinesDirty.value = false;
+  smartClipSubtitles.value = [];
+  smartClipSubtitleSourceText.value = "";
+  smartClipTitleAssets.value = [];
+  smartClipRenderTask.value = null;
+  smartClipRendering.value = false;
+  smartClipSubmitLocked.value = false;
+  subtitleWorkflowDraftId.value = "";
+  subtitleWorkflowPreviewUrl.value = null;
+  subtitleWorkflowFinalUrl.value = null;
+  subtitleWorkflowHint.value = "";
+  subtitleWorkflowJson.value = null;
+  subtitleWorkflowTimelineSource.value = "";
+  revokeGeneratedPreviewObjectUrls();
+}
+
+function ensureCurrentProjectId(messageText = "请先在第一步创建创作任务") {
+  const projectId = getCurrentProjectId();
+  if (projectId) return projectId;
+  message.warning(messageText);
+  return "";
+}
+
+function formatDateForProjectName(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function buildDefaultProjectName() {
+  const script = sanitizeWorkflowScriptText(
+    draft.manualScriptDraft.trim() || currentWorkflowScript.value,
+  ).replace(/\s+/g, "");
+  const prefix = script.slice(0, 16) || "创作任务";
+  return `${prefix} ${formatDateForProjectName()}`;
+}
+
+function openCreateProjectModal() {
+  if (!sanitizeWorkflowScriptText(currentWorkflowScript.value).trim()) {
+    message.warning("请先在第一步整理好口播文案");
+    return;
+  }
+  createProjectName.value = buildDefaultProjectName();
+  createProjectModalVisible.value = true;
+}
+
+async function onConfirmCreateProject() {
+  const name = createProjectName.value.trim();
+  if (!name) {
+    message.warning("请输入创作任务名称");
+    return;
+  }
+  const frozenScriptText = sanitizeWorkflowScriptText(
+    draft.manualScriptDraft.trim() || currentWorkflowScript.value,
+  );
+  if (!frozenScriptText) {
+    message.warning("请先在第一步整理好口播文案");
+    return;
+  }
+  const subtitleTemplateId =
+    selectedSubtitleTemplateId.value ||
+    subtitleTemplateItems.value[0]?.id ||
+    "";
+  if (!subtitleTemplateId) {
+    message.warning("字幕模板未加载完成，请稍后重试");
+    return;
+  }
+  if (createProjectSubmitting.value) return;
+  createProjectSubmitting.value = true;
+  try {
+    const created = await createVideoProject({ name });
+    await saveVideoScript({
+      videoId: created.projectId,
+      scriptText: frozenScriptText,
+      subtitleTemplateId,
+      highlights: [],
+    });
+    await saveProjectStageState(created.projectId, {
+      scriptHash: buildScriptFingerprint(frozenScriptText),
+    });
+    activeProjectId.value = created.projectId;
+    createProjectModalVisible.value = false;
+    await router.replace({
+      name: "studio",
+      query: {
+        ...route.query,
+        projectId: created.projectId,
+      },
+    });
+    await restoreProjectContextFromRoute(created.projectId, { silent: true });
+    activeStep.value = Math.max(activeStep.value, 2);
+    message.success("创作任务已创建");
+  } catch (error: unknown) {
+    message.error(`创建任务失败，请重试：${describeHttpOrNetworkError(error)}`);
+  } finally {
+    createProjectSubmitting.value = false;
+  }
+}
+
+async function restoreProjectContextFromRoute(
+  projectId: string,
+  options: { silent?: boolean } = {},
+) {
+  const normalizedProjectId = normalizeProjectId(projectId);
+  if (!normalizedProjectId) {
+    clearProjectRestoreStatus();
+    return;
+  }
+  const seq = ++projectRestoreSeq;
+  projectRestoreAbortController?.abort();
+  const controller = new AbortController();
+  projectRestoreAbortController = controller;
+  projectRestoreLoading.value = true;
+  projectRestoreError.value = "";
+  projectRestoreHint.value = "";
+
+  try {
+    if (
+      !avatarResourceItems.value.length ||
+      !voiceResourceItems.value.length ||
+      !subtitleTemplateItems.value.length
+    ) {
+      await loadRenderResources();
+      if (seq !== projectRestoreSeq || controller.signal.aborted) return;
+    }
+    await getVideoProject(normalizedProjectId, { signal: controller.signal });
+    if (seq !== projectRestoreSeq || controller.signal.aborted) return;
+
+    resetProjectScopedState();
+    draft.manualScriptDraft = "";
+    smartClipScriptText.value = "";
+    smartClipHighlights.value = [];
+
+    const stageState = await getProjectStageState(normalizedProjectId, {
+      signal: controller.signal,
+    });
+    if (seq !== projectRestoreSeq || controller.signal.aborted) return;
+
+    if (stageState.avatarResourceId) {
+      addAvatarToCurrentCreation(stageState.avatarResourceId, { silent: true });
+    }
+
+    await loadSmartClipScriptConfig({ silent: true });
+    if (seq !== projectRestoreSeq || controller.signal.aborted) return;
+
+    await restoreStageTwoState({
+      force: true,
+      silent: true,
+      notifyOnMismatch: false,
+      stageStateOverride: stageState,
+    });
+    if (seq !== projectRestoreSeq || controller.signal.aborted) return;
+
+    const hasScript = Boolean(
+      sanitizeWorkflowScriptText(
+        smartClipScriptText.value || draft.manualScriptDraft,
+      ).trim(),
+    );
+    if (stageState.audioAssetId || stageState.subtitleTrackId || hasScript) {
+      activeStep.value = Math.max(activeStep.value, 2);
+    } else {
+      activeStep.value = 1;
+    }
+    projectRestoreHint.value = `已恢复任务 ${normalizedProjectId}`;
+  } catch (error: unknown) {
+    if (isAbortError(error)) return;
+    if (seq !== projectRestoreSeq) return;
+    projectRestoreError.value = describeHttpOrNetworkError(error);
+    if (!options.silent) {
+      message.error(`恢复任务失败：${projectRestoreError.value}`);
+    }
+  } finally {
+    if (seq === projectRestoreSeq) {
+      projectRestoreLoading.value = false;
+      if (projectRestoreAbortController === controller) {
+        projectRestoreAbortController = null;
+      }
+    }
+  }
+}
+
+function retryRestoreProjectContext() {
+  const projectId = getCurrentProjectId();
+  if (!projectId) return;
+  void restoreProjectContextFromRoute(projectId);
+}
+
+function isVoiceRenderable(resource: VoiceResource) {
+  if (resource.cloneStatus !== "ready") return false;
+  if (typeof resource.canUseForRender === "boolean") {
+    return resource.canUseForRender;
+  }
+  return Boolean(resource.providerVoice || resource.audioUrl?.trim());
+}
+
+function hasVoiceSampleForPreview(resource: VoiceResource | null) {
+  if (!resource) return false;
+  if (resource.sampleMissing) return false;
+  return Boolean(resource.audioUrl?.trim());
+}
+
+function getVoicePreviewUnavailableReason(resource: VoiceResource | null) {
+  if (!resource) return "";
+  if (resource.sampleMissing) {
+    return "当前音色样本文件缺失，无法试听。";
+  }
+  if (!resource.audioUrl?.trim()) {
+    return "当前音色无可用样本音频，无法试听。";
+  }
+  return "";
+}
+
+function buildVoiceGenerationStateV2(
+  selectedId: string,
+  resource: VoiceResource | null,
+): VoiceGenerationState {
+  if (!selectedId) {
+    return { ready: false, reason: "请选择一个音色后再生成。" };
+  }
+  if (!resource) {
+    return {
+      ready: false,
+      reason: "当前选中音色不在资源列表中，请刷新后重新选择。",
+    };
+  }
+  if (resource.sampleMissing) {
+    return {
+      ready: false,
+      reason: resource.renderUnavailableReason || "音色样本缺失，请重新克隆或上传。",
+    };
+  }
+  if ((resource as VoiceResource).cloneStatus === "processing") {
+    return {
+      ready: false,
+      reason: "当前音色仍在克隆处理中，请稍后重试。",
+    };
+  }
+  if ((resource as VoiceResource).cloneStatus === "failed") {
+    const error = (resource as VoiceResource).cloneError
+      ? `原因：${(resource as VoiceResource).cloneError!.slice(0, 120)}`
+      : "请重新上传样本或选择其他音色。";
+    return { ready: false, reason: `音色克隆失败。${error}` };
+  }
+  if ((resource as VoiceResource).cloneStatus !== "ready") {
+    return {
+      ready: false,
+      reason: "音色状态未就绪，请刷新资源列表后重试。",
+    };
+  }
+  if (typeof resource.canUseForRender === "boolean") {
+    if (!resource.canUseForRender) {
+      return {
+        ready: false,
+        reason: resource.renderUnavailableReason || "当前音色暂不可用于生成。",
+      };
+    }
+    return { ready: true, reason: "" };
+  }
+  if (!resource.providerVoice && !resource.audioUrl?.trim()) {
+    return {
+      ready: false,
+      reason: "当前音色缺少可用样本和 TTS 配置，无法用于生成。",
+    };
+  }
+  return { ready: true, reason: "" };
+}
 
 const urlInvalid = computed(() => {
   if (!draft.videoUrl?.trim()) return false;
@@ -397,9 +995,42 @@ const selectedVoiceLabel = computed(
     voiceOptions.value.find((item) => item.value === selectedVoiceId.value)
       ?.label ?? "未选择",
 );
+const selectedVoiceRenderUnavailableReason = computed(() => {
+  if (!selectedVoiceResource.value) return "";
+  if (selectedVoiceGenerationState.value.ready) return "";
+  return (
+    selectedVoiceResource.value.renderUnavailableReason ||
+    selectedVoiceGenerationState.value.reason
+  );
+});
+const voiceSelectHelperText = computed(() => {
+  if (selectedVoiceRenderUnavailableReason.value) {
+    return selectedVoiceRenderUnavailableReason.value;
+  }
+  const sampleReason = getVoicePreviewUnavailableReason(selectedVoiceResource.value);
+  if (sampleReason) return sampleReason;
+  if (selectedVoiceResource.value) {
+    return selectedVoiceResource.value.owner === "mine"
+      ? "我的克隆音色"
+      : "推荐音色";
+  }
+  if (!voiceResourceItems.value.length) {
+    return "暂无可用音色，请先去音色库克隆或上传样本。";
+  }
+  if (!voiceOptions.value.length) {
+    return (
+      voiceResourceItems.value.find((item) => !isVoiceRenderable(item))
+        ?.renderUnavailableReason || "当前音色暂不可用于生成，请前往音色库处理后重试。"
+    );
+  }
+  return "请选择音色";
+});
 const voicePreviewBlockReason = computed(() => {
+  if (!getCurrentProjectId())
+    return "请先在第一步创建创作任务";
   if (!currentWorkflowScript.value)
     return "未生成脚本：请先在第一步生成或填写口播脚本。";
+  if (audioAssetId.value) return "";
   return selectedVoiceGenerationState.value.reason;
 });
 const hasVoicePreviewOutput = computed(
@@ -453,16 +1084,110 @@ const voicePreviewStateHint = computed(() => {
       return "";
   }
 });
+const audioStageReady = computed(
+  () => Boolean(audioAssetId.value) && Boolean(voicePreviewUrl.value?.trim()),
+);
+const audioStageStatusText = computed(() => {
+  if (voicePreviewTaskStatus.value === "ready") return "已完成";
+  if (voicePreviewTaskStatus.value === "failed" || voicePreviewTaskStatus.value === "timeout")
+    return "失败";
+  if (voicePreviewLoading.value || voicePreviewTaskStatus.value === "submitted")
+    return "处理中";
+  if (voicePreviewTaskStatus.value === "queued" || voicePreviewTaskStatus.value === "running")
+    return "处理中";
+  return "待处理";
+});
+const subtitleTimelineReady = computed(
+  () =>
+    subtitleTimelineStatus.value === "ready" &&
+    smartClipSubtitles.value.length > 0 &&
+    Boolean(subtitleTrackId.value) &&
+    subtitleTimelineAligned.value,
+);
+const subtitleTimelineAlignmentBlockReason = computed(() => {
+  if (!subtitleTrackId.value) return "字幕时间轴未就绪，请先生成字幕时间轴";
+  if (!subtitleTimelineAligned.value) {
+    return "当前字幕时间轴不是按口播分段对齐生成，请先重新生成字幕时间轴";
+  }
+  return "";
+});
+const subtitleTimelineStatusText = computed(() => {
+  if (subtitleTimelineStatus.value === "ready") {
+    return subtitleTimelineAligned.value ? "已完成" : "需重建";
+  }
+  if (subtitleTimelineStatus.value === "failed") return "失败";
+  if (subtitleTimelineStatus.value === "generating") return "处理中";
+  return "待处理";
+});
+const stageTwoLipSyncReady = computed(() => Boolean(stageTwoLipSyncVideoUrl.value));
+const stageTwoCurrentScriptHash = computed(() =>
+  buildScriptFingerprint(getCurrentStageTwoScriptText()),
+);
+const stageTwoAudioSourceMismatch = computed(() => {
+  if (!audioAssetId.value) return false;
+  const meta = stageTwoAudioSourceMeta.value;
+  if (!meta) return true;
+  if (meta.audioAssetId !== audioAssetId.value) return true;
+  return meta.scriptHash !== stageTwoCurrentScriptHash.value;
+});
+const stageTwoAudioSourceMismatchReason = computed(() => {
+  if (!stageTwoAudioSourceMismatch.value) return "";
+  const meta = stageTwoAudioSourceMeta.value;
+  if (!meta) return "当前文案已变化，请重新生成音频与字幕时间轴";
+  return `当前文案与音频来源不一致（来源：${meta.scriptPreview}），请重新生成音频与字幕时间轴`;
+});
+const stageTwoAudioDurationLabel = computed(() => {
+  const seconds = Number(voicePreviewDurationSeconds.value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return "未生成";
+  return formatSecondsClock(seconds);
+});
+const stageTwoAudioScriptPreviewLabel = computed(() => {
+  if (!audioAssetId.value) return "未生成";
+  const meta = stageTwoAudioSourceMeta.value;
+  if (!meta?.scriptPreview) return "来源文案未知";
+  return meta.scriptPreview;
+});
+const stageTwoLipSyncStatusText = computed(() => {
+  if (stageTwoLipSyncTask.value?.status === "completed" && stageTwoLipSyncVideoUrl.value)
+    return "已完成";
+  if (stageTwoLipSyncTask.value?.status === "failed") return "失败";
+  if (
+    stageTwoLipSyncRunning.value ||
+    stageTwoLipSyncTask.value?.status === "pending" ||
+    stageTwoLipSyncTask.value?.status === "processing"
+  ) {
+    return "处理中";
+  }
+  return "待处理";
+});
 const stepTwoGenerateBlockReason = computed(() => {
+  if (!getCurrentProjectId()) return "请先在第一步创建创作任务";
   if (!currentWorkflowScript.value)
     return "未生成脚本：请先在第一步生成或填写口播脚本。";
   if (!selectedAvatarId.value)
     return "未选择数字人：请先添加或选择一个数字人视频。";
   if (!selectedAvatarResource.value)
     return "资源未匹配：当前选中的数字人不在资源列表中，请刷新资源或重新选择。";
-  return selectedVoiceGenerationState.value.reason;
+  if (stageTwoAudioSourceMismatch.value) return stageTwoAudioSourceMismatchReason.value;
+  if (!audioStageReady.value) return "请先完成音频合成";
+  if (!audioAssetId.value) return "音频资产未就绪，请先生成音频";
+  if (!subtitleTimelineReady.value)
+    return subtitleTimelineAlignmentBlockReason.value || "请先生成字幕时间轴";
+  return "";
+});
+const stepTwoProceedToPackageBlockReason = computed(() => {
+  if (stageTwoAudioSourceMismatch.value) return stageTwoAudioSourceMismatchReason.value;
+  if (!audioStageReady.value) return "请先完成音频合成";
+  if (!subtitleTimelineReady.value)
+    return subtitleTimelineAlignmentBlockReason.value || "请先生成字幕时间轴";
+  if (!stageTwoDigitalHumanVideoAssetId.value)
+    return "数字人视频资产未就绪，请先生成数字人口型视频";
+  if (!stageTwoLipSyncReady.value) return "请先完成数字人口型视频";
+  return "";
 });
 const smartClipRenderBlockReason = computed(() => {
+  if (!getCurrentProjectId()) return "请先在第一步创建创作任务";
+  if (stageTwoAudioSourceMismatch.value) return stageTwoAudioSourceMismatchReason.value;
   if (!currentWorkflowScript.value)
     return "未生成脚本：请先在第一步生成或填写口播脚本。";
   if (!selectedAvatarId.value)
@@ -471,8 +1196,19 @@ const smartClipRenderBlockReason = computed(() => {
     return "资源未匹配：当前选中的数字人不在资源列表中，请刷新资源或重新选择。";
   if (selectedVoiceGenerationState.value.reason)
     return selectedVoiceGenerationState.value.reason;
+  if (!audioStageReady.value) return "请先完成第二步音频合成";
+  if (!audioAssetId.value) return "音频资产未就绪，请先生成第二步音频";
+  if (!subtitleTimelineReady.value)
+    return subtitleTimelineAlignmentBlockReason.value || "请先完成第二步字幕时间轴";
+  if (!subtitleTrackId.value) return "字幕时间轴未就绪，请先生成字幕时间轴";
+  if (!stageTwoDigitalHumanVideoAssetId.value)
+    return "数字人视频资产未就绪，请先生成数字人口型视频";
+  if (!stageTwoLipSyncReady.value) return "请先完成第二步数字人口型视频";
   if (!selectedSubtitleTemplateId.value)
     return "未选择字幕模板：请先选择一个字幕样式。";
+  if (!subtitleTemplateItems.value.some((item) => item.id === selectedSubtitleTemplateId.value)) {
+    return "当前字幕模板已失效，请重新选择字幕模板";
+  }
   return "";
 });
 const selectedSubtitleTemplateItem = computed(
@@ -480,6 +1216,15 @@ const selectedSubtitleTemplateItem = computed(
     subtitleTemplateItems.value.find(
       (item) => item.id === selectedSubtitleTemplateId.value,
     ) ?? null,
+);
+const selectedSubtitleTemplateResolvedStyle = computed(() =>
+  resolveSubtitleTemplateStyle(
+    selectedSubtitleTemplateId.value,
+    selectedSubtitleTemplateItem.value?.styleJson ?? null,
+  ),
+);
+const selectedSubtitleTemplateAspectRatioResolved = computed<SubtitleTemplateAspectRatio>(
+  () => selectedSubtitleTemplateItem.value?.aspectRatio ?? "9:16",
 );
 const selectedSubtitleTemplateLabel = computed(
   () => selectedSubtitleTemplateItem.value?.name ?? "未选择模板",
@@ -512,6 +1257,111 @@ const extractedScriptLines = computed(() => {
     .filter(Boolean);
   return splitScriptIntoSemanticSegments(fromSegments.join("\n"));
 });
+const stepTwoEditableScriptLines = computed(() => {
+  if (stepTwoScriptLines.value.length) return stepTwoScriptLines.value;
+  return extractedScriptLines.value;
+});
+
+function normalizeStepTwoScriptLine(text: string) {
+  return sanitizeWorkflowScriptText(text || "").replace(/\s+/g, " ").trim();
+}
+
+function getStepTwoEditorNormalizedLines() {
+  return stepTwoEditableScriptLines.value
+    .map((line) => normalizeStepTwoScriptLine(line))
+    .filter(Boolean);
+}
+
+function buildStepTwoScriptTextFromLines(lines: string[]) {
+  return sanitizeWorkflowScriptText(lines.join("\n"));
+}
+
+function getStepTwoEditorScriptText() {
+  const lines = getStepTwoEditorNormalizedLines();
+  if (!lines.length) return "";
+  return buildStepTwoScriptTextFromLines(lines);
+}
+
+function buildStepTwoScriptLinesFromScript(scriptText: string) {
+  const segments = splitScriptIntoSemanticSegments(scriptText);
+  if (segments.length) return segments;
+  const fallback = normalizeStepTwoScriptLine(scriptText);
+  return fallback ? [fallback] : [];
+}
+
+function syncStepTwoScriptLinesFromScript(force = false) {
+  const scriptText = getCurrentStageTwoScriptText();
+  const nextHash = buildScriptFingerprint(scriptText);
+  const isSameScript = stepTwoScriptLinesScriptHash.value === nextHash;
+  if (
+    !force &&
+    isSameScript &&
+    (stepTwoScriptLinesDirty.value || stepTwoScriptLines.value.length > 0)
+  ) {
+    return;
+  }
+  stepTwoScriptLines.value = buildStepTwoScriptLinesFromScript(scriptText);
+  stepTwoScriptLinesScriptHash.value = nextHash;
+  stepTwoScriptLinesDirty.value = false;
+}
+
+function onEditStepTwoScriptLine(index: number, event: Event) {
+  const target = event.target as HTMLTextAreaElement | null;
+  if (!target) return;
+  if (!stepTwoScriptLines.value.length && stepTwoEditableScriptLines.value.length) {
+    stepTwoScriptLines.value = [...stepTwoEditableScriptLines.value];
+    stepTwoScriptLinesScriptHash.value = buildScriptFingerprint(
+      getCurrentStageTwoScriptText(),
+    );
+  }
+  if (index < 0 || index >= stepTwoScriptLines.value.length) return;
+  stepTwoScriptLines.value[index] = target.value;
+  const nextScriptText = getStepTwoEditorScriptText();
+  stepTwoScriptLinesScriptHash.value = buildScriptFingerprint(nextScriptText);
+  stepTwoScriptLinesDirty.value = true;
+}
+
+function onInsertStepTwoScriptLine(index: number) {
+  if (!stepTwoScriptLines.value.length && stepTwoEditableScriptLines.value.length) {
+    stepTwoScriptLines.value = [...stepTwoEditableScriptLines.value];
+  }
+  if (!stepTwoScriptLines.value.length) {
+    stepTwoScriptLines.value = [""];
+    stepTwoScriptLinesScriptHash.value = buildScriptFingerprint(
+      getCurrentStageTwoScriptText(),
+    );
+    stepTwoScriptLinesDirty.value = true;
+    return;
+  }
+  const safeIndex = Math.max(0, Math.min(index, stepTwoScriptLines.value.length - 1));
+  stepTwoScriptLines.value.splice(safeIndex + 1, 0, "");
+  const nextScriptText = getStepTwoEditorScriptText();
+  stepTwoScriptLinesScriptHash.value = buildScriptFingerprint(nextScriptText);
+  stepTwoScriptLinesDirty.value = true;
+}
+
+function onRemoveStepTwoScriptLine(index: number) {
+  if (stepTwoScriptLines.value.length <= 1) {
+    message.warning("至少保留一段文案");
+    return;
+  }
+  if (index < 0 || index >= stepTwoScriptLines.value.length) return;
+  stepTwoScriptLines.value.splice(index, 1);
+  const nextScriptText = getStepTwoEditorScriptText();
+  stepTwoScriptLinesScriptHash.value = buildScriptFingerprint(nextScriptText);
+  stepTwoScriptLinesDirty.value = true;
+}
+
+function getStepTwoScriptSegmentsForTimeline(scriptText: string) {
+  const lines = getStepTwoEditorNormalizedLines();
+  if (!lines.length) return [];
+  const editorScriptText = buildStepTwoScriptTextFromLines(lines);
+  if (buildScriptFingerprint(editorScriptText) !== buildScriptFingerprint(scriptText)) {
+    return [];
+  }
+  return lines;
+}
+
 const oralScriptSourceText = computed(() => {
   const raw = sanitizeWorkflowScriptText(draft.manualScriptDraft.trim());
   if (raw) return raw;
@@ -854,6 +1704,98 @@ const workflowSimpleSteps = computed(() => {
   }));
 });
 
+const humanWorkflowProgressState = computed(() => {
+  if (subtitleWorkflowFinalUrl.value) {
+    return {
+      percent: 100,
+      doneCount: 4,
+      activeIndex: 3,
+      status: "已完成",
+      hint: "视频已生成，可直接预览和下载。",
+    };
+  }
+
+  if (smartClipRenderTask.value?.status === "failed") {
+    return {
+      percent: 100,
+      doneCount: 0,
+      activeIndex: 0,
+      status: "生成失败",
+      hint: smartClipRenderTask.value.error || "渲染失败，请检查素材后重试。",
+    };
+  }
+
+  if (
+    smartClipRendering.value ||
+    smartClipRenderTask.value?.status === "processing" ||
+    smartClipRenderTask.value?.status === "pending"
+  ) {
+    const percent = Math.max(
+      1,
+      Math.min(99, smartClipRenderTask.value?.progress ?? 10),
+    );
+    if (percent < 30) {
+      return {
+        percent,
+        doneCount: 0,
+        activeIndex: 0,
+        status: "字幕烧录中",
+        hint: "正在将字幕样式和高亮写入视频画面。",
+      };
+    }
+    if (percent < 55) {
+      return {
+        percent,
+        doneCount: 1,
+        activeIndex: 1,
+        status: "标题叠加中",
+        hint: "正在叠加标题素材与封面效果。",
+      };
+    }
+    if (percent < 80) {
+      return {
+        percent,
+        doneCount: 2,
+        activeIndex: 2,
+        status: "音频对齐中",
+        hint: "正在执行音频 mux 与时长对齐。",
+      };
+    }
+    return {
+      percent,
+      doneCount: 3,
+      activeIndex: 3,
+      status: "输出上传中",
+      hint: "正在导出 MP4 并上传输出文件。",
+    };
+  }
+
+  return {
+    percent: 0,
+    doneCount: 0,
+    activeIndex: 0,
+    status: "待打包",
+    hint: "请先完成第二步音频、时间轴和口型视频。",
+  };
+});
+
+const humanWorkflowProgressSteps = computed<
+  Array<{ label: string; status: "done" | "active" | "idle" }>
+>(() => {
+  const steps = ["字幕烧录", "标题叠加", "音频对齐", "输出上传"];
+  return steps.map((label, index) => {
+    const status: "done" | "active" | "idle" =
+      index < humanWorkflowProgressState.value.doneCount
+        ? "done"
+        : index === humanWorkflowProgressState.value.activeIndex &&
+            humanWorkflowProgressState.value.percent > 0 &&
+            humanWorkflowProgressState.value.percent < 100
+          ? "active"
+          : "idle";
+    return { label, status };
+  });
+});
+
 const firstReadyVideoUrl = computed(() => {
   if (subtitleWorkflowFinalUrl.value) return subtitleWorkflowFinalUrl.value;
   return null;
@@ -876,7 +1818,7 @@ const publishReadyItems = computed(() => {
 });
 const footerNextLabel = computed(() => {
   if (activeStep.value === 1) return "下一步：配音 & 数字人";
-  if (activeStep.value === 2) return "下一步：一键成片";
+  if (activeStep.value === 2) return "下一步：打包成片";
   if (activeStep.value === 3) return "下一步：自动发布";
   return "四步已完成";
 });
@@ -934,11 +1876,77 @@ function clearAvatarCoverVideoUrls() {
   }
 }
 
+function isExpiredSignedAvatarUrl(url: string) {
+  try {
+    const parsed = new URL(url.trim(), window.location.origin);
+    const rawExpires = parsed.searchParams.get("expires");
+    if (!rawExpires) return false;
+    const expires = Number(rawExpires);
+    if (!Number.isFinite(expires)) return true;
+    return Math.floor(Date.now() / 1000) >= expires - 5;
+  } catch {
+    return false;
+  }
+}
+
+function isProtectedAvatarStreamUrl(url: string) {
+  const normalized = url.toLowerCase();
+  return (
+    normalized.includes("/avatar-video-files/") &&
+    normalized.includes("/stream") &&
+    !normalized.includes("/preview-stream") &&
+    !/[?&](token|expires)=/i.test(url)
+  );
+}
+
+function isPlayableAvatarPreviewUrl(url: string) {
+  const source = url.trim();
+  if (!source) return false;
+  if (isProtectedAvatarStreamUrl(source)) return false;
+  if (isExpiredSignedAvatarUrl(source)) return false;
+  return true;
+}
+
+function extractAvatarUploadFileName(item: AvatarResource) {
+  const candidates = [
+    item.originalVideoUrl?.trim() ?? "",
+    item.metadataUrl?.trim() ?? "",
+    item.previewUrl?.trim() ?? "",
+  ];
+  for (const value of candidates) {
+    if (!value) continue;
+    if (/^[^/?#\\]+$/.test(value) && !/^(https?:|data:|blob:)/i.test(value)) {
+      return value;
+    }
+    try {
+      const parsed = new URL(value, window.location.origin);
+      const match = parsed.pathname.match(
+        /\/avatar-video-files\/([^/]+)\/(?:stream|metadata|preview-stream|preview-metadata)$/i,
+      );
+      if (match?.[1]) return decodeURIComponent(match[1]);
+    } catch {
+      // ignore malformed preview candidates
+    }
+  }
+  return "";
+}
+
+async function resolveAvatarSignedPreviewUrl(item: AvatarResource) {
+  const current = item.previewUrl?.trim() ?? "";
+  if (isPlayableAvatarPreviewUrl(current)) return current;
+
+  const fileName = extractAvatarUploadFileName(item);
+  if (!fileName) return "";
+
+  const metadata = await getAvatarUploadVideoMetadata(fileName);
+  item.previewUrl = metadata.previewUrl;
+  item.metadataUrl = metadata.metadataUrl;
+  return isPlayableAvatarPreviewUrl(metadata.previewUrl) ? metadata.previewUrl : "";
+}
+
 async function ensureAvatarVideoCover(item: AvatarResource) {
   if (!isAvatarPlaceholderCover(item.coverUrl)) return;
-  const source = item.originalVideoUrl?.trim();
   if (
-    !source ||
     avatarCoverVideoUrls.value[item.id] ||
     pendingAvatarCoverIds.has(item.id)
   )
@@ -946,9 +1954,8 @@ async function ensureAvatarVideoCover(item: AvatarResource) {
 
   pendingAvatarCoverIds.add(item.id);
   try {
-    const nextUrl = /^(https?:|data:|blob:)/i.test(source)
-      ? source
-      : avatarVideoStreamUrl(source);
+    const nextUrl = await resolveAvatarSignedPreviewUrl(item);
+    if (!nextUrl) return;
 
     if (!selectedAvatarIds.value.includes(item.id)) {
       return;
@@ -975,25 +1982,36 @@ function syncAvatarVideoCovers(items: AvatarResource[]) {
   }
 }
 
+function normalizeGeneratedMediaUrl(url: string) {
+  const source = url.trim();
+  if (!source) return "";
+  if (/^(data:|blob:)/i.test(source)) return source;
+
+  try {
+    const parsed = new URL(source, window.location.origin);
+    if (parsed.pathname.startsWith("/uploads/")) {
+      const current = new URL(window.location.href);
+      const isLoopbackUpload =
+        ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname) &&
+        ["localhost", "127.0.0.1", "::1"].includes(current.hostname);
+      const isViteDevOrigin = current.port === "5173" || current.port === "4173";
+      if (isLoopbackUpload && isViteDevOrigin && parsed.origin !== current.origin) {
+        return parsed.href;
+      }
+      return `${window.location.origin}${parsed.pathname}${parsed.search}${parsed.hash}`;
+    }
+  } catch {
+    return source;
+  }
+
+  return source;
+}
+
 async function resolveGeneratedPreviewVideoUrl(url: string | null) {
-  const source = url?.trim();
+  const source = normalizeGeneratedMediaUrl(url ?? "");
   if (!source) return null;
   if (/^(https?:|data:|blob:)/i.test(source)) return source;
-
-  const token = localStorage.getItem("kb_token");
-  const response = await fetch(resolveProtectedMediaUrl(source), {
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  if (!response.ok) {
-    throw new Error(`预览视频加载失败（${response.status}）`);
-  }
-  const blob = await response.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  generatedPreviewObjectUrls.value = [
-    ...generatedPreviewObjectUrls.value,
-    objectUrl,
-  ];
-  return objectUrl;
+  return resolveProtectedMediaUrl(source);
 }
 
 function syncPublishCopyFromScript(force = false) {
@@ -1063,7 +2081,7 @@ async function loadRenderResources(): Promise<RenderResourcesLoadState> {
     const [avatarsResult, voicesResult, subtitleTemplatesResult] =
       await Promise.allSettled([
         listAvatarResources({ scope: "all", limit: 40 }),
-        listVoiceResources({ scope: "all", limit: 40 }),
+        listVoiceResources({ scope: "all", limit: 40 }, { noCache: true }),
         listSubtitleTemplateResources({ scope: "all", limit: 40 }),
       ]);
 
@@ -1104,10 +2122,12 @@ async function loadRenderResources(): Promise<RenderResourcesLoadState> {
       voiceResourceItems.value = voicesResult.value.items.filter(
         (item) => !hiddenRecommendedVoiceIds.has(item.id),
       );
-      voiceOptions.value = voiceResourceItems.value.map((item) => ({
-        label: item.name,
-        value: item.id,
-      }));
+      voiceOptions.value = voiceResourceItems.value
+        .filter((item) => isVoiceRenderable(item))
+        .map((item) => ({
+          label: item.name,
+          value: item.id,
+        }));
       const voiceIds = new Set(voiceOptions.value.map((item) => item.value));
       if (!voiceIds.has(selectedVoiceId.value)) {
         selectedVoiceId.value = voiceOptions.value[0]?.value ?? "";
@@ -1130,6 +2150,10 @@ async function loadRenderResources(): Promise<RenderResourcesLoadState> {
         selectedSubtitleTemplateId.value =
           subtitleTemplateOptions.value[0]?.value ?? "";
       }
+      selectedSubtitleTemplateAspectRatio.value =
+        subtitleTemplateItems.value.find(
+          (item) => item.id === selectedSubtitleTemplateId.value,
+        )?.aspectRatio ?? "9:16";
     }
   } finally {
     renderResourceLoading.value = false;
@@ -1179,16 +2203,32 @@ async function cloneVoiceFromStudio(body: CreateVoiceResourceDraft) {
         40,
       );
     }
-    if (!voiceOptions.value.some((option) => option.value === item.id)) {
+    if (
+      !voiceOptions.value.some((option) => option.value === item.id) &&
+      isVoiceRenderable(item)
+    ) {
       voiceOptions.value = [
         { label: item.name, value: item.id },
         ...voiceOptions.value.filter((option) => option.value !== item.id),
       ];
     }
-    selectedVoiceId.value = item.id;
+    if (isVoiceRenderable(item)) {
+      selectedVoiceId.value = item.id;
+    } else if (
+      !voiceOptions.value.some((option) => option.value === selectedVoiceId.value)
+    ) {
+      selectedVoiceId.value = voiceOptions.value[0]?.value ?? "";
+    }
     cloneVoiceOpen.value = false;
     if (!loadState.voices) {
       message.warning("克隆音频已创建，但音色列表刷新失败，已先加入当前创作。");
+    }
+    if (!isVoiceRenderable(item)) {
+      message.warning(
+        item.renderUnavailableReason ||
+          "音色已创建，但当前不可用于生成，请稍后刷新资源再试。",
+      );
+      return;
     }
     if (item.provider === "local-upload") {
       voiceSourceMode.value = "local";
@@ -1208,9 +2248,14 @@ async function cloneVoiceFromStudio(body: CreateVoiceResourceDraft) {
   }
 }
 
-function resetVoicePreviewState() {
+function resetVoicePreviewState(options: { cancelPending?: boolean } = {}) {
   clearVoicePreviewProgress();
   clearVoicePreviewPolling();
+  if (options.cancelPending) {
+    voicePreviewAbortController?.abort();
+    voicePreviewAbortController = null;
+    voicePreviewRequestSeq += 1;
+  }
   voicePreviewUrl.value = null;
   voicePreviewHint.value = "";
   voicePreviewMode.value = "";
@@ -1220,6 +2265,9 @@ function resetVoicePreviewState() {
   voicePreviewTaskId.value = "";
   voicePreviewTaskStatus.value = "idle";
   voicePreviewError.value = "";
+  audioAssetId.value = "";
+  stageTwoAudioSourceMeta.value = null;
+  resetStageTwoWorkflowState();
 }
 
 function clearVoicePreviewProgress() {
@@ -1234,6 +2282,15 @@ function clearVoicePreviewPolling() {
     window.clearTimeout(voicePreviewPollTimer);
     voicePreviewPollTimer = null;
   }
+}
+
+function cancelVoicePreviewStage() {
+  clearVoicePreviewProgress();
+  clearVoicePreviewPolling();
+  voicePreviewAbortController?.abort();
+  voicePreviewAbortController = null;
+  voicePreviewRequestSeq += 1;
+  voicePreviewLoading.value = false;
 }
 
 function scrollVoiceShellToOutput() {
@@ -1303,6 +2360,9 @@ function applyVoicePreviewResult(data: {
 }) {
   const nextUrl = data.audioUrl?.trim();
   if (!nextUrl) return false;
+  if (voicePreviewUrl.value !== nextUrl) {
+    resetStageTwoWorkflowState();
+  }
   voicePreviewUrl.value = nextUrl;
   voicePreviewHint.value = data.hint ?? "";
   voicePreviewMode.value = data.ttsMode ?? "";
@@ -1341,7 +2401,9 @@ async function pollVoicePreviewUntilReady(
     if (requestSeq !== voicePreviewRequestSeq) return;
 
     try {
-      const task = await getVoicePreviewTaskStatus(previewTaskId, statusUrl);
+      const task = await getVoicePreviewTaskStatus(previewTaskId, statusUrl, {
+        signal: voicePreviewAbortController?.signal,
+      });
       if (requestSeq !== voicePreviewRequestSeq) return;
 
       if (task.status === "failed") {
@@ -1364,6 +2426,7 @@ async function pollVoicePreviewUntilReady(
       voicePreviewHint.value = task.hint ?? voicePreviewHint.value;
       patchVoicePreviewProgressByTaskStatus(task.status);
     } catch (e: unknown) {
+      if (isAbortError(e)) return;
       if (requestSeq !== voicePreviewRequestSeq) return;
       voicePreviewTaskStatus.value = "failed";
       voicePreviewError.value = describeHttpOrNetworkError(e);
@@ -1374,11 +2437,311 @@ async function pollVoicePreviewUntilReady(
   }
 }
 
+void pollVoicePreviewUntilReady;
+
 function formatSecondsClock(value: number) {
   const total = Math.max(0, Math.round(value));
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function buildScriptFingerprint(text: string) {
+  const normalized = sanitizeWorkflowScriptText(text);
+  let hash = 2166136261;
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${normalized.length}_${(hash >>> 0).toString(16)}`;
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableSerialize(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function buildSaveKey(namespace: string, payload: unknown) {
+  return `${namespace}:${buildScriptFingerprint(stableSerialize(payload))}`;
+}
+
+function shouldSkipDuplicateSave(
+  store: Map<string, "pending" | "done">,
+  key: string,
+) {
+  return store.get(key) === SAVE_DEDUPE_PENDING || store.get(key) === SAVE_DEDUPE_DONE;
+}
+
+function markSavePending(
+  store: Map<string, "pending" | "done">,
+  key: string,
+) {
+  store.set(key, SAVE_DEDUPE_PENDING);
+}
+
+function markSaveDone(
+  store: Map<string, "pending" | "done">,
+  key: string,
+) {
+  store.clear();
+  store.set(key, SAVE_DEDUPE_DONE);
+}
+
+function clearPendingSaveKey(
+  store: Map<string, "pending" | "done">,
+  key: string,
+) {
+  if (store.get(key) === SAVE_DEDUPE_PENDING) {
+    store.delete(key);
+  }
+}
+
+function getCurrentStageTwoScriptText() {
+  const stepTwoEditorScript = getStepTwoEditorScriptText();
+  if (stepTwoEditorScript) return stepTwoEditorScript;
+  return sanitizeWorkflowScriptText(
+    smartClipScriptText.value.trim() || currentWorkflowScript.value,
+  );
+}
+
+function buildCurrentSubtitleTrackScriptSegments(scriptText: string) {
+  const fromStepTwoEditor = getStepTwoScriptSegmentsForTimeline(scriptText);
+  if (fromStepTwoEditor.length) return fromStepTwoEditor;
+  const fromUserSubtitles =
+    smartClipSubtitleSourceText.value === scriptText
+      ? smartClipSubtitles.value
+          .map((subtitle) => sanitizeWorkflowScriptText(subtitle.text || ""))
+          .filter(Boolean)
+      : [];
+  if (fromUserSubtitles.length) return fromUserSubtitles;
+  if (extractedScriptLines.value.length) return extractedScriptLines.value;
+  return splitScriptIntoSemanticSegments(scriptText);
+}
+
+function getCurrentStageTwoRenderMode(): StageStateRenderMode {
+  return "preserveSourceAspect";
+}
+
+function clearStageTwoReuseState() {
+  stageTwoReuseState.value = "idle";
+  stageTwoReuseHint.value = "";
+}
+
+function isStageTwoLipSyncRecoverableTask(task: SmartClipRenderTask | null | undefined) {
+  if (!task) return false;
+  if (task.status === "provider_running") return true;
+  const markerText = `${task.error || ""} ${task.hint || ""}`.toUpperCase();
+  return (
+    markerText.includes("RUNNING_TIMEOUT") ||
+    markerText.includes("PROVIDER_RUNNING")
+  );
+}
+
+function markStageTwoLipSyncRecoverable(task: SmartClipRenderTask) {
+  stageTwoLipSyncRecoverable.value = true;
+  stageTwoLipSyncRecoverableHint.value =
+    task.hint?.trim() || STAGE_TWO_LIPSYNC_RECOVERABLE_FALLBACK_HINT;
+  stageTwoDigitalHumanVideoAssetId.value = "";
+  stageTwoLipSyncVideoUrl.value = null;
+  stageTwoLipSyncPreviewOpen.value = false;
+  stageTwoLipSyncError.value = "";
+}
+
+function clearStageTwoLipSyncRecoverableState() {
+  stageTwoLipSyncRecoverable.value = false;
+  stageTwoLipSyncRecoverableHint.value = "";
+}
+
+function hasStageStateSaveQueuedOrRunning(saveKey: string) {
+  return (
+    stageStateSavePendingRequest?.saveKey === saveKey ||
+    stageStateSaveInFlightRequest?.saveKey === saveKey
+  );
+}
+
+function flushStageStateSaveQueue() {
+  if (stageStateSaveInFlightRequest || !stageStateSavePendingRequest) return;
+
+  const request = stageStateSavePendingRequest;
+  stageStateSavePendingRequest = null;
+  stageStateSaveInFlightRequest = request;
+  const controller = new AbortController();
+  stageStateSaveAbortController = controller;
+
+  void (async () => {
+    try {
+      await saveProjectStageState(request.projectId, request.patch, {
+        signal: controller.signal,
+      });
+      const isLatestSave =
+        request.seq === stageStateSaveSeq &&
+        request.projectId === getCurrentProjectId() &&
+        stageStateSaveInFlightRequest?.saveKey === request.saveKey &&
+        !controller.signal.aborted;
+      if (isLatestSave) {
+        markSaveDone(stageStateSaveKeys, request.saveKey);
+      } else {
+        clearPendingSaveKey(stageStateSaveKeys, request.saveKey);
+      }
+    } catch (error: unknown) {
+      clearPendingSaveKey(stageStateSaveKeys, request.saveKey);
+      const canReportError =
+        !request.silent &&
+        !isAbortError(error) &&
+        request.projectId === getCurrentProjectId() &&
+        stageStateSaveInFlightRequest?.saveKey === request.saveKey;
+      if (canReportError) {
+        message.warning(`闃舵鐘舵€佷繚瀛樺け璐ワ細${describeHttpOrNetworkError(error)}`);
+      }
+    } finally {
+      request.resolve();
+      if (stageStateSaveInFlightRequest?.saveKey === request.saveKey) {
+        stageStateSaveInFlightRequest = null;
+      }
+      if (stageStateSaveAbortController === controller) {
+        stageStateSaveAbortController = null;
+      }
+      flushStageStateSaveQueue();
+    }
+  })();
+}
+
+function cancelStageStateSaveQueue() {
+  stageStateSaveSeq += 1;
+  stageStateSavePendingRequest?.resolve();
+  stageStateSavePendingRequest = null;
+  stageStateSaveAbortController?.abort();
+  stageStateSaveAbortController = null;
+  stageStateSaveInFlightRequest = null;
+  stageStateSaveKeys.clear();
+}
+
+async function persistStageTwoStatePatch(
+  patch: StageStatePatchPayload,
+  options: { silent?: boolean } = {},
+) {
+  const projectId = getCurrentProjectId();
+  if (!projectId) return;
+  const saveKey = buildSaveKey("stage-state", { projectId, patch });
+  if (
+    shouldSkipDuplicateSave(stageStateSaveKeys, saveKey) ||
+    hasStageStateSaveQueuedOrRunning(saveKey)
+  ) {
+    return;
+  }
+  return new Promise<void>((resolve) => {
+    if (stageStateSavePendingRequest) {
+      clearPendingSaveKey(stageStateSaveKeys, stageStateSavePendingRequest.saveKey);
+      stageStateSavePendingRequest.resolve();
+    }
+    const request: StageStateSaveRequest = {
+      projectId,
+      patch,
+      saveKey,
+      seq: ++stageStateSaveSeq,
+      silent: Boolean(options.silent),
+      resolve,
+    };
+    stageStateSavePendingRequest = request;
+    markSavePending(stageStateSaveKeys, saveKey);
+    flushStageStateSaveQueue();
+  });
+
+}
+
+function clearStageTwoLipSyncResult(options: {
+  reason?: string;
+  notify?: boolean;
+  markMismatch?: boolean;
+  keepTask?: boolean;
+} = {}) {
+  stopStageTwoLipSyncPolling();
+  nextStageTwoLipSyncGenerationSeq();
+  if (!options.keepTask) {
+    stageTwoLipSyncTask.value = null;
+  }
+  stageTwoLipSyncRunning.value = false;
+  stageTwoDigitalHumanVideoAssetId.value = "";
+  stageTwoLipSyncVideoUrl.value = null;
+  stageTwoLipSyncPreviewOpen.value = false;
+  stageTwoLipSyncError.value = options.reason ?? "";
+  clearStageTwoLipSyncRecoverableState();
+  if (options.markMismatch) {
+    stageTwoReuseState.value = "mismatch";
+    stageTwoReuseHint.value =
+      options.reason || "当前选择与已有口型结果不匹配，请重新生成数字人口型视频。";
+  } else {
+    clearStageTwoReuseState();
+  }
+  if (options.notify && options.reason) {
+    message.warning(options.reason);
+  }
+}
+
+function clearStageTwoLipSyncResultForInputChange(
+  options: { notify?: boolean } = {},
+) {
+  if (!stageTwoLipSyncVideoUrl.value && !stageTwoDigitalHumanVideoAssetId.value) return;
+  clearStageTwoLipSyncResult({
+    reason: "当前文案/音频/数字人或画幅已变化，已清空旧口型预览，请重新生成。",
+    notify: options.notify,
+    markMismatch: true,
+  });
+  void persistStageTwoStatePatch(
+    {
+      scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+      audioAssetId: audioAssetId.value || null,
+      subtitleTrackId: subtitleTrackId.value || null,
+      avatarResourceId: selectedAvatarId.value || null,
+      renderMode: getCurrentStageTwoRenderMode(),
+      lipsyncTaskId: null,
+      digitalHumanVideoAssetId: null,
+      videoUrl: null,
+    },
+    { silent: true },
+  );
+}
+
+function persistStageTwoStateForAvatarChange() {
+  void persistStageTwoStatePatch(
+    {
+      scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+      audioAssetId: audioAssetId.value || null,
+      subtitleTrackId: subtitleTrackId.value || null,
+      avatarResourceId: selectedAvatarId.value || null,
+      renderMode: getCurrentStageTwoRenderMode(),
+      lipsyncTaskId: null,
+      digitalHumanVideoAssetId: null,
+      videoUrl: null,
+    },
+    { silent: true },
+  );
+}
+
+function syncStageTwoAudioSourceMetaFromAsset(
+  scriptText: string,
+  durationSeconds = voicePreviewDurationSeconds.value,
+) {
+  if (!audioAssetId.value) {
+    stageTwoAudioSourceMeta.value = null;
+    return;
+  }
+  stageTwoAudioSourceMeta.value = {
+    scriptHash: buildScriptFingerprint(scriptText),
+    scriptPreview: trimRecordText(scriptText, 64),
+    durationSeconds: Number.isFinite(durationSeconds) ? Number(durationSeconds) : 0,
+    audioAssetId: audioAssetId.value,
+    subtitleTrackId: subtitleTrackId.value,
+    generatedAt: Date.now(),
+  };
 }
 
 function nudgeVoicePower(delta: number) {
@@ -1393,56 +2756,22 @@ function buildVoiceTuningPayload() {
     voiceEmotionIntensity: selectedVoicePower.value,
     voiceRate: selectedVoiceRate.value,
     voiceVolume: selectedVoiceVolume.value,
+    voicePitch: selectedVoicePitch.value,
   };
+}
+
+function isAbortError(error: unknown) {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (axios.isCancel(error) || (axios.isAxiosError(error) && error.code === "ERR_CANCELED"))
+  );
 }
 
 function buildVoiceGenerationState(
   selectedId: string,
   resource: VoiceResource | null,
 ): VoiceGenerationState {
-  if (!selectedId) {
-    return { ready: false, reason: "未选音色：请先选择一个配音音色。" };
-  }
-  if (!resource) {
-    return {
-      ready: false,
-      reason:
-        "资源未匹配：当前选中的音色不在资源列表中，请刷新资源或重新选择。",
-    };
-  }
-  if (resource.cloneStatus === "processing") {
-    return {
-      ready: false,
-      reason: "音色未 ready：当前音色仍在克隆处理中，请稍后刷新后再生成。",
-    };
-  }
-  if (resource.cloneStatus === "failed") {
-    const error = resource.cloneError
-      ? `原因：${resource.cloneError.slice(0, 120)}`
-      : "请重新上传样本或选择其他音色。";
-    return { ready: false, reason: `音色未 ready：克隆失败。${error}` };
-  }
-  if (resource.cloneStatus !== "ready") {
-    return {
-      ready: false,
-      reason: "音色未 ready：接口未返回 ready 状态，请刷新资源列表后再试。",
-    };
-  }
-  if (resource.provider === "local-upload") {
-    return {
-      ready: false,
-      reason:
-        "所选音色不支持生成：本地上传音频只能作为样本留档，请选择支持 TTS 的克隆音色或推荐音色。",
-    };
-  }
-  if (!resource.providerVoice) {
-    return {
-      ready: false,
-      reason:
-        "所选音色不支持生成：接口缺少 providerVoice，无法提交到 TTS/成片链路。",
-    };
-  }
-  return { ready: true, reason: "" };
+  return buildVoiceGenerationStateV2(selectedId, resource);
 }
 
 async function onGenerateVoicePreview() {
@@ -1457,7 +2786,13 @@ async function onGenerateVoicePreviewV2() {
     return;
   }
 
-  const script = currentWorkflowScript.value;
+  syncSmartClipScriptFromDraft(true);
+  buildSmartClipSubtitles(true);
+  const script = getCurrentStageTwoScriptText();
+  const projectId = ensureCurrentProjectId();
+  if (!projectId) return;
+  voicePreviewAbortController?.abort();
+  voicePreviewAbortController = new AbortController();
   const requestSeq = ++voicePreviewRequestSeq;
 
   resetVoicePreviewState();
@@ -1466,48 +2801,63 @@ async function onGenerateVoicePreviewV2() {
   startVoicePreviewProgress();
 
   try {
-    const data = await createVoicePreview({
-      script,
+    const data = await createAudioAssetFromTts({
+      projectId,
+      name: "步骤二配音",
+      text: script,
       voiceResourceId: selectedVoiceId.value,
       ...buildVoiceTuningPayload(),
+    }, {
+      signal: voicePreviewAbortController.signal,
     });
     if (requestSeq !== voicePreviewRequestSeq) return;
 
-    voicePreviewHint.value = data.hint ?? "";
-
-    if (applyVoicePreviewResult(data)) {
-      message.success("Preview audio is ready.");
+    const latestAsset = await getAudioAsset(data.audioAssetId);
+    if (requestSeq !== voicePreviewRequestSeq) return;
+    const audioUrl = latestAsset.audioUrl?.trim();
+    if (!audioUrl) {
+      voicePreviewTaskStatus.value = "failed";
+      voicePreviewError.value =
+        latestAsset.error?.trim() || "音频生成成功但未返回可播放地址";
+      finishVoicePreviewProgress(false);
+      message.error(voicePreviewError.value);
       return;
     }
-
-    const previewTaskId = data.previewTaskId?.trim();
-    if (previewTaskId) {
-      voicePreviewTaskId.value = previewTaskId;
-      if (data.status === "running") {
-        voicePreviewTaskStatus.value = "running";
-        patchVoicePreviewProgressByTaskStatus("running");
-      } else {
-        voicePreviewTaskStatus.value = "queued";
-        patchVoicePreviewProgressByTaskStatus("queued");
-      }
-      await pollVoicePreviewUntilReady(
-        previewTaskId,
-        data.statusUrl,
-        requestSeq,
-      );
-      if (requestSeq !== voicePreviewRequestSeq) return;
-      if (voicePreviewUrl.value) {
-        message.success("Preview audio is ready.");
-      }
-      return;
-    }
-
-    voicePreviewTaskStatus.value = "failed";
-    voicePreviewError.value =
-      data.error?.trim() || "Preview request finished without an audio URL.";
-    finishVoicePreviewProgress(false);
-    message.error(voicePreviewError.value);
+    audioAssetId.value = latestAsset.audioAssetId;
+    // 防止音频阶段自动回填的 ASR 轨覆盖后续显式生成的分段轨
+    subtitleTrackId.value = "";
+    subtitleTimelineAligned.value = false;
+    subtitleTimelineStatus.value = "idle";
+    subtitleTimelineError.value = "";
+    stageTwoDigitalHumanVideoAssetId.value = "";
+    clearStageTwoReuseState();
+    syncStageTwoAudioSourceMetaFromAsset(
+      script,
+      latestAsset.durationSeconds ?? 0,
+    );
+    await persistStageTwoStatePatch(
+      {
+        scriptHash: buildScriptFingerprint(script),
+        audioAssetId: latestAsset.audioAssetId,
+        subtitleTrackId: null,
+        avatarResourceId: selectedAvatarId.value || null,
+        renderMode: getCurrentStageTwoRenderMode(),
+        lipsyncTaskId: null,
+        digitalHumanVideoAssetId: null,
+        videoUrl: null,
+      },
+      { silent: true },
+    );
+    applyVoicePreviewResult({
+      audioUrl,
+      durationSeconds: latestAsset.durationSeconds ?? undefined,
+      hint: latestAsset.error ?? "",
+      ttsMode: "provider",
+    });
+    voicePreviewHint.value = "音频资产已生成，可继续生成字幕时间轴和数字人口型";
+    message.success("音频生成完成");
   } catch (e: unknown) {
+    if (isAbortError(e)) return;
     if (requestSeq !== voicePreviewRequestSeq) return;
     voicePreviewTaskStatus.value = "failed";
     voicePreviewError.value = describeHttpOrNetworkError(e);
@@ -1516,6 +2866,7 @@ async function onGenerateVoicePreviewV2() {
   } finally {
     if (requestSeq === voicePreviewRequestSeq) {
       voicePreviewLoading.value = false;
+      voicePreviewAbortController = null;
     }
   }
 }
@@ -1552,15 +2903,792 @@ async function onDownloadVoicePreview() {
   }
 }
 
+function applySubtitleTimelineFromTrack(track: SubtitleTrackRecord) {
+  const mapped = (track.subtitles ?? []).map((cue, index) => ({
+    id: cue.id || `sub_${String(index + 1).padStart(3, "0")}`,
+    startTime: Number((Math.max(0, cue.startTime) || 0).toFixed(2)),
+    endTime: Number(
+      (Math.max(cue.startTime + 0.1, cue.endTime || cue.startTime + 0.1) || 0.1).toFixed(2),
+    ),
+    text: cue.text || "",
+    highlightRanges: [],
+  }));
+  smartClipSubtitles.value = normalizeSmartClipSubtitlesForSubmit(mapped);
+  syncSmartClipSubtitleHighlightRanges();
+}
+
+const SUBTITLE_SEGMENT_ALIGNMENT_ERROR = "字幕轴未按文案分段生成";
+
+function getSubtitleTrackAlignmentMismatchReason(
+  track: SubtitleTrackRecord,
+  expectedTrackId: string,
+  expectedSegmentCount: number,
+) {
+  if (track.subtitleTrackId !== expectedTrackId) {
+    return `trackId 不一致（expect=${expectedTrackId}, actual=${track.subtitleTrackId}）`;
+  }
+  if (track.source !== "tts_alignment") {
+    return `source=${track.source}（expect=tts_alignment）`;
+  }
+  const cueCount = track.subtitles?.length ?? 0;
+  if (cueCount !== expectedSegmentCount) {
+    return `字幕条数不一致（expect=${expectedSegmentCount}, actual=${cueCount}）`;
+  }
+  return "";
+}
+
+function applyStageTwoStateFromAudioAsset(
+  stageState: ProjectStageStateRecord,
+  asset: Awaited<ReturnType<typeof getAudioAsset>>,
+) {
+  const audioUrl = asset.audioUrl?.trim() ?? "";
+  if (!audioUrl) return false;
+  audioAssetId.value = asset.audioAssetId;
+  const restoredSubtitleTrackId = stageState.subtitleTrackId || "";
+  applyVoicePreviewResult({
+    audioUrl,
+    durationSeconds: asset.durationSeconds ?? undefined,
+    hint: stageState.updatedAt ? `已恢复 ${new Date(stageState.updatedAt).toLocaleString()}` : "",
+    ttsMode: "provider",
+  });
+  subtitleTrackId.value = restoredSubtitleTrackId;
+  subtitleTimelineAligned.value = false;
+  const scriptText = getCurrentStageTwoScriptText();
+  stageTwoAudioSourceMeta.value = {
+    scriptHash: stageState.scriptHash || buildScriptFingerprint(scriptText),
+    scriptPreview: trimRecordText(scriptText, 64),
+    durationSeconds: Number.isFinite(asset.durationSeconds)
+      ? Number(asset.durationSeconds)
+      : 0,
+    audioAssetId: asset.audioAssetId,
+    subtitleTrackId: subtitleTrackId.value,
+    generatedAt: Date.now(),
+  };
+  subtitleTimelineError.value = "";
+  subtitleTimelineStatus.value = "idle";
+  return true;
+}
+
+function getRestoredSubtitleTrackMismatchReason(
+  track: SubtitleTrackRecord,
+  expectedAudioAssetId: string,
+) {
+  if (track.audioAssetId !== expectedAudioAssetId) {
+    return `audioAssetId 不一致（expect=${expectedAudioAssetId}, actual=${track.audioAssetId}）`;
+  }
+  if (track.source !== "tts_alignment") {
+    return `source=${track.source}（expect=tts_alignment）`;
+  }
+  if (!track.subtitles?.length) {
+    return "字幕轨为空";
+  }
+  return "";
+}
+
+type StageTwoRestoreOptions = {
+  force?: boolean;
+  silent?: boolean;
+  notifyOnMismatch?: boolean;
+  stageStateOverride?: ProjectStageStateRecord | null;
+};
+
+function clearStageTwoRestoreDebounceTimer() {
+  if (stageTwoRestoreDebounceTimer !== null) {
+    window.clearTimeout(stageTwoRestoreDebounceTimer);
+    stageTwoRestoreDebounceTimer = null;
+  }
+}
+
+function cancelStageTwoRestoreRequest() {
+  clearStageTwoRestoreDebounceTimer();
+  stageTwoRestoreAbortController?.abort();
+  stageTwoRestoreAbortController = null;
+  stageTwoRestoreSeq += 1;
+  stageTwoRestoreLoading.value = false;
+}
+
+function scheduleStageTwoRestore(
+  options: StageTwoRestoreOptions = {},
+  delayMs = STAGE_TWO_RESTORE_DEBOUNCE_MS,
+) {
+  clearStageTwoRestoreDebounceTimer();
+  stageTwoRestoreAbortController?.abort();
+  stageTwoRestoreAbortController = null;
+  stageTwoRestoreSeq += 1;
+  stageTwoRestoreLoading.value = false;
+  stageTwoRestoreDebounceTimer = window.setTimeout(() => {
+    stageTwoRestoreDebounceTimer = null;
+    void restoreStageTwoState(options);
+  }, Math.max(0, delayMs));
+}
+
+async function restoreStageTwoState(options: StageTwoRestoreOptions = {}) {
+  clearStageTwoRestoreDebounceTimer();
+  stageTwoRestoreAbortController?.abort();
+  stageTwoRestoreAbortController = null;
+  if (!options.force && (audioAssetId.value || stageTwoLipSyncVideoUrl.value)) return;
+  const projectId = getCurrentProjectId();
+  if (!projectId) return;
+  const seq = ++stageTwoRestoreSeq;
+  const controller = new AbortController();
+  stageTwoRestoreAbortController = controller;
+  stageTwoRestoreLoading.value = true;
+  try {
+    const stageState =
+      options.stageStateOverride ??
+      (await getProjectStageState(projectId, {
+        signal: controller.signal,
+      }));
+    if (seq !== stageTwoRestoreSeq || controller.signal.aborted) return;
+    if (!stageState.audioAssetId) {
+      if (options.force) {
+        clearStageTwoReuseState();
+      }
+      return;
+    }
+    const currentScriptHash = buildScriptFingerprint(getCurrentStageTwoScriptText());
+    if (stageState.scriptHash && stageState.scriptHash !== currentScriptHash) {
+      clearStageTwoLipSyncResult({
+        reason: "当前文案与上次生成不一致，已跳过恢复，请重新生成音频与口型。",
+        notify: options.notifyOnMismatch,
+        markMismatch: true,
+      });
+      return;
+    }
+
+    const audioAsset = await getAudioAsset(stageState.audioAssetId, {
+      signal: controller.signal,
+    });
+    if (seq !== stageTwoRestoreSeq || controller.signal.aborted) return;
+    if (!applyStageTwoStateFromAudioAsset(stageState, audioAsset)) return;
+
+    if (subtitleTrackId.value) {
+      try {
+        const track = await getSubtitleTrack(subtitleTrackId.value, {
+          signal: controller.signal,
+        });
+        if (seq !== stageTwoRestoreSeq || controller.signal.aborted) return;
+        const trackMismatchReason = getRestoredSubtitleTrackMismatchReason(
+          track,
+          audioAsset.audioAssetId,
+        );
+        if (trackMismatchReason) {
+          subtitleTrackId.value = "";
+          subtitleTimelineAligned.value = false;
+          subtitleTimelineStatus.value = "failed";
+          subtitleTimelineError.value = SUBTITLE_SEGMENT_ALIGNMENT_ERROR;
+          subtitleWorkflowHint.value = `${SUBTITLE_SEGMENT_ALIGNMENT_ERROR}：${trackMismatchReason}`;
+          void persistStageTwoStatePatch(
+            {
+              scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+              audioAssetId: audioAsset.audioAssetId || null,
+              subtitleTrackId: null,
+            },
+            { silent: true },
+          );
+        } else {
+          applySubtitleTimelineFromTrack(track);
+          subtitleTimelineAligned.value = true;
+          subtitleTimelineStatus.value = smartClipSubtitles.value.length ? "ready" : "failed";
+          if (!smartClipSubtitles.value.length) {
+            subtitleTimelineAligned.value = false;
+            subtitleTimelineError.value = "恢复的字幕时间轴为空，请重新生成。";
+          }
+        }
+      } catch (error: unknown) {
+        if (seq !== stageTwoRestoreSeq || controller.signal.aborted) return;
+        subtitleTimelineAligned.value = false;
+        subtitleTimelineStatus.value = "failed";
+        subtitleTimelineError.value = describeHttpOrNetworkError(error);
+      }
+    }
+
+    const hasRecoverableLipSyncTask =
+      Boolean(stageState.lipsyncTaskId) &&
+      !stageState.digitalHumanVideoAssetId &&
+      !stageState.videoUrl;
+    if (hasRecoverableLipSyncTask) {
+      stageTwoLipSyncTask.value = {
+        taskId: stageState.lipsyncTaskId || "",
+        status: "provider_running",
+        progress: 90,
+        hint: STAGE_TWO_LIPSYNC_RECOVERABLE_FALLBACK_HINT,
+      };
+      markStageTwoLipSyncRecoverable(stageTwoLipSyncTask.value);
+      clearStageTwoReuseState();
+    } else if (
+      stageState.digitalHumanVideoAssetId ||
+      stageState.lipsyncTaskId ||
+      stageState.videoUrl
+    ) {
+      clearStageTwoLipSyncResult({
+        reason: "已恢复音频和字幕。口型视频不再自动匹配历史结果，请重新生成。",
+        notify: options.notifyOnMismatch,
+        markMismatch: true,
+      });
+      void persistStageTwoStatePatch(
+        {
+          scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+          audioAssetId: audioAsset.audioAssetId || null,
+          subtitleTrackId: subtitleTrackId.value || null,
+          avatarResourceId: null,
+          renderMode: null,
+          lipsyncTaskId: null,
+          digitalHumanVideoAssetId: null,
+          videoUrl: null,
+        },
+        { silent: true },
+      );
+    } else {
+      clearStageTwoLipSyncResult();
+    }
+  } catch (error: unknown) {
+    if (!options.silent) {
+      message.warning(`恢复第二步结果失败：${describeHttpOrNetworkError(error)}`);
+    }
+  } finally {
+    if (seq === stageTwoRestoreSeq) {
+      stageTwoRestoreLoading.value = false;
+      if (stageTwoRestoreAbortController === controller) {
+        stageTwoRestoreAbortController = null;
+      }
+    }
+  }
+}
+
+async function onGenerateSubtitleTimeline() {
+  ensureStreamingScriptComplete();
+  syncSmartClipScriptFromDraft(true);
+  const projectId = ensureCurrentProjectId();
+  if (!projectId) return;
+  if (!audioStageReady.value) {
+    message.warning("请先完成音频合成");
+    return;
+  }
+  if (!audioAssetId.value) {
+    message.warning("音频资产未就绪，请先生成音频");
+    return;
+  }
+  if (stageTwoAudioSourceMismatch.value) {
+    resetVoicePreviewState({ cancelPending: true });
+    message.warning(stageTwoAudioSourceMismatchReason.value);
+    return;
+  }
+  const script = getCurrentStageTwoScriptText();
+  if (!script) {
+    message.warning("请先确认口播文案");
+    return;
+  }
+
+  const scriptSegments = buildCurrentSubtitleTrackScriptSegments(script);
+  if (!scriptSegments.length) {
+    message.warning("请先确认口播文案分段");
+    return;
+  }
+
+  subtitleTimelineGenerating.value = true;
+  subtitleTimelineStatus.value = "generating";
+  subtitleTimelineAligned.value = false;
+  subtitleTimelineError.value = "";
+  subtitleTimelineAbortController?.abort();
+  subtitleTimelineAbortController = new AbortController();
+  subtitleWorkflowHint.value = "正在生成字幕时间轴...";
+
+  try {
+    const createdTrack = await createSubtitleTrackForAudioAsset(
+      audioAssetId.value,
+      {
+        projectId,
+        scriptText: script,
+        scriptSegments,
+      },
+    );
+    const expectedTrackId = createdTrack.subtitleTrackId;
+    const latestTrack = await getSubtitleTrack(expectedTrackId);
+    if (subtitleTimelineAbortController.signal.aborted) return;
+    const mismatchReason = getSubtitleTrackAlignmentMismatchReason(
+      latestTrack,
+      expectedTrackId,
+      scriptSegments.length,
+    );
+    if (mismatchReason) {
+      subtitleTimelineStatus.value = "failed";
+      subtitleTimelineAligned.value = false;
+      subtitleTimelineError.value = SUBTITLE_SEGMENT_ALIGNMENT_ERROR;
+      subtitleWorkflowHint.value = `${SUBTITLE_SEGMENT_ALIGNMENT_ERROR}：${mismatchReason}`;
+      subtitleWorkflowTimelineSource.value =
+        latestTrack.source === "asr" ? "asr-fallback" : "local-estimate";
+      message.warning(SUBTITLE_SEGMENT_ALIGNMENT_ERROR);
+      return;
+    }
+    subtitleTrackId.value = latestTrack.subtitleTrackId;
+    subtitleWorkflowHint.value = latestTrack.error ?? "";
+    subtitleWorkflowTimelineSource.value =
+      latestTrack.source === "asr" ? "asr-fallback" : "local-estimate";
+    applySubtitleTimelineFromTrack(latestTrack);
+    subtitleTimelineAligned.value = true;
+    smartClipSubtitleSourceText.value = script;
+    await persistStageTwoStatePatch(
+      {
+        scriptHash: buildScriptFingerprint(script),
+        audioAssetId: audioAssetId.value || null,
+        subtitleTrackId: subtitleTrackId.value || null,
+        avatarResourceId: selectedAvatarId.value || null,
+        renderMode: getCurrentStageTwoRenderMode(),
+      },
+      { silent: true },
+    );
+    subtitleTimelineStatus.value = smartClipSubtitles.value.length
+      ? "ready"
+      : "failed";
+    if (subtitleTimelineStatus.value === "failed") {
+      subtitleTimelineAligned.value = false;
+      subtitleTimelineError.value = "字幕时间轴为空，请重试";
+      message.warning(subtitleTimelineError.value);
+      return;
+    }
+    message.success("字幕时间轴已生成，可在第三步继续微调");
+  } catch (e: unknown) {
+    if (isAbortError(e)) return;
+    subtitleTimelineStatus.value = "failed";
+    subtitleTimelineAligned.value = false;
+    subtitleTimelineError.value = describeHttpOrNetworkError(e);
+    subtitleWorkflowHint.value = subtitleTimelineError.value;
+    message.error(subtitleTimelineError.value);
+  } finally {
+    subtitleTimelineGenerating.value = false;
+    subtitleTimelineAbortController = null;
+  }
+}
+
+function clearStageTwoLipSyncPolling() {
+  stageTwoLipSyncPollSeq += 1;
+  stageTwoLipSyncPollPending = false;
+  stageTwoLipSyncPollAbortController?.abort();
+  stageTwoLipSyncPollAbortController = null;
+  if (stageTwoLipSyncPollTimer !== null) {
+    window.clearTimeout(stageTwoLipSyncPollTimer);
+    stageTwoLipSyncPollTimer = null;
+  }
+}
+
+function stopStageTwoLipSyncPolling() {
+  clearStageTwoLipSyncPolling();
+  stageTwoLipSyncRunning.value = false;
+}
+
+function isStageTwoLipSyncTimeoutError(messageText: string) {
+  return messageText.includes("口型任务轮询超时");
+}
+
+function nextStageTwoLipSyncGenerationSeq() {
+  stageTwoLipSyncGenerationSeq.value += 1;
+  stageTwoLipSyncBoundTaskId.value = "";
+  return stageTwoLipSyncGenerationSeq.value;
+}
+
+function bindStageTwoLipSyncTask(taskId: string, generationSeq: number) {
+  if (generationSeq !== stageTwoLipSyncGenerationSeq.value) return false;
+  stageTwoLipSyncBoundTaskId.value = taskId.trim();
+  return Boolean(stageTwoLipSyncBoundTaskId.value);
+}
+
+function isStageTwoLipSyncResponseStale(
+  task: SmartClipRenderTask,
+  generationSeq: number,
+  expectedTaskId: string,
+) {
+  if (generationSeq !== stageTwoLipSyncGenerationSeq.value) return true;
+  const responseTaskId = task.taskId?.trim() ?? "";
+  const boundTaskId = stageTwoLipSyncBoundTaskId.value.trim();
+  if (expectedTaskId && responseTaskId && expectedTaskId !== responseTaskId) return true;
+  if (boundTaskId && responseTaskId && boundTaskId !== responseTaskId) return true;
+  return false;
+}
+
+async function syncStageTwoLipSyncTaskState(
+  task: SmartClipRenderTask,
+  options: { generationSeq: number; expectedTaskId: string },
+) {
+  if (
+    isStageTwoLipSyncResponseStale(
+      task,
+      options.generationSeq,
+      options.expectedTaskId,
+    )
+  ) {
+    return "stale" as const;
+  }
+  stageTwoLipSyncTask.value = task;
+  stageTwoDigitalHumanVideoAssetId.value =
+    task.digitalHumanVideoAssetId || stageTwoDigitalHumanVideoAssetId.value;
+  if (isStageTwoLipSyncRecoverableTask(task)) {
+    markStageTwoLipSyncRecoverable(task);
+    await persistStageTwoStatePatch(
+      {
+        scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+        audioAssetId: audioAssetId.value || null,
+        subtitleTrackId: subtitleTrackId.value || null,
+        avatarResourceId: selectedAvatarId.value || null,
+        renderMode: getCurrentStageTwoRenderMode(),
+        lipsyncTaskId: task.taskId || null,
+        digitalHumanVideoAssetId: null,
+        videoUrl: null,
+      },
+      { silent: true },
+    );
+    return "provider-running" as const;
+  }
+  if (task.status === "completed" && task.outputUrl) {
+    clearStageTwoLipSyncRecoverableState();
+    const resolvedVideoUrl = await resolveGeneratedPreviewVideoUrl(task.outputUrl);
+    if (
+      isStageTwoLipSyncResponseStale(
+        task,
+        options.generationSeq,
+        options.expectedTaskId,
+      )
+    ) {
+      return "stale" as const;
+    }
+    stageTwoLipSyncVideoUrl.value = resolvedVideoUrl;
+    if (!stageTwoDigitalHumanVideoAssetId.value) {
+      stageTwoLipSyncError.value =
+        "口型任务完成但未返回数字人视频资产ID，请稍后重试";
+      return "failed" as const;
+    }
+    stageTwoLipSyncError.value = "";
+    stageTwoReuseState.value = "restored";
+    stageTwoReuseHint.value = "已生成口型视频，可继续使用或重新生成。";
+    await persistStageTwoStatePatch(
+      {
+        scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+        audioAssetId: audioAssetId.value || null,
+        subtitleTrackId: subtitleTrackId.value || null,
+        avatarResourceId: selectedAvatarId.value || null,
+        renderMode: getCurrentStageTwoRenderMode(),
+        lipsyncTaskId: task.taskId || null,
+        digitalHumanVideoAssetId: stageTwoDigitalHumanVideoAssetId.value || null,
+        videoUrl: task.outputUrl || stageTwoLipSyncVideoUrl.value || null,
+      },
+      { silent: true },
+    );
+    if (
+      isStageTwoLipSyncResponseStale(
+        task,
+        options.generationSeq,
+        options.expectedTaskId,
+      )
+    ) {
+      return "stale" as const;
+    }
+    return "completed" as const;
+  }
+  if (task.status === "failed") {
+    clearStageTwoLipSyncRecoverableState();
+    if (
+      isStageTwoLipSyncResponseStale(
+        task,
+        options.generationSeq,
+        options.expectedTaskId,
+      )
+    ) {
+      return "stale" as const;
+    }
+    clearStageTwoReuseState();
+    stageTwoLipSyncError.value = task.error || "数字人口型任务失败";
+    return "failed" as const;
+  }
+  clearStageTwoLipSyncRecoverableState();
+  return "pending" as const;
+}
+
+function startStageTwoLipSyncPolling(
+  taskId: string,
+  generationSeq = stageTwoLipSyncGenerationSeq.value,
+) {
+  clearStageTwoLipSyncPolling();
+  if (!bindStageTwoLipSyncTask(taskId, generationSeq)) return;
+  const expectedTaskId = taskId.trim();
+  const seq = stageTwoLipSyncPollSeq;
+  const startedAt = Date.now();
+  const pollOnce = async () => {
+    if (
+      !stageTwoLipSyncRunning.value ||
+      seq !== stageTwoLipSyncPollSeq ||
+      generationSeq !== stageTwoLipSyncGenerationSeq.value
+    ) {
+      return;
+    }
+    if (stageTwoLipSyncPollPending) return;
+    if (Date.now() - startedAt > STAGE_TWO_LIPSYNC_POLL_MAX_DURATION_MS) {
+      clearStageTwoLipSyncPolling();
+      stageTwoLipSyncRunning.value = false;
+      try {
+        const task = await getSmartClipRenderTask(taskId);
+        const status = await syncStageTwoLipSyncTaskState(task, {
+          generationSeq,
+          expectedTaskId,
+        });
+        if (status === "stale") return;
+        if (status === "completed") {
+          message.success("数字人口型视频生成完成");
+          return;
+        }
+        if (status === "provider-running") {
+          message.info(
+            stageTwoLipSyncRecoverableHint.value ||
+              STAGE_TWO_LIPSYNC_RECOVERABLE_FALLBACK_HINT,
+          );
+          return;
+        }
+        if (status === "failed") {
+          message.error(stageTwoLipSyncError.value);
+          return;
+        }
+      } catch (e: unknown) {
+        if (isAbortError(e)) return;
+      }
+      stageTwoLipSyncError.value = STAGE_TWO_LIPSYNC_TIMEOUT_ERROR;
+      message.warning(stageTwoLipSyncError.value);
+      return;
+    }
+    stageTwoLipSyncPollPending = true;
+    stageTwoLipSyncPollAbortController?.abort();
+    const controller = new AbortController();
+    stageTwoLipSyncPollAbortController = controller;
+    try {
+      const task = await getSmartClipRenderTask(taskId, {
+        signal: controller.signal,
+      });
+      if (
+        seq !== stageTwoLipSyncPollSeq ||
+        controller.signal.aborted ||
+        generationSeq !== stageTwoLipSyncGenerationSeq.value
+      ) {
+        return;
+      }
+      const status = await syncStageTwoLipSyncTaskState(task, {
+        generationSeq,
+        expectedTaskId,
+      });
+      if (status === "stale") return;
+      if (status === "completed") {
+        clearStageTwoLipSyncPolling();
+        stageTwoLipSyncRunning.value = false;
+        message.success("数字人口型视频生成完成");
+        return;
+      }
+      if (status === "provider-running") {
+        clearStageTwoLipSyncPolling();
+        stageTwoLipSyncRunning.value = false;
+        message.info(
+          stageTwoLipSyncRecoverableHint.value ||
+            STAGE_TWO_LIPSYNC_RECOVERABLE_FALLBACK_HINT,
+        );
+        return;
+      }
+      if (status === "failed") {
+        clearStageTwoLipSyncPolling();
+        stageTwoLipSyncRunning.value = false;
+        message.error(stageTwoLipSyncError.value);
+        return;
+      }
+    } catch (e: unknown) {
+      if (seq !== stageTwoLipSyncPollSeq || isAbortError(e)) return;
+      clearStageTwoLipSyncPolling();
+      stageTwoLipSyncRunning.value = false;
+      stageTwoLipSyncError.value = describeHttpOrNetworkError(e);
+      message.error(stageTwoLipSyncError.value);
+      return;
+    } finally {
+      if (stageTwoLipSyncPollAbortController === controller) {
+        stageTwoLipSyncPollAbortController = null;
+      }
+      stageTwoLipSyncPollPending = false;
+    }
+    if (
+      !stageTwoLipSyncRunning.value ||
+      seq !== stageTwoLipSyncPollSeq ||
+      generationSeq !== stageTwoLipSyncGenerationSeq.value
+    ) {
+      return;
+    }
+    stageTwoLipSyncPollTimer = window.setTimeout(
+      pollOnce,
+      SMART_CLIP_POLL_INTERVAL_MS,
+    );
+  };
+  void pollOnce();
+}
+
+async function onGenerateStepTwoLipSync() {
+  if (!selectedAvatarId.value) {
+    message.warning("请先选择数字人视频");
+    return;
+  }
+  ensureStreamingScriptComplete();
+  syncSmartClipScriptFromDraft(true);
+  if (!audioStageReady.value) {
+    message.warning("请先完成音频合成");
+    return;
+  }
+  if (!subtitleTimelineReady.value) {
+    message.warning("请先生成字幕时间轴");
+    return;
+  }
+  if (stageTwoLipSyncRunning.value) {
+    if (stageTwoLipSyncTask.value?.taskId) {
+      startStageTwoLipSyncPolling(
+        stageTwoLipSyncTask.value.taskId,
+        stageTwoLipSyncGenerationSeq.value,
+      );
+    }
+    return;
+  }
+
+  if (!audioAssetId.value) {
+    message.warning("音频资产未就绪，请先生成音频");
+    return;
+  }
+
+  if (stageTwoAudioSourceMismatch.value) {
+    resetVoicePreviewState({ cancelPending: true });
+    message.warning(stageTwoAudioSourceMismatchReason.value);
+    return;
+  }
+  const existingTaskId = stageTwoLipSyncTask.value?.taskId?.trim();
+  const existingTaskStatus = stageTwoLipSyncTask.value?.status;
+  const hasExistingLipSyncResult = Boolean(
+    stageTwoLipSyncVideoUrl.value ||
+      stageTwoDigitalHumanVideoAssetId.value ||
+      existingTaskStatus === "completed",
+  );
+  if (
+    existingTaskId &&
+    (existingTaskStatus === "pending" ||
+      existingTaskStatus === "processing" ||
+      existingTaskStatus === "provider_running" ||
+      stageTwoLipSyncRecoverable.value ||
+      isStageTwoLipSyncTimeoutError(stageTwoLipSyncError.value))
+  ) {
+    const existingGenerationSeq = stageTwoLipSyncGenerationSeq.value;
+    bindStageTwoLipSyncTask(existingTaskId, existingGenerationSeq);
+    stageTwoLipSyncRunning.value = true;
+    stageTwoLipSyncError.value = "";
+    try {
+      const task = await getSmartClipRenderTask(existingTaskId);
+      const status = await syncStageTwoLipSyncTaskState(task, {
+        generationSeq: existingGenerationSeq,
+        expectedTaskId: existingTaskId,
+      });
+      if (status === "stale") {
+        stageTwoLipSyncRunning.value = false;
+        return;
+      }
+      if (status === "completed") {
+        stageTwoLipSyncRunning.value = false;
+        message.success("数字人口型视频生成完成");
+        return;
+      }
+      if (status === "provider-running") {
+        stageTwoLipSyncRunning.value = false;
+        message.info(
+          stageTwoLipSyncRecoverableHint.value ||
+            STAGE_TWO_LIPSYNC_RECOVERABLE_FALLBACK_HINT,
+        );
+        return;
+      }
+      if (status === "failed") {
+        stageTwoLipSyncRunning.value = false;
+        message.error(stageTwoLipSyncError.value);
+        return;
+      }
+      startStageTwoLipSyncPolling(existingTaskId, existingGenerationSeq);
+      return;
+    } catch (e: unknown) {
+      stageTwoLipSyncRunning.value = false;
+      stageTwoLipSyncError.value = describeHttpOrNetworkError(e);
+      message.error(stageTwoLipSyncError.value);
+      return;
+    }
+  }
+
+  stageTwoLipSyncRunning.value = true;
+  stageTwoLipSyncError.value = "";
+  clearStageTwoLipSyncRecoverableState();
+  stageTwoDigitalHumanVideoAssetId.value = "";
+  clearStageTwoReuseState();
+  const projectId = ensureCurrentProjectId();
+  if (!projectId) {
+    stageTwoLipSyncRunning.value = false;
+    return;
+  }
+  const generationSeq = nextStageTwoLipSyncGenerationSeq();
+
+  try {
+    const lipSyncRenderMode = getCurrentStageTwoRenderMode();
+    const shouldForceRetry =
+      stageTwoLipSyncForceRetryPending.value || hasExistingLipSyncResult;
+    const regenerationKey = shouldForceRetry
+      ? buildStageTwoLipSyncRegenerationKey(projectId, lipSyncRenderMode)
+      : undefined;
+    await persistStageTwoStatePatch(
+      {
+        scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+        audioAssetId: audioAssetId.value || null,
+        subtitleTrackId: subtitleTrackId.value || null,
+        avatarResourceId: selectedAvatarId.value || null,
+        renderMode: lipSyncRenderMode,
+        lipsyncTaskId: null,
+        digitalHumanVideoAssetId: null,
+        videoUrl: null,
+      },
+      { silent: true },
+    );
+    const task = await createSmartClipLipSyncTask(projectId, {
+      avatarResourceId: selectedAvatarId.value,
+      audioAssetId: audioAssetId.value,
+      renderMode: lipSyncRenderMode,
+      forceRetry: shouldForceRetry ? true : undefined,
+      idempotencyKey: regenerationKey,
+    });
+    if (generationSeq !== stageTwoLipSyncGenerationSeq.value) return;
+    stageTwoLipSyncForceRetryPending.value = false;
+    if (!bindStageTwoLipSyncTask(task.taskId, generationSeq)) return;
+    stageTwoLipSyncTask.value = task;
+    stageTwoDigitalHumanVideoAssetId.value = task.digitalHumanVideoAssetId || "";
+    await persistStageTwoStatePatch(
+      {
+        scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+        audioAssetId: audioAssetId.value || null,
+        subtitleTrackId: subtitleTrackId.value || null,
+        avatarResourceId: selectedAvatarId.value || null,
+        renderMode: lipSyncRenderMode,
+        lipsyncTaskId: task.taskId || null,
+        digitalHumanVideoAssetId: task.digitalHumanVideoAssetId || null,
+        videoUrl: null,
+      },
+      { silent: true },
+    );
+    if (generationSeq !== stageTwoLipSyncGenerationSeq.value) return;
+    startStageTwoLipSyncPolling(task.taskId, generationSeq);
+  } catch (e: unknown) {
+    stageTwoLipSyncRunning.value = false;
+    stageTwoLipSyncError.value = describeHttpOrNetworkError(e);
+    message.error(stageTwoLipSyncError.value);
+  }
+}
+
 function onProceedFromStepTwo() {
-  const blockReason = stepTwoGenerateBlockReason.value;
+  const blockReason = stepTwoProceedToPackageBlockReason.value;
   if (blockReason) {
     message.warning(blockReason);
     return;
   }
-  syncSmartClipSubtitlesFromFirstStep(true);
+  syncSmartClipSubtitlesFromFirstStep(false);
   activeStep.value = 3;
-  message.success("已带着当前数字人与声音配置进入一键成片。");
+  message.success("第二步完成，已进入第三步打包成片。");
 }
 
 function goToResourceLibrary(tab: "avatars" | "voices" | "subtitle-templates") {
@@ -1710,17 +3838,18 @@ function goPrev() {
 
 function goNext() {
   if (activeStep.value === 1) {
-    ensureStreamingScriptComplete();
+    onUseScriptAndNext();
+    return;
   }
   if (activeStep.value === 2) {
-    const blockReason = stepTwoGenerateBlockReason.value;
+    const blockReason = stepTwoProceedToPackageBlockReason.value;
     if (blockReason) {
       message.warning(blockReason);
       return;
     }
   }
   if (activeStep.value === 2) {
-    syncSmartClipSubtitlesFromFirstStep(true);
+    syncSmartClipSubtitlesFromFirstStep(false);
   }
   if (activeStep.value === 3 && generatedVideoCount.value <= 0) {
     message.warning("请先生成整段对口型视频，再进入自动发布。");
@@ -1827,7 +3956,11 @@ function onUseScriptAndNext() {
     syncPublishCopyFromScript();
   }
   syncSmartClipSubtitlesFromFirstStep(true);
-  activeStep.value = 2;
+  if (getCurrentProjectId()) {
+    activeStep.value = 2;
+    return;
+  }
+  openCreateProjectModal();
 }
 
 async function onRetranscribeFromLocal() {
@@ -1912,8 +4045,159 @@ function resetSmartClipResultState() {
   subtitleWorkflowHint.value = "";
 }
 
+function resetStageTwoWorkflowState() {
+  stopStageTwoLipSyncPolling();
+  subtitleTimelineAbortController?.abort();
+  subtitleTimelineAbortController = null;
+  subtitleTimelineGenerating.value = false;
+  subtitleTrackId.value = "";
+  subtitleTimelineAligned.value = false;
+  subtitleTimelineStatus.value = "idle";
+  subtitleTimelineError.value = "";
+  stageTwoLipSyncTask.value = null;
+  stageTwoLipSyncRunning.value = false;
+  stageTwoDigitalHumanVideoAssetId.value = "";
+  stageTwoLipSyncVideoUrl.value = null;
+  stageTwoLipSyncError.value = "";
+  stageTwoLipSyncPreviewOpen.value = false;
+  clearStageTwoLipSyncRecoverableState();
+  clearStageTwoReuseState();
+}
+
+function openStageTwoLipSyncPreview() {
+  if (projectRestoreLoading.value) {
+    message.warning("任务恢复中，请稍后打开预览");
+    return;
+  }
+  if (!stageTwoLipSyncVideoUrl.value) {
+    message.warning("请先生成数字人口型视频");
+    return;
+  }
+  stageTwoLipSyncPreviewOpen.value = true;
+}
+
+function markStageTwoLipSyncRegenerationIntent() {
+  stageTwoLipSyncRegenerationVersion.value += 1;
+  stageTwoLipSyncForceRetryPending.value = true;
+}
+
+function buildStageTwoLipSyncRegenerationKey(
+  projectId: string,
+  renderMode: StageStateRenderMode,
+) {
+  return buildSaveKey("lipsync-regeneration", {
+    projectId,
+    version: stageTwoLipSyncRegenerationVersion.value,
+    audioAssetId: audioAssetId.value || "",
+    avatarResourceId: selectedAvatarId.value || "",
+    renderMode,
+    scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+  });
+}
+
+function onContinueUsingRestoredStageTwoResult() {
+  if (stageTwoReuseState.value !== "restored") return;
+  stageTwoReuseHint.value = "已继续使用当前口型结果。";
+  message.success("将继续使用当前口型结果。");
+}
+
+function onContinueQueryRecoverableLipSync() {
+  const taskId = stageTwoLipSyncTask.value?.taskId?.trim();
+  if (!taskId) {
+    message.warning("当前没有可继续查询的口型任务。");
+    return;
+  }
+  stageTwoLipSyncError.value = "";
+  stageTwoLipSyncRunning.value = true;
+  startStageTwoLipSyncPolling(taskId, stageTwoLipSyncGenerationSeq.value);
+}
+
+async function onPersistRecoverableLipSyncForLater() {
+  const taskId = stageTwoLipSyncTask.value?.taskId?.trim();
+  if (!taskId) {
+    message.warning("当前没有可恢复的口型任务。");
+    return;
+  }
+  await persistStageTwoStatePatch(
+    {
+      scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+      audioAssetId: audioAssetId.value || null,
+      subtitleTrackId: subtitleTrackId.value || null,
+      avatarResourceId: selectedAvatarId.value || null,
+      renderMode: getCurrentStageTwoRenderMode(),
+      lipsyncTaskId: taskId,
+      digitalHumanVideoAssetId: null,
+      videoUrl: null,
+    },
+    { silent: true },
+  );
+  message.success("已记录当前口型任务，可稍后回到第二步继续查询。");
+}
+
+async function onRegenerateRecoverableLipSync() {
+  clearStageTwoLipSyncResult({
+    reason: "已切换为重新生成，请点击“生成数字人口型视频”。",
+    notify: true,
+    markMismatch: true,
+  });
+  markStageTwoLipSyncRegenerationIntent();
+  await persistStageTwoStatePatch(
+    {
+      scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+      audioAssetId: audioAssetId.value || null,
+      subtitleTrackId: subtitleTrackId.value || null,
+      avatarResourceId: selectedAvatarId.value || null,
+      renderMode: getCurrentStageTwoRenderMode(),
+      lipsyncTaskId: null,
+      digitalHumanVideoAssetId: null,
+      videoUrl: null,
+    },
+    { silent: true },
+  );
+}
+
+async function onRegenerateStageTwoLipSyncFromRestored() {
+  clearStageTwoLipSyncResult({
+    reason: "已切换为重新生成，请点击“生成数字人口型视频”。",
+    notify: true,
+    markMismatch: true,
+  });
+  markStageTwoLipSyncRegenerationIntent();
+  await persistStageTwoStatePatch(
+    {
+      scriptHash: buildScriptFingerprint(getCurrentStageTwoScriptText()),
+      audioAssetId: audioAssetId.value || null,
+      subtitleTrackId: subtitleTrackId.value || null,
+      avatarResourceId: selectedAvatarId.value || null,
+      renderMode: getCurrentStageTwoRenderMode(),
+      lipsyncTaskId: null,
+      digitalHumanVideoAssetId: null,
+      videoUrl: null,
+    },
+    { silent: true },
+  );
+}
+
+function syncSmartClipSubtitleHighlightRanges() {
+  smartClipSubtitles.value = mapHighlightsToSubtitleRanges(
+    smartClipScriptText.value,
+    smartClipSubtitles.value,
+    smartClipHighlights.value,
+  );
+}
+
+function syncSmartClipScriptFromDraft(force = false) {
+  const next = currentWorkflowScript.value;
+  if (!force && next === smartClipScriptText.value) return;
+  smartClipScriptText.value = next;
+  smartClipHighlights.value = mergeHighlightRanges(
+    smartClipHighlights.value,
+    next,
+  );
+}
+
 function buildSmartClipSubtitles(force = false) {
-  const script = currentWorkflowScript.value;
+  const script = smartClipScriptText.value;
   if (
     !force &&
     smartClipSubtitles.value.length > 0 &&
@@ -1940,24 +4224,134 @@ function buildSmartClipSubtitles(force = false) {
       startTime,
       endTime,
       text,
-      highlightRanges: text.length
-        ? [
-            {
-              start: 0,
-              end: Math.min(4, text.length),
-              color: "#FFD94A",
-              fontWeight: 900,
-            },
-          ]
-        : [],
+      highlightRanges: [],
     };
   });
+  syncSmartClipSubtitleHighlightRanges();
   smartClipSubtitleSourceText.value = script;
 }
 
 function syncSmartClipSubtitlesFromFirstStep(force = false) {
   ensureStreamingScriptComplete();
+  syncSmartClipScriptFromDraft(force);
+  syncStepTwoScriptLinesFromScript(force);
   buildSmartClipSubtitles(force);
+}
+
+function normalizeSmartClipSubtitlesForSubmit(
+  subtitles: SmartClipSubtitle[],
+): SmartClipSubtitle[] {
+  return subtitles.map((subtitle, index) => {
+    const rawStart = Number(subtitle.startTime);
+    const startTime = Number.isFinite(rawStart)
+      ? Math.max(0, Number(rawStart.toFixed(2)))
+      : index * 1.2;
+
+    const rawEnd = Number(subtitle.endTime);
+    const normalizedEnd = Number.isFinite(rawEnd)
+      ? Math.max(0, Number(rawEnd.toFixed(2)))
+      : startTime + 1.2;
+    const endTime =
+      normalizedEnd > startTime
+        ? normalizedEnd
+        : Number((startTime + 0.1).toFixed(2));
+
+    const text = typeof subtitle.text === "string" ? subtitle.text : "";
+    const textLength = text.length;
+    const highlightRanges =
+      subtitle.highlightRanges
+        ?.map((range) => {
+          const rangeStart = Number.isFinite(range.start)
+            ? Math.max(0, Math.min(textLength, Math.floor(range.start)))
+            : 0;
+          const rangeEnd = Number.isFinite(range.end)
+            ? Math.max(0, Math.min(textLength, Math.floor(range.end)))
+            : rangeStart;
+          if (rangeEnd <= rangeStart) {
+            return null;
+          }
+          return {
+            ...range,
+            start: rangeStart,
+            end: rangeEnd,
+          };
+        })
+        .filter(
+          (range): range is NonNullable<typeof range> => Boolean(range),
+        ) ?? [];
+
+    return {
+      ...subtitle,
+      startTime,
+      endTime,
+      text,
+      highlightRanges,
+    };
+  });
+}
+
+function onSmartClipSubtitlesChange(value: SmartClipSubtitle[]) {
+  smartClipSubtitles.value = normalizeSmartClipSubtitlesForSubmit(value);
+  subtitleTimelineStatus.value = smartClipSubtitles.value.length ? "ready" : "idle";
+  if (subtitleTimelineStatus.value === "ready") {
+    subtitleTimelineError.value = "";
+  } else {
+    subtitleTimelineAligned.value = false;
+  }
+}
+
+async function syncSubtitleTrackCues(options: { silent?: boolean } = {}) {
+  if (!subtitleTrackId.value) return true;
+  const subtitles = normalizeSmartClipSubtitlesForSubmit(smartClipSubtitles.value);
+  if (!subtitles.length) return true;
+  const saveKey = buildSaveKey("subtitle-cues", {
+    subtitleTrackId: subtitleTrackId.value,
+    subtitles,
+  });
+  if (shouldSkipDuplicateSave(subtitleTrackSaveKeys, saveKey)) return true;
+  const seq = ++subtitleTrackSaveSeq;
+  const controller = new AbortController();
+  markSavePending(subtitleTrackSaveKeys, saveKey);
+  try {
+    const track = await updateSubtitleTrackCues(
+      subtitleTrackId.value,
+      subtitles,
+      { signal: controller.signal },
+    );
+    if (seq !== subtitleTrackSaveSeq || controller.signal.aborted) {
+      clearPendingSaveKey(subtitleTrackSaveKeys, saveKey);
+      return true;
+    }
+    markSaveDone(subtitleTrackSaveKeys, saveKey);
+    subtitleTrackId.value = track.subtitleTrackId;
+    applySubtitleTimelineFromTrack(track);
+    if (track.source === "asr") {
+      subtitleTimelineAligned.value = false;
+      subtitleTimelineStatus.value = "failed";
+      subtitleTimelineError.value = SUBTITLE_SEGMENT_ALIGNMENT_ERROR;
+      return false;
+    }
+    subtitleTimelineStatus.value = track.subtitles.length ? "ready" : "failed";
+    if (subtitleTimelineStatus.value === "ready") {
+      if (!subtitleTimelineAligned.value) {
+        subtitleTimelineAligned.value = true;
+      }
+      subtitleTimelineError.value = "";
+    } else {
+      subtitleTimelineAligned.value = false;
+    }
+    return true;
+  } catch (error: unknown) {
+    clearPendingSaveKey(subtitleTrackSaveKeys, saveKey);
+    if (isAbortError(error)) return true;
+    subtitleTimelineStatus.value = "failed";
+    subtitleTimelineAligned.value = false;
+    subtitleTimelineError.value = describeHttpOrNetworkError(error);
+    if (!options.silent) {
+      message.error(`字幕时间轴保存失败：${subtitleTimelineError.value}`);
+    }
+    return false;
+  }
 }
 
 function toggleSmartClipSubtitleHighlight(subtitle: SmartClipSubtitle) {
@@ -1981,6 +4375,26 @@ function toggleSmartClipSubtitleHighlight(subtitle: SmartClipSubtitle) {
   };
 }
 
+function onSmartClipScriptTextChange(value: string) {
+  const next = value;
+  smartClipScriptText.value = next;
+  draft.manualScriptDraft = next;
+  if (next.trim()) {
+    draft.commitManualScriptToPipeline();
+  }
+  smartClipHighlights.value = mergeHighlightRanges(
+    smartClipHighlights.value,
+    next,
+  );
+  resetVoicePreviewState({ cancelPending: true });
+  buildSmartClipSubtitles(true);
+}
+
+function onSmartClipHighlightsChange(value: ScriptHighlightRange[]) {
+  smartClipHighlights.value = mergeHighlightRanges(value, smartClipScriptText.value);
+  syncSmartClipSubtitleHighlightRanges();
+}
+
 function shuffleSmartClipTitle() {
   const candidates = [
     ["7步让AI写出爆款", "直播话术!"],
@@ -1999,17 +4413,512 @@ function clearSmartClipSubtitles() {
 }
 
 function confirmSmartClipSubtitles() {
-  message.success("字幕已确认，点击立即剪辑即可生成最终成片。");
+  void (async () => {
+    const synced = await syncSubtitleTrackCues();
+    if (!synced) return;
+    await persistSmartClipScriptConfig();
+    message.success("字幕已确认，点击立即剪辑即可生成最终成片。");
+  })();
+}
+
+function mapMarkToTitleAsset(mark: VideoScriptTitleMark): TitleAssetItem {
+  return {
+    markId: mark.id,
+    text: mark.text,
+    templateId: mark.effect.templateId,
+    themeId: mark.effect.themeId,
+    startTime: mark.startTime,
+    endTime: mark.endTime,
+    status: "idle",
+  };
+}
+
+function upsertTitleAssetItem(
+  markId: string,
+  updater: (prev: TitleAssetItem | null) => TitleAssetItem,
+) {
+  const index = smartClipTitleAssets.value.findIndex((item) => item.markId === markId);
+  if (index < 0) {
+    smartClipTitleAssets.value = [...smartClipTitleAssets.value, updater(null)];
+    return;
+  }
+  const next = [...smartClipTitleAssets.value];
+  next[index] = updater(next[index]);
+  smartClipTitleAssets.value = next;
+}
+
+function clearSmartClipTitleAssetPollTimer(markId: string) {
+  const timer = smartClipTitleAssetPollTimers.get(markId);
+  if (timer !== undefined) {
+    window.clearTimeout(timer);
+    smartClipTitleAssetPollTimers.delete(markId);
+  }
+  smartClipTitleAssetPollControllers.get(markId)?.abort();
+  smartClipTitleAssetPollControllers.delete(markId);
+  smartClipTitleAssetPollPending.delete(markId);
+  smartClipTitleAssetPollAttempts.delete(markId);
+  smartClipTitleAssetPollStartedAt.delete(markId);
+}
+
+function clearSmartClipTitleAssetPollTimers() {
+  for (const timer of smartClipTitleAssetPollTimers.values()) {
+    window.clearTimeout(timer);
+  }
+  smartClipTitleAssetPollTimers.clear();
+  for (const controller of smartClipTitleAssetPollControllers.values()) {
+    controller.abort();
+  }
+  smartClipTitleAssetPollControllers.clear();
+  smartClipTitleAssetPollPending.clear();
+  smartClipTitleAssetPollAttempts.clear();
+  smartClipTitleAssetPollStartedAt.clear();
+}
+
+async function persistSmartClipScriptConfig() {
+  const projectId = getCurrentProjectId();
+  if (!projectId) return;
+  const scriptText = smartClipScriptText.value.trim();
+  if (!scriptText || !selectedSubtitleTemplateId.value) return;
+  const payload = {
+    videoId: projectId,
+    scriptText,
+    subtitleTemplateId: selectedSubtitleTemplateId.value,
+    highlights: smartClipHighlights.value.map((item) => ({
+      id: item.id,
+      start: item.start,
+      end: item.end,
+      text: item.text,
+      style: item.style,
+    })),
+  };
+  const saveKey = buildSaveKey("video-script", payload);
+  if (shouldSkipDuplicateSave(videoScriptSaveKeys, saveKey)) return;
+  const seq = ++videoScriptSaveSeq;
+  const controller = new AbortController();
+  markSavePending(videoScriptSaveKeys, saveKey);
+  try {
+    await saveVideoScript({
+      videoId: projectId,
+      scriptText,
+      subtitleTemplateId: selectedSubtitleTemplateId.value,
+      highlights: smartClipHighlights.value.map((item) => ({
+        id: item.id,
+        start: item.start,
+        end: item.end,
+        text: item.text,
+        style: item.style,
+      })),
+    }, { signal: controller.signal });
+    if (seq === videoScriptSaveSeq && !controller.signal.aborted) {
+      markSaveDone(videoScriptSaveKeys, saveKey);
+    } else {
+      clearPendingSaveKey(videoScriptSaveKeys, saveKey);
+    }
+  } catch (error: unknown) {
+    clearPendingSaveKey(videoScriptSaveKeys, saveKey);
+    if (isAbortError(error)) return;
+    message.warning(`保存文案失败：${describeHttpOrNetworkError(error)}`);
+  }
+}
+
+function ensureSelectedSubtitleTemplateAvailable() {
+  const availableIds = new Set(subtitleTemplateItems.value.map((item) => item.id));
+  if (availableIds.has(selectedSubtitleTemplateId.value)) return true;
+  selectedSubtitleTemplateId.value = subtitleTemplateItems.value[0]?.id ?? "";
+  return Boolean(selectedSubtitleTemplateId.value);
+}
+
+async function loadSmartClipScriptConfig(options: { silent?: boolean } = {}) {
+  const projectId = getCurrentProjectId();
+  if (!projectId) return false;
+  try {
+    const response = await getVideoScript(projectId);
+    const data = response?.data;
+    if (!data) return false;
+    const scriptText = (data.scriptText || "").trim();
+    if (scriptText) {
+      smartClipScriptText.value = scriptText;
+      draft.manualScriptDraft = scriptText;
+      draft.commitManualScriptToPipeline();
+    }
+    smartClipHighlights.value = mergeHighlightRanges(
+      (data.highlights ?? []).map((item) => ({
+        id: item.id,
+        start: item.start,
+        end: item.end,
+        text: item.text,
+        style: item.style,
+      })),
+      smartClipScriptText.value,
+    );
+    if (data.subtitleTemplateId) {
+      selectedSubtitleTemplateId.value = data.subtitleTemplateId;
+    }
+    ensureSelectedSubtitleTemplateAvailable();
+    syncSmartClipVisualDefaults(true);
+    buildSmartClipSubtitles(true);
+    return true;
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error) && error.response?.status === 404) return false;
+    if (!options.silent) {
+      message.warning(`读取文案失败：${describeHttpOrNetworkError(error)}`);
+    }
+    return false;
+  }
+}
+
+async function onMarkSmartClipTitle(payload: {
+  start: number;
+  end: number;
+  text: string;
+  templateId: string;
+  themeId: string;
+  position: "center" | "top" | "bottom";
+  duration: number;
+}) {
+  const scriptText = smartClipScriptText.value.trim();
+  if (!scriptText) {
+    message.warning("请先编辑文案");
+    return;
+  }
+  const projectId = ensureCurrentProjectId();
+  if (!projectId) return;
+  try {
+    await persistSmartClipScriptConfig();
+    const response = await markVideoScriptTitle({
+      videoId: projectId,
+      start: payload.start,
+      end: payload.end,
+      text: payload.text,
+      templateId: payload.templateId,
+      themeId: payload.themeId,
+      position: payload.position,
+      duration: payload.duration,
+    });
+    const mark = response.data;
+    upsertTitleAssetItem(mark.id, () => mapMarkToTitleAsset(mark));
+    await onRetrySmartClipTitleAsset(mark.id);
+  } catch (error: unknown) {
+    message.error(describeHttpOrNetworkError(error));
+  }
+}
+
+function startSmartClipTitleAssetPolling(markId: string, taskId: string) {
+  clearSmartClipTitleAssetPollTimer(markId);
+  if (smartClipTitleAssetPollTimers.size >= TITLE_ASSET_POLL_MAX_ACTIVE) {
+    upsertTitleAssetItem(markId, (prev) => ({
+      ...(prev ?? {
+        markId,
+        text: "",
+        templateId: smartClipTitleMarkConfig.value.templateId,
+        themeId: smartClipTitleMarkConfig.value.themeId,
+        startTime: 0,
+        endTime: 0,
+        status: "failed",
+      }),
+      status: "failed",
+      errorMessage: "标题素材轮询数量已达上限，请稍后重试",
+    }));
+    return;
+  }
+  smartClipTitleAssetPollAttempts.set(markId, 0);
+  smartClipTitleAssetPollStartedAt.set(markId, Date.now());
+
+  const pollOnce = async () => {
+    if (smartClipTitleAssetPollPending.has(markId)) return;
+    const attempts = smartClipTitleAssetPollAttempts.get(markId) ?? 0;
+    const startedAt = smartClipTitleAssetPollStartedAt.get(markId) ?? Date.now();
+    if (
+      attempts >= TITLE_ASSET_POLL_MAX_ATTEMPTS ||
+      Date.now() - startedAt >= TITLE_ASSET_POLL_MAX_DURATION_MS
+    ) {
+      clearSmartClipTitleAssetPollTimer(markId);
+      upsertTitleAssetItem(markId, (prev) => ({
+        ...(prev ?? {
+          markId,
+          text: "",
+          templateId: smartClipTitleMarkConfig.value.templateId,
+          themeId: smartClipTitleMarkConfig.value.themeId,
+          startTime: 0,
+          endTime: 0,
+          status: "failed",
+        }),
+        status: "failed",
+        errorMessage: "标题素材轮询超时，请稍后重试",
+      }));
+      return;
+    }
+
+    smartClipTitleAssetPollPending.add(markId);
+    smartClipTitleAssetPollAttempts.set(markId, attempts + 1);
+    const controller = new AbortController();
+    smartClipTitleAssetPollControllers.set(markId, controller);
+    try {
+      const response = await getTitleAssetRenderTask(taskId, {
+        signal: controller.signal,
+      });
+      const task = response.data;
+      if (!task) return;
+      if (task.status === "success" || task.status === "failed") {
+        clearSmartClipTitleAssetPollTimer(markId);
+      }
+      upsertTitleAssetItem(markId, (prev) => ({
+        ...(prev ?? {
+          markId,
+          text: "",
+          templateId: smartClipTitleMarkConfig.value.templateId,
+          themeId: smartClipTitleMarkConfig.value.themeId,
+          startTime: 0,
+          endTime: 0,
+          status: "pending",
+        }),
+        status: task.status,
+        previewUrl: task.previewUrl ?? prev?.previewUrl,
+        errorMessage: task.errorMessage ?? "",
+      }));
+    } catch (error: unknown) {
+      if (isAbortError(error)) return;
+      clearSmartClipTitleAssetPollTimer(markId);
+      upsertTitleAssetItem(markId, (prev) => ({
+        ...(prev ?? {
+          markId,
+          text: "",
+          templateId: smartClipTitleMarkConfig.value.templateId,
+          themeId: smartClipTitleMarkConfig.value.themeId,
+          startTime: 0,
+          endTime: 0,
+          status: "failed",
+        }),
+        status: "failed",
+        errorMessage: describeHttpOrNetworkError(error),
+      }));
+    } finally {
+      if (smartClipTitleAssetPollControllers.get(markId) === controller) {
+        smartClipTitleAssetPollControllers.delete(markId);
+      }
+      smartClipTitleAssetPollPending.delete(markId);
+    }
+    if (!smartClipTitleAssetPollTimers.has(markId)) return;
+    const timer = window.setTimeout(pollOnce, TITLE_ASSET_POLL_INTERVAL_MS);
+    smartClipTitleAssetPollTimers.set(markId, timer);
+  };
+
+  const timer = window.setTimeout(pollOnce, 0);
+  smartClipTitleAssetPollTimers.set(markId, timer);
+}
+
+async function onRetrySmartClipTitleAsset(markId: string) {
+  const projectId = ensureCurrentProjectId();
+  if (!projectId) return;
+  try {
+    upsertTitleAssetItem(markId, (prev) => ({
+      ...(prev ?? {
+        markId,
+        text: "",
+        templateId: smartClipTitleMarkConfig.value.templateId,
+        themeId: smartClipTitleMarkConfig.value.themeId,
+        startTime: 0,
+        endTime: 0,
+        status: "pending",
+      }),
+      status: "pending",
+      errorMessage: "",
+    }));
+    const response = await createTitleAssetRenderTask({
+      videoId: projectId,
+      markId,
+    });
+    const task = response.data;
+    if (!task?.taskId) return;
+    startSmartClipTitleAssetPolling(markId, task.taskId);
+  } catch (error: unknown) {
+    upsertTitleAssetItem(markId, (prev) => ({
+      ...(prev ?? {
+        markId,
+        text: "",
+        templateId: smartClipTitleMarkConfig.value.templateId,
+        themeId: smartClipTitleMarkConfig.value.themeId,
+        startTime: 0,
+        endTime: 0,
+        status: "failed",
+      }),
+      status: "failed",
+      errorMessage: describeHttpOrNetworkError(error),
+    }));
+    message.error(describeHttpOrNetworkError(error));
+  }
+}
+
+function onRemoveSmartClipTitleMark(markId: string) {
+  clearSmartClipTitleAssetPollTimer(markId);
+  smartClipTitleAssets.value = smartClipTitleAssets.value.filter(
+    (item) => item.markId !== markId,
+  );
+}
+
+function isSameColor(left: string, right: string) {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function syncSmartClipVisualDefaults(force = false) {
+  const colorStyle = selectedSubtitleTemplateResolvedStyle.value;
+  const nextSubtitleDefault = createDefaultSubtitleVisualStyle(colorStyle);
+  const nextTitleDefault = createDefaultTitleLayout(
+    smartClipTitleMarkConfig.value.position,
+  );
+  smartClipDefaultSubtitleVisualStyle.value = nextSubtitleDefault;
+  smartClipDefaultTitleLayout.value = nextTitleDefault;
+
+  if (force || !smartClipVisualCustomization.value.colorsCustomized) {
+    smartClipSubtitleVisualStyle.value = {
+      ...smartClipSubtitleVisualStyle.value,
+      normalColor: nextSubtitleDefault.normalColor,
+      highlightColor: nextSubtitleDefault.highlightColor,
+      strokeColor: nextSubtitleDefault.strokeColor,
+      shadowColor: nextSubtitleDefault.shadowColor,
+    };
+  }
+
+  if (force || !smartClipVisualCustomization.value.subtitlePositionCustomized) {
+    smartClipSubtitleVisualStyle.value = {
+      ...smartClipSubtitleVisualStyle.value,
+      xPct: nextSubtitleDefault.xPct,
+      yPct: nextSubtitleDefault.yPct,
+      anchor: nextSubtitleDefault.anchor,
+    };
+  }
+
+  if (force || !smartClipVisualCustomization.value.titleLayoutCustomized) {
+    smartClipTitleLayout.value = {
+      ...nextTitleDefault,
+      preset: smartClipTitleMarkConfig.value.position,
+    };
+  }
+}
+
+function onSubtitleVisualStyleChange(value: SubtitleVisualStyle) {
+  const next: SubtitleVisualStyle = {
+    ...value,
+    xPct: Number.isFinite(value.xPct) ? Number(value.xPct.toFixed(2)) : 50,
+    yPct: Number.isFinite(value.yPct) ? Number(value.yPct.toFixed(2)) : 86,
+    anchor: isAnchor(value.anchor) ? value.anchor : "bottom-center",
+  };
+  smartClipSubtitleVisualStyle.value = next;
+  const defaults = smartClipDefaultSubtitleVisualStyle.value;
+  smartClipVisualCustomization.value = {
+    ...smartClipVisualCustomization.value,
+    colorsCustomized:
+      !isSameColor(next.normalColor, defaults.normalColor) ||
+      !isSameColor(next.highlightColor, defaults.highlightColor) ||
+      !isSameColor(next.strokeColor, defaults.strokeColor) ||
+      !isSameColor(next.shadowColor, defaults.shadowColor),
+    subtitlePositionCustomized:
+      Math.abs(next.xPct - defaults.xPct) > 0.01 ||
+      Math.abs(next.yPct - defaults.yPct) > 0.01 ||
+      next.anchor !== defaults.anchor,
+  };
+}
+
+function onTitleLayoutChange(value: TitleLayout) {
+  const next: TitleLayout = {
+    ...value,
+    mode: value.mode === "custom" ? "custom" : "preset",
+    preset:
+      value.preset === "top" || value.preset === "bottom"
+        ? value.preset
+        : "center",
+    xPct: Number.isFinite(value.xPct) ? Number(value.xPct.toFixed(2)) : 50,
+    yPct: Number.isFinite(value.yPct) ? Number(value.yPct.toFixed(2)) : 50,
+    anchor: isAnchor(value.anchor) ? value.anchor : "center",
+    scale: Number.isFinite(value.scale)
+      ? Math.max(0.8, Math.min(1.4, Number(value.scale.toFixed(2))))
+      : 1,
+  };
+  smartClipTitleLayout.value = next;
+  const defaults = smartClipDefaultTitleLayout.value;
+  smartClipVisualCustomization.value = {
+    ...smartClipVisualCustomization.value,
+    titleLayoutCustomized:
+      next.mode === "custom" ||
+      next.preset !== defaults.preset ||
+      Math.abs(next.xPct - defaults.xPct) > 0.01 ||
+      Math.abs(next.yPct - defaults.yPct) > 0.01 ||
+      next.anchor !== defaults.anchor ||
+      Math.abs(next.scale - defaults.scale) > 0.01,
+  };
+}
+
+function onSelectSmartClipSubtitleTemplate(templateId: string) {
+  selectedSubtitleTemplateId.value = templateId;
+  const template =
+    subtitleTemplateItems.value.find((item) => item.id === templateId) ?? null;
+  selectedSubtitleTemplateAspectRatio.value = template?.aspectRatio ?? "9:16";
+  if (template?.styleConfig) {
+    const mapped = mapTemplateStyleConfigToVisual(
+      template.styleConfig,
+      smartClipDefaultSubtitleVisualStyle.value,
+      smartClipDefaultTitleLayout.value,
+    );
+    onSubtitleVisualStyleChange(mapped.subtitleVisualStyle);
+    onTitleLayoutChange(mapped.titleLayout);
+  }
+  syncSmartClipVisualDefaults();
+  void persistSmartClipScriptConfig();
+}
+
+async function onCopySubtitleTemplate(payload: {
+  templateId: string;
+  baseName: string;
+}) {
+  try {
+    const created = await copySubtitleTemplateResourceWithName(
+      payload.templateId,
+      `${payload.baseName} - 复制`,
+    );
+    await loadRenderResources();
+    onSelectSmartClipSubtitleTemplate(created.id);
+    message.success("模板已复制到“我的模板”，可继续编辑");
+  } catch (error: unknown) {
+    message.error(describeHttpOrNetworkError(error));
+  }
+}
+
+async function onSaveSubtitleTemplateStyle(payload: {
+  templateId: string;
+  aspectRatio: SubtitleTemplateAspectRatio;
+  styleConfig: SubtitleTemplateStyleConfig;
+  subtitleVisualStyle: SubtitleVisualStyle;
+  titleLayout: TitleLayout;
+}) {
+  try {
+    const currentTemplate =
+      subtitleTemplateItems.value.find((item) => item.id === payload.templateId) ??
+      null;
+    await updateSubtitleTemplateResource(payload.templateId, {
+      name: currentTemplate?.name,
+      aspectRatio: payload.aspectRatio,
+      styleConfig: payload.styleConfig,
+    });
+    selectedSubtitleTemplateAspectRatio.value = payload.aspectRatio;
+    onSubtitleVisualStyleChange(payload.subtitleVisualStyle);
+    onTitleLayoutChange(payload.titleLayout);
+    await loadRenderResources();
+    message.success("模板样式已保存");
+  } catch (error: unknown) {
+    message.error(describeHttpOrNetworkError(error));
+  }
 }
 
 async function onDetectSmartClipCutPoints(options: { silent?: boolean } = {}) {
+  const projectId = ensureCurrentProjectId();
+  if (!projectId) return false;
   if (!selectedAvatarId.value) {
     message.warning("请先选择数字人视频");
     return false;
   }
   smartClipCutDetecting.value = true;
   try {
-    const data = await detectSmartClipCutPoints("studio-current", {
+    const data = await detectSmartClipCutPoints(projectId, {
       mode: smartClipCutMode.value,
       config: smartClipCutConfigs[smartClipCutMode.value],
       avatarResourceId: selectedAvatarId.value,
@@ -2061,67 +4970,209 @@ function onApplySmartClipCutSuggestions() {
 }
 
 function clearSmartClipPollTimer() {
+  smartClipPollSeq += 1;
   if (smartClipPollTimer !== null) {
-    window.clearInterval(smartClipPollTimer);
+    window.clearTimeout(smartClipPollTimer);
     smartClipPollTimer = null;
   }
+  smartClipPollAbortController?.abort();
+  smartClipPollAbortController = null;
+  smartClipActiveTaskId = "";
+  smartClipPollAttempts = 0;
+  smartClipPollStartedAt = 0;
+  smartClipPollPending = false;
 }
 
-async function refreshSmartClipRenderTask(taskId: string) {
-  const task = await getSmartClipRenderTask(taskId);
+function isSmartClipRenderTaskStale(
+  task: SmartClipRenderTask,
+  expectedTaskId: string,
+  seq?: number,
+) {
+  const normalizedExpectedTaskId = expectedTaskId.trim();
+  const responseTaskId = task.taskId?.trim() ?? "";
+  if (typeof seq === "number" && seq !== smartClipPollSeq) return true;
+  if (
+    smartClipActiveTaskId &&
+    normalizedExpectedTaskId &&
+    smartClipActiveTaskId !== normalizedExpectedTaskId
+  ) {
+    return true;
+  }
+  if (normalizedExpectedTaskId && responseTaskId && normalizedExpectedTaskId !== responseTaskId) {
+    return true;
+  }
+  return false;
+}
+
+async function refreshSmartClipRenderTask(
+  taskId: string,
+  opts?: { signal?: AbortSignal; seq?: number },
+) {
+  const task = await getSmartClipRenderTask(taskId, opts);
+  if (isSmartClipRenderTaskStale(task, taskId, opts?.seq)) {
+    return "stale" as const;
+  }
   smartClipRenderTask.value = task;
   if (task.status === "completed" && task.outputUrl) {
     clearSmartClipPollTimer();
     smartClipRendering.value = false;
-    subtitleWorkflowFinalUrl.value = await resolveGeneratedPreviewVideoUrl(
+    smartClipSubmitLocked.value = false;
+    const resolvedFinalVideoUrl = await resolveGeneratedPreviewVideoUrl(
       task.outputUrl,
     );
+    if (isSmartClipRenderTaskStale(task, taskId)) {
+      return "stale" as const;
+    }
+    subtitleWorkflowFinalUrl.value = resolvedFinalVideoUrl;
     subtitleWorkflowHint.value = "成片已生成，可以下载使用";
     message.success("成片已生成，可以下载使用。");
+    return "completed" as const;
   } else if (task.status === "failed") {
     clearSmartClipPollTimer();
     smartClipRendering.value = false;
+    smartClipSubmitLocked.value = false;
     subtitleWorkflowHint.value = task.error || "生成失败，请重新生成";
+    message.error(subtitleWorkflowHint.value);
+    return "failed" as const;
+  }
+  return "pending" as const;
+}
+
+async function refreshFinalVideoPlaybackUrl() {
+  const taskId = smartClipRenderTask.value?.taskId?.trim();
+  if (!taskId) {
+    message.warning("暂无可刷新的播放任务，请重新生成视频");
+    return;
+  }
+  try {
+    subtitleWorkflowHint.value = "正在刷新播放链接...";
+    await refreshSmartClipRenderTask(taskId);
+  } catch (e: unknown) {
+    subtitleWorkflowHint.value = describeHttpOrNetworkError(e);
     message.error(subtitleWorkflowHint.value);
   }
 }
 
 function startSmartClipTaskPolling(taskId: string) {
   clearSmartClipPollTimer();
-  smartClipPollTimer = window.setInterval(() => {
-    void refreshSmartClipRenderTask(taskId).catch((e: unknown) => {
+  const expectedTaskId = taskId.trim();
+  if (!expectedTaskId) return;
+  smartClipActiveTaskId = expectedTaskId;
+  const seq = smartClipPollSeq;
+  smartClipPollStartedAt = Date.now();
+
+  const pollOnce = async () => {
+    if (
+      smartClipPollPending ||
+      seq !== smartClipPollSeq ||
+      smartClipActiveTaskId !== expectedTaskId
+    ) {
+      return;
+    }
+
+    const elapsed = Date.now() - smartClipPollStartedAt;
+    if (
+      smartClipPollAttempts >= SMART_CLIP_POLL_MAX_ATTEMPTS ||
+      elapsed >= SMART_CLIP_POLL_MAX_DURATION_MS
+    ) {
+      clearSmartClipPollTimer();
+      smartClipRendering.value = false;
+      smartClipSubmitLocked.value = false;
+      subtitleWorkflowHint.value = "Render polling timed out. Check the task later or retry.";
+      message.warning(subtitleWorkflowHint.value);
+      return;
+    }
+
+    smartClipPollPending = true;
+    smartClipPollAttempts += 1;
+    smartClipPollAbortController?.abort();
+    const controller = new AbortController();
+    smartClipPollAbortController = controller;
+
+    try {
+      const status = await refreshSmartClipRenderTask(expectedTaskId, {
+        signal: controller.signal,
+        seq,
+      });
+      if (status === "completed" || status === "failed" || status === "stale") {
+        return;
+      }
+    } catch (e: unknown) {
+      if (seq !== smartClipPollSeq || isAbortError(e)) return;
       subtitleWorkflowHint.value = describeHttpOrNetworkError(e);
-    });
-  }, 2500);
+    } finally {
+      if (smartClipPollAbortController === controller) {
+        smartClipPollAbortController = null;
+      }
+      smartClipPollPending = false;
+    }
+
+    if (
+      seq !== smartClipPollSeq ||
+      smartClipActiveTaskId !== expectedTaskId ||
+      !smartClipRendering.value
+    ) {
+      return;
+    }
+    smartClipPollTimer = window.setTimeout(pollOnce, SMART_CLIP_POLL_INTERVAL_MS);
+  };
+
+  void pollOnce();
 }
 
 async function onRenderSmartClipFinal() {
+  if (
+    smartClipSubmitLocked.value ||
+    smartClipRendering.value ||
+    smartClipRenderTask.value?.status === "pending" ||
+    smartClipRenderTask.value?.status === "processing"
+  ) {
+    if (smartClipRenderTask.value?.taskId) {
+      startSmartClipTaskPolling(smartClipRenderTask.value.taskId);
+    }
+    message.warning("正在生成中，请勿重复提交");
+    return;
+  }
+  smartClipSubmitLocked.value = true;
+  try {
   ensureStreamingScriptComplete();
+  syncSmartClipScriptFromDraft(true);
   buildSmartClipSubtitles(true);
   const setupBlockReason = smartClipRenderBlockReason.value;
   if (setupBlockReason) {
     message.warning(setupBlockReason);
+    smartClipSubmitLocked.value = false;
     return;
   }
-  const script = currentWorkflowScript.value;
+  const script = smartClipScriptText.value.trim();
   if (!script) {
+    smartClipSubmitLocked.value = false;
     message.warning("请先在第一步整理好口播文案");
     return;
   }
   if (!selectedAvatarId.value) {
+    smartClipSubmitLocked.value = false;
     message.warning("请先选择数字人视频");
     return;
   }
-  if (!selectedVoiceId.value) {
-    message.warning("请先选择配音音色");
-    return;
-  }
   if (!selectedSubtitleTemplateId.value) {
+    smartClipSubmitLocked.value = false;
     message.warning("请先选择字幕模板");
     return;
   }
   if (!smartClipSubtitles.value.length) {
+    smartClipSubmitLocked.value = false;
     message.warning("字幕列表为空，请先确认文案");
+    return;
+  }
+
+  const subtitlesPayload = normalizeSmartClipSubtitlesForSubmit(
+    smartClipSubtitles.value,
+  );
+  smartClipSubtitles.value = subtitlesPayload;
+  if (!subtitlesPayload.length) {
+    smartClipSubmitLocked.value = false;
+    message.warning("请先生成字幕并调整时间轴后再开始剪辑");
     return;
   }
 
@@ -2138,50 +5189,64 @@ async function onRenderSmartClipFinal() {
   revokeGeneratedPreviewObjectUrls();
 
   try {
-    const task = await renderSmartClipFinal("studio-current", {
-      script,
-      avatarResourceId: selectedAvatarId.value,
-      voiceResourceId: selectedVoiceId.value,
+    await persistSmartClipScriptConfig();
+    const synced = await syncSubtitleTrackCues();
+    if (!synced) {
+      smartClipRendering.value = false;
+      smartClipSubmitLocked.value = false;
+      return;
+    }
+    if (!audioAssetId.value || !stageTwoDigitalHumanVideoAssetId.value) {
+      smartClipRendering.value = false;
+      smartClipSubmitLocked.value = false;
+      message.warning("音频或数字人视频资产未就绪，请先完成第二步流程");
+      return;
+    }
+    const projectId = ensureCurrentProjectId();
+    if (!projectId) {
+      smartClipRendering.value = false;
+      smartClipSubmitLocked.value = false;
+      return;
+    }
+    const task = await createSmartClipPackageRenderTask(projectId, {
+      digitalHumanVideoAssetId: stageTwoDigitalHumanVideoAssetId.value,
+      audioAssetId: audioAssetId.value,
+      subtitleTrackId: subtitleTrackId.value || undefined,
+      includeTitleAssets: smartClipIncludeTitleAssets.value,
       subtitleTemplateId: selectedSubtitleTemplateId.value,
-      subtitles: smartClipSubtitles.value,
-      cutConfig: {
-        enabled: smartClipCutBreathEnabled.value,
-        mode: smartClipCutMode.value,
-        config: smartClipCutConfigs[smartClipCutMode.value],
-        cutPoints: smartClipCutPoints.value,
-      },
-      backgroundMusic: {
-        enabled: smartClipBackgroundMusicEnabled.value,
-        musicId: smartClipBackgroundMusicId.value,
-        volume: smartClipBackgroundMusicVolume.value,
-      },
-      pipMaterials: {
-        enabled: smartClipPipEnabled.value,
-        items: [],
-      },
+      subtitleVisualStyle: smartClipSubtitleVisualStyle.value,
+      titleLayout: smartClipTitleLayout.value,
       renderOptions: {
-        resolution:
-          renderResolutionChoice.value === "2k" ? "1440x2560" : "1080x1920",
-        format: "mp4",
         burnSubtitles: smartClipTextSubtitlesEnabled.value,
+        renderMode: mapAspectRatioToRenderMode(
+          selectedSubtitleTemplateAspectRatioResolved.value,
+        ),
       },
-      ...buildVoiceTuningPayload(),
     });
     smartClipRenderTask.value = task;
     startSmartClipTaskPolling(task.taskId);
-    await refreshSmartClipRenderTask(task.taskId);
   } catch (e: unknown) {
+    clearSmartClipPollTimer();
     smartClipRendering.value = false;
+    smartClipSubmitLocked.value = false;
     subtitleWorkflowHint.value = describeHttpOrNetworkError(e);
     message.error(subtitleWorkflowHint.value);
+  }
+  } finally {
+    if (!smartClipRendering.value) {
+      smartClipSubmitLocked.value = false;
+    }
   }
 }
 
 async function onGenerateSubtitlePreview() {
-  await onDetectSmartClipCutPoints();
-  return;
+  if (smartClipCutBreathEnabled.value && !smartClipCutPoints.value.length) {
+    await onDetectSmartClipCutPoints({ silent: true });
+  }
   ensureStreamingScriptComplete();
-  const script = currentWorkflowScript.value;
+  syncSmartClipScriptFromDraft(true);
+  buildSmartClipSubtitles(true);
+  const script = smartClipScriptText.value.trim() || currentWorkflowScript.value;
   if (!script) {
     message.warning(
       rawWorkflowScript.value
@@ -2196,6 +5261,15 @@ async function onGenerateSubtitlePreview() {
   }
   if (!selectedVoiceId.value) {
     message.warning("请先选择一个配音音色");
+    return;
+  }
+
+  const subtitlesPayload = normalizeSmartClipSubtitlesForSubmit(
+    smartClipSubtitles.value,
+  );
+  smartClipSubtitles.value = subtitlesPayload;
+  if (!subtitlesPayload.length) {
+    message.warning("请先生成字幕并调整时间轴");
     return;
   }
 
@@ -2214,6 +5288,9 @@ async function onGenerateSubtitlePreview() {
       avatarResourceId: selectedAvatarId.value,
       voiceResourceId: selectedVoiceId.value,
       subtitleTemplateId: selectedSubtitleTemplateId.value || undefined,
+      subtitles: subtitlesPayload,
+      subtitleVisualStyle: smartClipSubtitleVisualStyle.value,
+      titleLayout: smartClipTitleLayout.value,
       subtitlesEnabled: false,
       previewSeconds: 5,
       ...buildVoiceTuningPayload(),
@@ -2264,6 +5341,32 @@ async function onFinalizeSubtitleWorkflow() {
 }
 
 watch(
+  () => route.query.projectId,
+  (value, previous) => {
+    const nextProjectId = normalizeProjectId(value);
+    const prevProjectId = normalizeProjectId(previous);
+    if (nextProjectId === prevProjectId && nextProjectId === activeProjectId.value) {
+      return;
+    }
+    activeProjectId.value = nextProjectId;
+    if (!nextProjectId) {
+      cancelProjectRestoreRequest();
+      clearProjectRestoreStatus();
+      resetProjectScopedState();
+      activeStep.value = 1;
+      if (prevProjectId) {
+        draft.manualScriptDraft = "";
+        smartClipScriptText.value = "";
+        smartClipHighlights.value = [];
+      }
+      return;
+    }
+    void restoreProjectContextFromRoute(nextProjectId, { silent: true });
+  },
+  { immediate: true },
+);
+
+watch(
   () => route.query.avatarId,
   (value) => {
     const next = typeof value === "string" ? value.trim() : "";
@@ -2287,6 +5390,10 @@ watch(
 watch(
   () => currentWorkflowScript.value,
   () => {
+    cancelStageTwoRestoreRequest();
+    syncSmartClipScriptFromDraft(true);
+    syncStepTwoScriptLinesFromScript(true);
+    resetVoicePreviewState({ cancelPending: true });
     buildSmartClipSubtitles(true);
     resetSmartClipResultState();
   },
@@ -2295,9 +5402,48 @@ watch(
 watch(
   () => activeStep.value,
   (step) => {
+    if (step !== 2) {
+      cancelVoicePreviewStage();
+      subtitleTimelineAbortController?.abort();
+      subtitleTimelineAbortController = null;
+      subtitleTimelineGenerating.value = false;
+      stopStageTwoLipSyncPolling();
+    }
+    if (step !== 3) {
+      clearSmartClipPollTimer();
+    }
     if (step === 3) {
       syncSmartClipSubtitlesFromFirstStep();
+      void persistSmartClipScriptConfig();
     }
+    if (step === 2) {
+      syncStepTwoScriptLinesFromScript();
+      scheduleStageTwoRestore({ silent: true, notifyOnMismatch: true });
+    }
+  },
+);
+
+watch(
+  () => stageTwoLipSyncVideoUrl.value,
+  (url) => {
+    if (!url) {
+      stageTwoLipSyncPreviewOpen.value = false;
+    }
+  },
+);
+
+watch(
+  () => selectedSubtitleTemplateResolvedStyle.value,
+  () => {
+    syncSmartClipVisualDefaults();
+  },
+  { deep: true },
+);
+
+watch(
+  () => smartClipTitleMarkConfig.value.position,
+  () => {
+    syncSmartClipVisualDefaults();
   },
 );
 
@@ -2325,8 +5471,67 @@ watch(
     () => selectedVoicePower.value,
     () => selectedVoiceRate.value,
     () => selectedVoiceVolume.value,
+    () => selectedVoicePitch.value,
   ],
-  () => resetVoicePreviewState(),
+  () => {
+    cancelStageTwoRestoreRequest();
+    resetVoicePreviewState({ cancelPending: true });
+  },
+);
+
+watch(
+  [
+    () => currentWorkflowScript.value,
+    () => audioAssetId.value,
+  ],
+  () => {
+    if (stageTwoRestoreDebounceTimer !== null) {
+      cancelStageTwoRestoreRequest();
+    }
+    clearStageTwoLipSyncResultForInputChange({ notify: activeStep.value === 2 });
+  },
+);
+
+watch(
+  () => selectedAvatarId.value,
+  (nextId, prevId) => {
+    if (nextId === prevId) return;
+    if (projectRestoreLoading.value || stageTwoRestoreLoading.value) return;
+    if (!getCurrentProjectId()) return;
+
+    const hasExistingLipSyncState = Boolean(
+      stageTwoLipSyncTask.value ||
+        stageTwoDigitalHumanVideoAssetId.value ||
+        stageTwoLipSyncVideoUrl.value,
+    );
+    if (hasExistingLipSyncState) {
+      clearStageTwoLipSyncResult({
+        reason:
+          "当前数字人已变更，已清空旧口型结果，请重新生成。",
+        notify: activeStep.value === 2,
+        markMismatch: true,
+      });
+    } else {
+      stopStageTwoLipSyncPolling();
+      stageTwoLipSyncTask.value = null;
+      stageTwoLipSyncRunning.value = false;
+      stageTwoDigitalHumanVideoAssetId.value = "";
+      stageTwoLipSyncVideoUrl.value = null;
+      stageTwoLipSyncPreviewOpen.value = false;
+      clearStageTwoReuseState();
+    }
+
+    persistStageTwoStateForAvatarChange();
+  },
+);
+
+watch(
+  [() => renderModelChoice.value, () => renderResolutionChoice.value],
+  () => {
+    if (projectRestoreLoading.value || stageTwoRestoreLoading.value) return;
+    if (!getCurrentProjectId()) return;
+    persistStageTwoStateForAvatarChange();
+  },
 );
 
 watch(
@@ -2339,18 +5544,40 @@ watch(
 onMounted(() => {
   void loadRecentExtractionRecords();
   clearInternalPipelineScriptDraft();
-  void loadRenderResources();
+  void (async () => {
+    await loadRenderResources();
+  })();
   void refreshDyCookieStatus();
   void refreshPipelineHealth();
   syncPublishCopyFromScript(true);
+  syncSmartClipScriptFromDraft(true);
+  syncStepTwoScriptLinesFromScript(true);
   buildSmartClipSubtitles(true);
+  syncSmartClipVisualDefaults(true);
+});
+
+onBeforeRouteLeave(() => {
+  cancelStageStateSaveQueue();
+  cancelProjectRestoreRequest();
+  cancelStageTwoRestoreRequest();
+  cancelVoicePreviewStage();
+  subtitleTimelineAbortController?.abort();
+  subtitleTimelineAbortController = null;
+  clearSmartClipPollTimer();
+  stopStageTwoLipSyncPolling();
+  clearSmartClipTitleAssetPollTimers();
 });
 
 onUnmounted(() => {
+  cancelStageStateSaveQueue();
+  cancelProjectRestoreRequest();
+  cancelStageTwoRestoreRequest();
+  cancelVoicePreviewStage();
+  subtitleTimelineAbortController?.abort();
+  subtitleTimelineAbortController = null;
   clearSmartClipPollTimer();
-  clearVoicePreviewProgress();
-  clearVoicePreviewPolling();
-  voicePreviewRequestSeq += 1;
+  stopStageTwoLipSyncPolling();
+  clearSmartClipTitleAssetPollTimers();
   cancelStream();
   revokeGeneratedPreviewObjectUrls();
   clearAvatarCoverVideoUrls();
@@ -2381,6 +5608,33 @@ onUnmounted(() => {
         <n-text depth="3">{{ steps[activeStep - 1]?.desc }}</n-text>
       </div>
     </header>
+    <section
+      v-if="getCurrentProjectId() && (projectRestoreLoading || projectRestoreError || projectRestoreHint)"
+      class="project-restore-banner"
+    >
+      <n-alert
+        v-if="projectRestoreLoading"
+        type="info"
+        :show-icon="false"
+      >
+        正在恢复任务内容，请稍候...
+      </n-alert>
+      <n-alert
+        v-else-if="projectRestoreError"
+        type="error"
+        :show-icon="false"
+      >
+        <div class="project-restore-banner__error">
+          <span>恢复失败：{{ projectRestoreError }}</span>
+          <n-button tertiary size="small" type="primary" @click="retryRestoreProjectContext">
+            重试
+          </n-button>
+        </div>
+      </n-alert>
+      <n-alert v-else type="success" :show-icon="false">
+        {{ projectRestoreHint }}
+      </n-alert>
+    </section>
 
     <Transition name="step-switch" mode="out-in">
       <section v-if="activeStep === 1" key="step-1" class="create-layout">
@@ -2843,7 +6097,7 @@ onUnmounted(() => {
                 v-model:value="draft.manualScriptDraft"
                 type="textarea"
                 class="outline-editor"
-                :autosize="{ minRows: 8, maxRows: 8 }"
+                :autosize="{ minRows: 12, maxRows: 16 }"
                 :maxlength="50000"
                 placeholder="在这里整理、改写并确认你要驱动配音的视频文案…"
                 @click="interruptStreamWithFullText"
@@ -2966,8 +6220,8 @@ onUnmounted(() => {
               </div>
               <n-tag size="small" :bordered="false" type="info">
                 {{
-                  extractedScriptLines.length
-                    ? `${extractedScriptLines.length} 段`
+                  stepTwoEditableScriptLines.length
+                    ? `${stepTwoEditableScriptLines.length} 段`
                     : "等待文案"
                 }}
               </n-tag>
@@ -2979,18 +6233,45 @@ onUnmounted(() => {
             </div>
 
             <div
-              v-if="extractedScriptLines.length"
+              v-if="stepTwoEditableScriptLines.length"
               class="step-two-script-frame"
             >
               <div class="step-two-script-scroll">
                 <ol class="step-two-script-list">
                   <li
-                    v-for="(line, idx) in extractedScriptLines"
+                    v-for="(line, idx) in stepTwoEditableScriptLines"
                     :key="`${idx}-${line}`"
                     class="step-two-script-line"
                   >
                     <span>{{ String(idx + 1).padStart(2, "0") }}</span>
-                    <p>{{ line }}</p>
+                    <textarea
+                      class="step-two-script-line__textarea"
+                      :value="line"
+                      rows="1"
+                      placeholder="可编辑当前分段文案"
+                      @input="onEditStepTwoScriptLine(idx, $event)"
+                    />
+                    <div class="step-two-script-line__actions">
+                      <button
+                        type="button"
+                        class="step-two-script-line__action"
+                        title="在下一行插入新分段"
+                        aria-label="在下一行插入新分段"
+                        @click="onInsertStepTwoScriptLine(idx)"
+                      >
+                        +
+                      </button>
+                      <button
+                        type="button"
+                        class="step-two-script-line__action step-two-script-line__action--danger"
+                        title="删除当前分段"
+                        aria-label="删除当前分段"
+                        :disabled="stepTwoEditableScriptLines.length <= 1"
+                        @click="onRemoveStepTwoScriptLine(idx)"
+                      >
+                        -
+                      </button>
+                    </div>
                   </li>
                 </ol>
               </div>
@@ -3091,7 +6372,7 @@ onUnmounted(() => {
                     <span>选择音色</span>
                     <div class="step-two-control-card__main">
                       <button
-                        v-if="selectedVoiceResource?.audioUrl"
+                        v-if="hasVoiceSampleForPreview(selectedVoiceResource)"
                         type="button"
                         class="voice-sample-play"
                         @click="
@@ -3117,11 +6398,7 @@ onUnmounted(() => {
                         placeholder="选择一个克隆音色"
                       />
                     </div>
-                    <small>{{
-                      selectedVoiceResource?.owner === "mine"
-                        ? "我的克隆音色"
-                        : "推荐音色"
-                    }}</small>
+                    <small>{{ voiceSelectHelperText }}</small>
                   </article>
 
                   <article class="step-two-control-card">
@@ -3188,6 +6465,18 @@ onUnmounted(() => {
                       :step="0.01"
                     />
                   </article>
+                  <article class="step-two-slider-card">
+                    <div class="step-two-slider-card__head">
+                      <span>音调调节</span>
+                      <strong>{{ selectedVoicePitch.toFixed(2) }}</strong>
+                    </div>
+                    <n-slider
+                      v-model:value="selectedVoicePitch"
+                      :min="0.5"
+                      :max="1.5"
+                      :step="0.01"
+                    />
+                  </article>
                 </div>
 
                 <n-alert
@@ -3219,6 +6508,15 @@ onUnmounted(() => {
                 >
                   {{ voicePreviewLoading ? "正在生成音频..." : "生成音频" }}
                 </button>
+
+                <n-alert
+                  v-if="voicePreviewError"
+                  class="step-two-inline-alert"
+                  type="error"
+                  :show-icon="false"
+                >
+                  {{ voicePreviewError }}
+                </n-alert>
 
                 <Transition name="voice-progress">
                   <article
@@ -3351,7 +6649,7 @@ onUnmounted(() => {
                   quaternary
                   type="primary"
                   size="small"
-                  @click="onProceedFromStepTwo"
+                  @click="onGenerateStepTwoLipSync"
                 >
                   口型绑定
                 </n-button>
@@ -3512,6 +6810,14 @@ onUnmounted(() => {
                   <span>已选声音</span>
                   <strong>{{ selectedVoiceLabel }}</strong>
                 </div>
+                <div class="summary-pill">
+                  <span>音频时长</span>
+                  <strong>{{ stageTwoAudioDurationLabel }}</strong>
+                </div>
+                <div class="summary-pill" :title="stageTwoAudioScriptPreviewLabel">
+                  <span>来源文案</span>
+                  <strong>{{ stageTwoAudioScriptPreviewLabel }}</strong>
+                </div>
               </div>
 
               <n-alert
@@ -3523,14 +6829,180 @@ onUnmounted(() => {
                 {{ stepTwoGenerateBlockReason }}
               </n-alert>
 
+              <div class="stage-flow-card">
+                <div class="stage-flow-item">
+                  <span>1. 音频合成</span>
+                  <b>{{ audioStageStatusText }}</b>
+                </div>
+                <div class="stage-flow-item">
+                  <span>2. 字幕时间轴</span>
+                  <b>{{ subtitleTimelineStatusText }}</b>
+                </div>
+                <div class="stage-flow-item">
+                  <span>3. 数字人口型</span>
+                  <b>{{ stageTwoLipSyncStatusText }}</b>
+                </div>
+              </div>
+
+              <n-alert
+                v-if="stageTwoRestoreLoading"
+                class="step-two-inline-alert"
+                type="info"
+                :show-icon="false"
+              >
+                正在恢复第二步结果，请稍候…
+              </n-alert>
+              <n-alert
+                v-if="stageTwoReuseHint"
+                class="step-two-inline-alert"
+                :type="stageTwoReuseState === 'restored' ? 'success' : 'warning'"
+                :show-icon="false"
+              >
+                <div class="stage-two-reuse-alert">
+                  <span>{{ stageTwoReuseHint }}</span>
+                  <div
+                    v-if="stageTwoReuseState === 'restored'"
+                    class="stage-two-reuse-alert__actions"
+                  >
+                    <button
+                      type="button"
+                      class="step-two-ghost-btn step-two-ghost-btn--inline"
+                      @click="onContinueUsingRestoredStageTwoResult"
+                    >
+                      继续使用
+                    </button>
+                    <button
+                      type="button"
+                      class="step-two-ghost-btn step-two-ghost-btn--inline"
+                      @click="onRegenerateStageTwoLipSyncFromRestored"
+                    >
+                      重新生成
+                    </button>
+                  </div>
+                </div>
+              </n-alert>
+
+              <n-alert
+                v-if="subtitleTimelineError"
+                class="step-two-inline-alert"
+                type="warning"
+                :show-icon="false"
+              >
+                {{ subtitleTimelineError }}
+              </n-alert>
+              <n-alert
+                v-if="stageTwoLipSyncRecoverable"
+                class="step-two-inline-alert"
+                type="info"
+                :show-icon="false"
+              >
+                <div class="stage-two-reuse-alert">
+                  <span>{{ stageTwoLipSyncRecoverableHint }}</span>
+                  <div class="stage-two-reuse-alert__actions">
+                    <button
+                      type="button"
+                      class="step-two-ghost-btn step-two-ghost-btn--inline"
+                      @click="onContinueQueryRecoverableLipSync"
+                    >
+                      继续查询
+                    </button>
+                    <button
+                      type="button"
+                      class="step-two-ghost-btn step-two-ghost-btn--inline"
+                      @click="onPersistRecoverableLipSyncForLater"
+                    >
+                      稍后恢复
+                    </button>
+                    <button
+                      type="button"
+                      class="step-two-ghost-btn step-two-ghost-btn--inline"
+                      @click="onRegenerateRecoverableLipSync"
+                    >
+                      重新生成
+                    </button>
+                  </div>
+                </div>
+              </n-alert>
+              <n-alert
+                v-if="stageTwoLipSyncError"
+                class="step-two-inline-alert"
+                type="error"
+                :show-icon="false"
+              >
+                {{ stageTwoLipSyncError }}
+              </n-alert>
+
+              <div class="stage-flow-actions">
+                <button
+                  type="button"
+                  class="step-two-primary-btn"
+                  :disabled="!audioStageReady || subtitleTimelineGenerating"
+                  :title="!audioStageReady ? '请先完成音频合成' : undefined"
+                  @click="onGenerateSubtitleTimeline"
+                >
+                  {{ subtitleTimelineGenerating ? "生成中..." : "生成字幕时间轴" }}
+                </button>
+                <button
+                  type="button"
+                  class="step-two-primary-btn step-two-primary-btn--video"
+                  :disabled="
+                    Boolean(stepTwoGenerateBlockReason) ||
+                    !audioStageReady ||
+                    !subtitleTimelineReady ||
+                    stageTwoLipSyncRunning
+                  "
+                  :title="
+                    stepTwoGenerateBlockReason ||
+                    (!audioStageReady
+                      ? '请先完成音频合成'
+                      : !subtitleTimelineReady
+                        ? '请先生成字幕时间轴'
+                        : undefined)
+                  "
+                  @click="onGenerateStepTwoLipSync"
+                >
+                  {{
+                    stageTwoLipSyncRunning
+                      ? "生成口型视频中..."
+                      : "生成数字人口型视频"
+                  }}
+                </button>
+              </div>
+
+              <div
+                v-if="
+                  stageTwoLipSyncRunning &&
+                  stageTwoLipSyncTask &&
+                  stageTwoLipSyncTask.progress >= 0
+                "
+                class="voice-generate-progress"
+              >
+                <div class="voice-generate-progress__head">
+                  <span>口型任务进度</span>
+                  <strong>{{ Math.round(stageTwoLipSyncTask.progress) }}%</strong>
+                </div>
+                <div class="voice-generate-progress__bar">
+                  <i :style="{ width: `${stageTwoLipSyncTask.progress}%` }"></i>
+                </div>
+              </div>
+
+              <button
+                v-if="stageTwoLipSyncVideoUrl && !projectRestoreLoading"
+                type="button"
+                class="step-two-primary-btn stage-two-preview-trigger"
+                @click="openStageTwoLipSyncPreview"
+              >
+                预览口型视频
+              </button>
+
               <button
                 type="button"
-                class="step-two-primary-btn step-two-primary-btn--video"
-                :disabled="Boolean(stepTwoGenerateBlockReason)"
-                :title="stepTwoGenerateBlockReason || undefined"
+                class="step-two-primary-btn stage-enter-btn"
+                :disabled="Boolean(stepTwoProceedToPackageBlockReason)"
+                :title="stepTwoProceedToPackageBlockReason || undefined"
                 @click="onProceedFromStepTwo"
               >
-                立即生成口播视频
+                进入第三步打包
               </button>
 
               <button
@@ -3538,7 +7010,7 @@ onUnmounted(() => {
                 class="step-two-ghost-btn"
                 @click="jumpToStep(3)"
               >
-                查看结果
+                直接查看第三步
               </button>
             </article>
           </section>
@@ -3561,13 +7033,31 @@ onUnmounted(() => {
         :background-music-id="smartClipBackgroundMusicId"
         :background-music-volume="smartClipBackgroundMusicVolume"
         :subtitles="smartClipSubtitles"
+        :script-text="smartClipScriptText"
+        :highlights="smartClipHighlights"
+        :subtitle-templates="subtitleTemplateItems"
+        :selected-subtitle-template-id="selectedSubtitleTemplateId"
         :text-subtitles-enabled="smartClipTextSubtitlesEnabled"
         :rendering="smartClipRendering"
         :final-video-url="subtitleWorkflowFinalUrl"
+        :workflow-progress-state="humanWorkflowProgressState"
+        :workflow-progress-steps="
+          humanWorkflowProgressSteps as Array<{
+            label: string;
+            status: 'done' | 'active' | 'idle';
+          }>
+        "
+        :title-mark-config="smartClipTitleMarkConfig"
+        :include-title-assets="smartClipIncludeTitleAssets"
+        :subtitle-visual-style="smartClipSubtitleVisualStyle"
+        :title-layout="smartClipTitleLayout"
+        :default-subtitle-visual-style="smartClipDefaultSubtitleVisualStyle"
+        :default-title-layout="smartClipDefaultTitleLayout"
+        :title-assets="smartClipTitleAssets"
         :result-hint="
           subtitleWorkflowHint ||
           smartClipRenderBlockReason ||
-          workflowProgressState.hint
+          humanWorkflowProgressState.hint
         "
         :render-disabled-reason="smartClipRenderBlockReason"
         @update:title-lines="smartClipTitleLines = $event"
@@ -3581,17 +7071,31 @@ onUnmounted(() => {
         @update:background-music-volume="
           smartClipBackgroundMusicVolume = $event
         "
+        @update:subtitles="onSmartClipSubtitlesChange"
+        @toggle-subtitle-highlight="toggleSmartClipSubtitleHighlight"
         @update:text-subtitles-enabled="smartClipTextSubtitlesEnabled = $event"
-        @update:subtitles="smartClipSubtitles = $event"
-        @toggle-highlight="toggleSmartClipSubtitleHighlight"
+        @update:script-text="onSmartClipScriptTextChange"
+        @update:highlights="onSmartClipHighlightsChange"
+        @update:selected-subtitle-template-id="onSelectSmartClipSubtitleTemplate"
+        @copy-subtitle-template="onCopySubtitleTemplate"
+        @save-subtitle-template-style="onSaveSubtitleTemplateStyle"
+        @update:title-mark-config="smartClipTitleMarkConfig = $event"
+        @update:include-title-assets="smartClipIncludeTitleAssets = $event"
+        @update:subtitle-visual-style="onSubtitleVisualStyleChange"
+        @update:title-layout="onTitleLayoutChange"
         @shuffle-title="shuffleSmartClipTitle"
         @clear-subtitles="clearSmartClipSubtitles"
         @pull-subtitles="buildSmartClipSubtitles(true)"
         @restore-subtitles="buildSmartClipSubtitles(true)"
         @confirm-subtitles="confirmSmartClipSubtitles"
+        @mark-title="onMarkSmartClipTitle"
+        @retry-title-asset="onRetrySmartClipTitleAsset"
+        @remove-title-mark="onRemoveSmartClipTitleMark"
+        @warn="message.warning($event)"
         @render="onRenderSmartClipFinal"
         @delete-video="subtitleWorkflowFinalUrl = null"
         @change-video="onRenderSmartClipFinal"
+        @refresh-video="refreshFinalVideoPlaybackUrl"
         @previous="goPrev"
         @next="goNext"
       />
@@ -4121,19 +7625,17 @@ onUnmounted(() => {
                   class="smart-subtitle-row"
                 >
                   <div class="smart-time-fields">
-                    <input
-                      v-model.number="subtitle.startTime"
-                      type="number"
-                      min="0"
-                      step="0.1"
-                    />
+                    <span class="smart-time-value">{{
+                      Number.isFinite(Number(subtitle.startTime))
+                        ? Number(subtitle.startTime).toFixed(2)
+                        : "0.00"
+                    }}</span>
                     <b>-</b>
-                    <input
-                      v-model.number="subtitle.endTime"
-                      type="number"
-                      min="0"
-                      step="0.1"
-                    />
+                    <span class="smart-time-value">{{
+                      Number.isFinite(Number(subtitle.endTime))
+                        ? Number(subtitle.endTime).toFixed(2)
+                        : "0.00"
+                    }}</span>
                   </div>
                   <n-input
                     v-model:value="subtitle.text"
@@ -4594,6 +8096,68 @@ onUnmounted(() => {
       </section>
     </Transition>
 
+    <n-modal
+      v-model:show="createProjectModalVisible"
+      preset="card"
+      title="创建创作任务"
+      class="create-project-modal"
+      :mask-closable="false"
+      :closable="!createProjectSubmitting"
+      :auto-focus="false"
+      style="max-width: 520px"
+    >
+      <n-space vertical :size="14">
+        <n-text depth="3"
+          >第一步文案确认后将创建任务，后续音频、字幕、口型和成片都会绑定到该任务。</n-text
+        >
+        <n-input
+          v-model:value="createProjectName"
+          maxlength="64"
+          show-count
+          placeholder="请输入任务名称"
+          @keyup.enter="onConfirmCreateProject"
+        />
+        <n-space justify="end">
+          <n-button
+            :disabled="createProjectSubmitting"
+            @click="createProjectModalVisible = false"
+          >
+            取消
+          </n-button>
+          <n-button
+            type="primary"
+            :loading="createProjectSubmitting"
+            @click="onConfirmCreateProject"
+          >
+            创建并进入第二步
+          </n-button>
+        </n-space>
+      </n-space>
+    </n-modal>
+
+    <n-modal
+      v-model:show="stageTwoLipSyncPreviewOpen"
+      preset="card"
+      title="数字人口型预览"
+      class="lipsync-preview-modal"
+      :bordered="false"
+      size="huge"
+    >
+      <div
+        v-if="stageTwoLipSyncVideoUrl && !projectRestoreLoading"
+        class="lipsync-preview-modal__frame"
+      >
+        <video
+          class="lipsync-preview-modal__video"
+          controls
+          autoplay
+          playsinline
+          preload="metadata"
+          :src="stageTwoLipSyncVideoUrl"
+        />
+      </div>
+    </n-modal>
+
     <NewAvatarModal
       v-if="createAvatarOpen"
       v-model:show="createAvatarOpen"
@@ -4800,6 +8364,17 @@ onUnmounted(() => {
 .topbar-progress {
   justify-self: end;
   text-align: right;
+}
+
+.project-restore-banner {
+  padding: 0 24px;
+}
+
+.project-restore-banner__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .stepper {
@@ -5651,7 +9226,7 @@ onUnmounted(() => {
 
 .script-extract-panel .outline-editor {
   height: 100%;
-  min-height: 0;
+  min-height: clamp(360px, 56vh, 680px);
 }
 
 .script-extract-panel .outline-editor :deep(.n-input),
@@ -7020,15 +10595,21 @@ onUnmounted(() => {
   align-items: center;
 }
 
-.smart-time-fields input {
+.smart-time-value {
   width: 100%;
-  height: 34px;
-  padding: 0 8px;
-  color: var(--text-main);
-  border: 1px solid rgba(121, 144, 184, 0.18);
-  border-radius: 10px;
-  background: rgba(248, 250, 255, 0.86);
-  outline: none;
+  min-height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0;
+  color: var(--text-sub);
+  font-size: 12px;
+  font-weight: 800;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  pointer-events: none;
+  user-select: text;
 }
 
 .smart-highlight-btn {
@@ -8560,6 +12141,8 @@ onUnmounted(() => {
 }
 
 .step-two-script-frame {
+  height: clamp(280px, 44vh, 560px);
+  max-height: clamp(280px, 44vh, 560px);
   min-height: 0;
   overflow: hidden;
   border: 1px solid rgba(121, 144, 184, 0.16);
@@ -8586,6 +12169,9 @@ onUnmounted(() => {
 }
 
 .step-two-script-scroll {
+  height: 100%;
+  max-height: 100%;
+  overflow-y: auto;
   padding: 8px 0;
   scrollbar-gutter: stable;
 }
@@ -8595,6 +12181,10 @@ onUnmounted(() => {
 }
 
 .step-two-script-line {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
   padding: 14px 16px;
   border: 0;
   border-bottom: 1px solid rgba(121, 144, 184, 0.12);
@@ -8614,6 +12204,79 @@ onUnmounted(() => {
 .step-two-script-line p {
   font-size: clamp(13px, 0.45vw + 12px, 14px);
   font-weight: 650;
+}
+
+.step-two-script-line__textarea {
+  width: 100%;
+  min-height: 32px;
+  max-height: 104px;
+  resize: vertical;
+  color: #1e293b;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 6px 10px;
+  font-size: clamp(13px, 0.45vw + 12px, 14px);
+  font-weight: 650;
+  line-height: 1.55;
+  letter-spacing: 0.3px;
+}
+
+.step-two-script-line__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transform: translateX(6px);
+  pointer-events: none;
+  transition:
+    opacity var(--transition-fast),
+    transform var(--transition-fast);
+}
+
+.step-two-script-line:hover .step-two-script-line__actions,
+.step-two-script-line:focus-within .step-two-script-line__actions {
+  opacity: 1;
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.step-two-script-line__action {
+  width: 28px;
+  height: 28px;
+  color: #475569;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    color var(--transition-fast),
+    border-color var(--transition-fast),
+    background-color var(--transition-fast);
+}
+
+.step-two-script-line__action:hover {
+  color: #1e293b;
+  border-color: rgba(148, 163, 184, 0.32);
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.step-two-script-line__action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.step-two-script-line__action--danger {
+  color: #64748b;
+}
+
+.step-two-script-line__action--danger:hover {
+  color: #dc2626;
+  border-color: rgba(248, 113, 113, 0.4);
+  background: rgba(248, 113, 113, 0.08);
 }
 
 .step-two-hook-row {
@@ -11173,5 +14836,96 @@ onUnmounted(() => {
   .smart-subtitle-workbench {
     min-height: 540px;
   }
+}
+
+.stage-flow-card {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.stage-flow-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.stage-flow-item b {
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: #0f172a;
+  font-size: 12px;
+  font-weight: 800;
+  background: #e2e8f0;
+}
+
+.stage-two-reuse-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stage-two-reuse-alert__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.stage-flow-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.stage-two-preview-trigger {
+  width: 100%;
+}
+
+.step-two-ghost-btn--inline {
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.lipsync-preview-modal {
+  width: min(440px, 92vw);
+}
+
+.create-project-modal {
+  width: min(520px, 92vw);
+}
+
+.lipsync-preview-modal__video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #020617;
+}
+
+.lipsync-preview-modal__frame {
+  display: grid;
+  place-items: center;
+  width: min(360px, 86vw, calc(78vh * 9 / 16));
+  aspect-ratio: 9 / 16;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 16px;
+  background: #020617;
+  box-shadow: 0 20px 48px rgba(15, 23, 42, 0.22);
+}
+
+.stage-enter-btn {
+  margin-top: 4px;
 }
 </style>

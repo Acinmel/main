@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { NButton, NCard, NCheckbox, NInput, NSpace, NTag, NText } from 'naive-ui'
 import type { SubtitleTemplateResource } from '@/types/resources'
 
@@ -18,8 +18,16 @@ const emit = defineEmits<{
 }>()
 
 const editing = ref(false)
-const hover = ref(false)
 const draftName = ref(props.item.name)
+const thumbnailUrl = computed(
+  () =>
+    props.item.previewThumbnailUrl ||
+    props.item.thumbnailUrl ||
+    props.item.coverThumbnailUrl ||
+    props.item.coverUrl ||
+    props.item.previewCoverUrl ||
+    '',
+)
 
 function saveName() {
   editing.value = false
@@ -30,8 +38,15 @@ function saveName() {
 
 <template>
   <n-card class="resource-card" content-style="padding: 0">
-    <div class="resource-card__media" @mouseenter="hover = true" @mouseleave="hover = false">
-      <img :src="hover ? item.previewCoverUrl : item.coverUrl" :alt="item.name" loading="lazy" />
+    <div class="resource-card__media">
+      <img
+        v-if="thumbnailUrl"
+        :src="thumbnailUrl"
+        :alt="item.name"
+        loading="lazy"
+        decoding="async"
+        referrerpolicy="no-referrer"
+      />
       <n-checkbox
         v-if="item.owner === 'mine' && !readOnly"
         class="resource-card__check"

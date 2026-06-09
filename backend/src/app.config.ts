@@ -13,6 +13,8 @@ export function configureHttpApp(app: INestApplication): void {
   applyRequestTiming(app);
   applyCors(app);
   applyTrustProxy(app);
+  applyLegacyToolsKillSwitch(app);
+  applyLegacyTaskPipelineKillSwitch(app);
   applyBasicRateLimit(app);
 }
 
@@ -123,6 +125,27 @@ type RateBucket = {
 };
 
 const rateBuckets = new Map<string, RateBucket>();
+const LEGACY_TOOLS_DISABLED_ROUTES = new Set<string>([
+  'POST /api/v1/tools/generate-video-preview',
+  'POST /api/v1/tools/seedance-i2v-async',
+  'POST /api/v1/tools/ark-i2v-task',
+  'POST /api/v1/tools/upload-video',
+  'POST /api/v1/tools/upload-audio',
+  'POST /api/v1/tools/generate-lip-sync-video',
+  'POST /api/v1/tools/ali-lip-sync',
+  'POST /api/v1/tools/lip-sync-preview',
+  'POST /api/v1/tools/voice-preview',
+]);
+
+const LEGACY_TASK_PIPELINE_DISABLED_ROUTE_PATTERNS: Array<{
+  method: string;
+  pattern: RegExp;
+}> = [
+  // Legacy v1 task pipeline: disable all mutating endpoints by default.
+  { method: 'POST', pattern: /^\/api\/v1\/tasks(?:\/.*)?$/ },
+  // Legacy works endpoint: keep list read-only, disable mutation.
+  { method: 'PATCH', pattern: /^\/api\/v1\/works(?:\/.*)?$/ },
+];
 
 function readPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name]?.trim();
@@ -131,6 +154,66 @@ function readPositiveInt(name: string, fallback: number): number {
     return fallback;
   }
   return Math.floor(parsed);
+}
+
+function readBooleanFlag(name: string, fallback = false): boolean {
+  const raw = process.env[name]?.trim().toLowerCase();
+  if (!raw) return fallback;
+  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on') {
+    return true;
+  }
+  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off') {
+    return false;
+  }
+  return fallback;
+}
+
+function applyLegacyToolsKillSwitch(app: INestApplication): void {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (readBooleanFlag('ENABLE_LEGACY_TOOLS_ENDPOINTS', false)) {
+      next();
+      return;
+    }
+    const routeKey = `${req.method.toUpperCase()} ${req.path}`;
+    if (!LEGACY_TOOLS_DISABLED_ROUTES.has(routeKey)) {
+      next();
+      return;
+    }
+    res.status(410).json({
+      statusCode: 410,
+      code: 'LEGACY_ENDPOINT_DISABLED',
+      message:
+        'This legacy tools endpoint is disabled. Use project-scoped /api/v1/video-projects APIs instead.',
+      endpoint: req.path,
+      enableFlag: 'ENABLE_LEGACY_TOOLS_ENDPOINTS',
+    });
+  });
+}
+
+function applyLegacyTaskPipelineKillSwitch(app: INestApplication): void {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (readBooleanFlag('ENABLE_LEGACY_TASKS_ENDPOINTS', false)) {
+      next();
+      return;
+    }
+    const method = req.method.toUpperCase();
+    const path = req.path;
+    const hit = LEGACY_TASK_PIPELINE_DISABLED_ROUTE_PATTERNS.some(
+      (rule) => rule.method === method && rule.pattern.test(path),
+    );
+    if (!hit) {
+      next();
+      return;
+    }
+    res.status(410).json({
+      statusCode: 410,
+      code: 'LEGACY_ENDPOINT_DISABLED',
+      message:
+        'This legacy tasks/works write endpoint is disabled. Use project-scoped /api/v1/video-projects APIs instead.',
+      endpoint: req.path,
+      enableFlag: 'ENABLE_LEGACY_TASKS_ENDPOINTS',
+    });
+  });
 }
 
 function routeLimit(path: string, method: string): number {

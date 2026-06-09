@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidatePattern('^\d{8}-\d{3}$')]
+  [ValidatePattern('^(\d{8}-\d{3}|v\d+\.\d+\.\d+)$')]
   [string]$AppVersion,
 
   [switch]$AllowDirty,
@@ -89,7 +89,9 @@ Require-File "scripts/preflight-check.sh"
 Require-File "scripts/run-migrations.sh"
 Require-File "scripts/smoke-test.sh"
 Require-File "scripts/verify-runtime.sh"
+Require-File "scripts/ops-022-cleanup-builtin-voices.sh"
 Require-File "scripts/verify-release-routes.js"
+Require-File "scripts/verify-release-subtitle-seeds.js"
 Require-File "database/migrations/20260517_001_widen_runtime_text_columns.sql"
 
 $GitCommit = "unknown"
@@ -115,6 +117,7 @@ Invoke-Step npm @("--prefix", "frontend", "run", "build")
 Invoke-Step npm @("--prefix", "backend/DY-DOWNLOADER", "run", "build")
 Invoke-Step npm @("--prefix", "backend", "run", "build")
 Invoke-Step node @("scripts/verify-release-routes.js", "--backend-dist-dir", "backend/dist", "--context", "backend-dist")
+Invoke-Step node @("scripts/verify-release-subtitle-seeds.js", "--backend-dist-dir", "backend/dist", "--context", "backend-dist")
 
 if ($RunBackendTests) {
   Invoke-Step npm @("--prefix", "backend", "run", "test")
@@ -161,9 +164,10 @@ Copy-Item -LiteralPath "compose.runtime.yml" -Destination (Join-Path $PkgDir "co
 Copy-Item -LiteralPath "deploy/deploy-runtime.sh" -Destination (Join-Path $PkgDir "deploy-runtime.sh") -Force
 Copy-Item -LiteralPath "deploy/rollback.sh" -Destination (Join-Path $PkgDir "rollback.sh") -Force
 Copy-Item -LiteralPath "deploy/setup-https-nginx.sh", "deploy/nginx-host-reverse-proxy.conf" -Destination (Join-Path $PkgDir "deploy") -Force
-Copy-Item -LiteralPath "scripts/preflight-check.sh", "scripts/run-migrations.sh", "scripts/smoke-test.sh", "scripts/verify-runtime.sh" -Destination (Join-Path $PkgDir "scripts") -Force
+Copy-Item -LiteralPath "scripts/preflight-check.sh", "scripts/run-migrations.sh", "scripts/smoke-test.sh", "scripts/verify-runtime.sh", "scripts/ops-022-cleanup-builtin-voices.sh" -Destination (Join-Path $PkgDir "scripts") -Force
 Copy-DirectoryContents "database/migrations" (Join-Path $PkgDir "database/migrations")
 Invoke-Step node @("scripts/verify-release-routes.js", "--backend-dist-dir", (Join-Path $PkgDir "backend/dist"), "--context", "package-dist")
+Invoke-Step node @("scripts/verify-release-subtitle-seeds.js", "--backend-dist-dir", (Join-Path $PkgDir "backend/dist"), "--context", "package-dist")
 
 $BuildTimeUtc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
 Write-Utf8NoBom (Join-Path $PkgDir "VERSION") @(
@@ -200,6 +204,7 @@ Convert-TextFilesToLf @(
   (Join-Path $PkgDir "scripts/run-migrations.sh"),
   (Join-Path $PkgDir "scripts/smoke-test.sh"),
   (Join-Path $PkgDir "scripts/verify-runtime.sh"),
+  (Join-Path $PkgDir "scripts/ops-022-cleanup-builtin-voices.sh"),
   (Join-Path $PkgDir "database/migrations/20260517_001_widen_runtime_text_columns.sql")
 )
 

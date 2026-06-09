@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import type { UserProfile } from '@/types/domain'
 import { fetchAuthMe } from '@/api/auth'
+import { clearResourceListCache } from '@/api/resources'
 
 /**
  * 用户会话：Bearer token + 资料（注册/登录后由后端 JWT 签发）
@@ -13,12 +14,16 @@ export const useUserStore = defineStore('user', () => {
   const isLoggedIn = computed(() => Boolean(token.value))
 
   function setSession(nextToken: string, nextProfile?: UserProfile) {
+    if (token.value !== nextToken || profile.value?.id !== nextProfile?.id) {
+      clearResourceListCache()
+    }
     token.value = nextToken
     localStorage.setItem('kb_token', nextToken)
     if (nextProfile) profile.value = nextProfile
   }
 
   function clearSession() {
+    clearResourceListCache()
     token.value = null
     profile.value = null
     localStorage.removeItem('kb_token')

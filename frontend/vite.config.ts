@@ -10,6 +10,10 @@ const apiProxy = {
     /** 视频页抓取 / 链接转写可能很慢，避免代理过早断开 */
     timeout: 620_000,
   },
+  '/uploads': {
+    target: 'http://127.0.0.1:3000',
+    changeOrigin: true,
+  },
 } as const
 
 /**

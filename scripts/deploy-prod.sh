@@ -14,21 +14,34 @@ WEB_BIND_HOST="${WEB_BIND_HOST:-127.0.0.1}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-http://127.0.0.1:${WEB_PORT}}"
 API_BASE_URL="${API_BASE_URL:-${PUBLIC_BASE_URL%/}/api}"
 ALLOW_INSECURE_PROD="${ALLOW_INSECURE_PROD:-0}"
+SMOKE_CHECK_PENDING_REGISTRATION="${SMOKE_CHECK_PENDING_REGISTRATION:-0}"
 
 export COMPOSE_PROJECT_NAME
 export WEB_PORT
 export WEB_BIND_HOST
 export PUBLIC_BASE_URL
 export API_BASE_URL
+export SMOKE_CHECK_PENDING_REGISTRATION
+
+read_env_value() {
+  local key="$1"
+  local file="$2"
+  if [[ -f "$file" ]]; then
+    awk -F= -v key="$key" '$1 == key { print $2; exit }' "$file" | tr -d '\r'
+  fi
+}
 
 write_deploy_env() {
   local output="$1"
   local source_env="$2"
+  local registration_status
+  registration_status="${REGISTRATION_DEFAULT_ACCOUNT_STATUS:-$(read_env_value REGISTRATION_DEFAULT_ACCOUNT_STATUS "$source_env")}"
+  registration_status="${registration_status:-pending}"
   : > "$output"
   if [[ -f "$source_env" ]]; then
     awk -F= '
       BEGIN {
-        split("APP_VERSION GIT_COMMIT BUILD_TIME_UTC VITE_API_BASE_URL COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILE", keys, " ")
+        split("APP_VERSION GIT_COMMIT BUILD_TIME_UTC VITE_API_BASE_URL COMPOSE_PROJECT_NAME COMPOSE_FILE COMPOSE_ENV_FILE REGISTRATION_DEFAULT_ACCOUNT_STATUS", keys, " ")
         for (i in keys) skip[keys[i]] = 1
       }
       /^[[:space:]]*$/ || /^[[:space:]]*#/ { print; next }
@@ -53,6 +66,7 @@ write_deploy_env() {
     echo "PUBLIC_BASE_URL=$PUBLIC_BASE_URL"
     echo "PUBLIC_UPLOAD_BASE_URL=${PUBLIC_UPLOAD_BASE_URL:-${PUBLIC_BASE_URL%/}/uploads}"
     echo "API_BASE_URL=$API_BASE_URL"
+    echo "REGISTRATION_DEFAULT_ACCOUNT_STATUS=$registration_status"
   } >> "$output"
   chmod 600 "$output"
 }
@@ -141,9 +155,9 @@ compose up -d
 compose ps
 
 if [[ "$PUBLIC_BASE_URL" == https://* ]]; then
-  FRONTEND_URL="$PUBLIC_BASE_URL" API_BASE_URL="$API_BASE_URL" REQUIRE_HTTPS=1 bash "$ROOT/scripts/smoke-test.sh"
+  FRONTEND_URL="$PUBLIC_BASE_URL" API_BASE_URL="$API_BASE_URL" REQUIRE_HTTPS=1 SMOKE_CHECK_PENDING_REGISTRATION="$SMOKE_CHECK_PENDING_REGISTRATION" bash "$ROOT/scripts/smoke-test.sh"
 else
-  FRONTEND_URL="$PUBLIC_BASE_URL" API_BASE_URL="$API_BASE_URL" bash "$ROOT/scripts/smoke-test.sh"
+  FRONTEND_URL="$PUBLIC_BASE_URL" API_BASE_URL="$API_BASE_URL" SMOKE_CHECK_PENDING_REGISTRATION="$SMOKE_CHECK_PENDING_REGISTRATION" bash "$ROOT/scripts/smoke-test.sh"
 fi
 
 trap - ERR

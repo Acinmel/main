@@ -16,7 +16,7 @@ import {
   NUploadDragger,
   useMessage,
 } from "naive-ui";
-import { listAvatarUploadVideos } from "@/api/resources";
+import { getAvatarUploadVideoMetadata, listAvatarUploadVideos } from "@/api/resources";
 import SavedVideoPreview from "@/components/resources/SavedVideoPreview.vue";
 import { describeHttpOrNetworkError } from "@/utils/httpErrorMessage";
 import type { UploadFileInfo } from "naive-ui";
@@ -53,6 +53,9 @@ const uploadedVideoFile = ref<File | null>(null);
 const uploadFileList = ref<UploadFileInfo[]>([]);
 const uploadedVideoDurationSeconds = ref<number | null>(null);
 const uploadedVideoError = ref("");
+const uploadedVideoPreviewUrl = ref("");
+const uploadedCoverFile = ref<File | null>(null);
+const uploadedCoverPreviewUrl = ref("");
 const savedVideoPreviewUrl = ref("");
 const savedVideoPreviewLoading = ref(false);
 const savedVideoPreviewError = ref("");
@@ -60,6 +63,7 @@ const savedVideoLoadError = ref("");
 const savedVideoViewerOpen = ref(false);
 let savedVideoPreviewRequest = 0;
 let savedVideoListAbortController: AbortController | null = null;
+let uploadVideoDetectSeq = 0;
 
 const form = reactive({
   name: "",
@@ -89,9 +93,56 @@ const selectedSavedVideo = computed(
       (item) => item.fileName === form.savedVideoName.trim(),
     ) ?? null,
 );
+const selectedSavedVideoMeta = computed(() => {
+  const item = selectedSavedVideo.value;
+  if (!item) return null;
+  return [
+    { label: "文件名", value: item.fileName },
+    { label: "文件类型", value: formatVideoMime(item.mimeType) },
+    { label: "文件大小", value: formatFileSize(item.fileSize) },
+    {
+      label: "更新时间",
+      value: new Date(item.mtime).toLocaleString("zh-CN"),
+    },
+  ];
+});
 
 function revokeSavedVideoPreviewUrl() {
   savedVideoPreviewUrl.value = "";
+}
+
+function isExpiredSignedUrl(url: string) {
+  const trimmed = url.trim();
+  if (!trimmed) return true;
+  try {
+    const parsed = new URL(trimmed, window.location.origin);
+    const rawExpires = parsed.searchParams.get("expires");
+    if (!rawExpires) return false;
+    const expires = Number(rawExpires);
+    if (!Number.isFinite(expires)) return true;
+    const now = Math.floor(Date.now() / 1000);
+    return now >= expires - 5;
+  } catch {
+    return false;
+  }
+}
+
+function isProtectedAvatarStreamUrl(url: string) {
+  const normalized = url.toLowerCase();
+  return (
+    normalized.includes("/avatar-video-files/") &&
+    normalized.includes("/stream") &&
+    !normalized.includes("/preview-stream") &&
+    !/[?&](token|expires)=/i.test(url)
+  );
+}
+
+function canUseBrowserPreview(url: string) {
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (isProtectedAvatarStreamUrl(trimmed)) return false;
+  if (isExpiredSignedUrl(trimmed)) return false;
+  return true;
 }
 
 function clearSavedVideoPreview() {
@@ -118,7 +169,17 @@ async function refreshSavedVideoPreview() {
 
   savedVideoPreviewLoading.value = true;
   try {
-    const nextUrl = selectedSavedVideo.value?.previewUrl || "";
+    const selected = selectedSavedVideo.value;
+    let nextUrl = selected?.previewUrl?.trim() ?? "";
+    if (!canUseBrowserPreview(nextUrl) && selected?.fileName) {
+      const metadata = await getAvatarUploadVideoMetadata(selected.fileName);
+      nextUrl = metadata.previewUrl?.trim() ?? "";
+      selected.previewUrl = metadata.previewUrl;
+      selected.metadataUrl = metadata.metadataUrl;
+    }
+    if (!canUseBrowserPreview(nextUrl)) {
+      nextUrl = "";
+    }
     if (!nextUrl) {
       throw new Error("当前视频没有可用预览地址");
     }
@@ -135,6 +196,13 @@ async function refreshSavedVideoPreview() {
       savedVideoPreviewLoading.value = false;
     }
   }
+}
+
+function onSavedVideoPreviewError() {
+  if (!selectedSavedVideo.value) return;
+  selectedSavedVideo.value.previewUrl = "";
+  selectedSavedVideo.value.metadataUrl = "";
+  void refreshSavedVideoPreview();
 }
 
 function openSavedVideoViewer() {
@@ -158,6 +226,7 @@ function resetForm() {
   uploadFileList.value = [];
   uploadedVideoDurationSeconds.value = null;
   uploadedVideoError.value = "";
+  clearUploadedVideoPreviewAssets();
   savedVideoLoadError.value = "";
   clearSavedVideoPreview();
   sourceMode.value = "saved";
@@ -217,6 +286,11 @@ function submit() {
       coverUrl: form.coverUrl.trim() || undefined,
       styleId: "uploaded-video",
       uploadFile: uploadedVideoFile.value,
+      uploadCoverFile: uploadedCoverFile.value ?? undefined,
+      uploadVideoDurationSeconds:
+        uploadedVideoDurationSeconds.value !== null
+          ? uploadedVideoDurationSeconds.value
+          : undefined,
     });
     return;
   }
@@ -288,6 +362,12 @@ function formatFileSize(bytes: number) {
   return `${bytes}B`;
 }
 
+function formatVideoMime(value: string) {
+  const mime = value?.trim();
+  if (!mime) return "video/*";
+  return mime;
+}
+
 function readVideoDuration(file: File): Promise<number> {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
@@ -311,7 +391,101 @@ function readVideoDuration(file: File): Promise<number> {
   });
 }
 
+function revokeUploadedPreviewUrl() {
+  if (uploadedVideoPreviewUrl.value.startsWith("blob:")) {
+    URL.revokeObjectURL(uploadedVideoPreviewUrl.value);
+  }
+  uploadedVideoPreviewUrl.value = "";
+}
+
+function revokeUploadedCoverPreviewUrl() {
+  if (uploadedCoverPreviewUrl.value.startsWith("blob:")) {
+    URL.revokeObjectURL(uploadedCoverPreviewUrl.value);
+  }
+  uploadedCoverPreviewUrl.value = "";
+}
+
+function clearUploadedVideoPreviewAssets() {
+  revokeUploadedPreviewUrl();
+  revokeUploadedCoverPreviewUrl();
+  uploadedCoverFile.value = null;
+}
+
+function fileNameWithoutExt(name: string) {
+  const trimmed = name.trim();
+  if (!trimmed) return "avatar-cover";
+  return trimmed.replace(/\.[^.]+$/, "") || trimmed;
+}
+
+async function captureVideoCover(file: File): Promise<File> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    const objectUrl = URL.createObjectURL(file);
+    const cleanup = () => {
+      URL.revokeObjectURL(objectUrl);
+      video.removeAttribute("src");
+      video.load();
+    };
+    video.preload = "metadata";
+    video.muted = true;
+    video.playsInline = true;
+    video.crossOrigin = "anonymous";
+    video.onloadedmetadata = () => {
+      const seekSeconds = Number.isFinite(video.duration)
+        ? Math.min(Math.max(video.duration * 0.1, 0.1), 1.5)
+        : 0.1;
+      try {
+        video.currentTime = seekSeconds;
+      } catch {
+        video.currentTime = 0;
+      }
+    };
+    video.onseeked = () => {
+      const width = Math.max(2, Math.round(video.videoWidth || 0));
+      const height = Math.max(2, Math.round(video.videoHeight || 0));
+      if (width <= 2 || height <= 2) {
+        cleanup();
+        reject(new Error("瑙嗛灏侀潰鎴彇澶辫触"));
+        return;
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        cleanup();
+        reject(new Error("瑙嗛灏侀潰鎴彇澶辫触"));
+        return;
+      }
+      ctx.drawImage(video, 0, 0, width, height);
+      canvas.toBlob(
+        (blob) => {
+          cleanup();
+          if (!blob) {
+            reject(new Error("瑙嗛灏侀潰鎴彇澶辫触"));
+            return;
+          }
+          resolve(
+            new File([blob], `${fileNameWithoutExt(file.name)}.jpg`, {
+              type: "image/jpeg",
+            }),
+          );
+        },
+        "image/jpeg",
+        0.9,
+      );
+    };
+    video.onerror = () => {
+      cleanup();
+      reject(new Error("瑙嗛灏侀潰鎴彇澶辫触"));
+    };
+    video.src = objectUrl;
+  });
+}
+
 async function onUploadChange(fileList: UploadFileInfo[]) {
+  return onUploadChangeV2(fileList);
+  /*
   uploadFileList.value = fileList.slice(0, 1);
   uploadedVideoDurationSeconds.value = null;
   uploadedVideoError.value = "";
@@ -347,18 +521,83 @@ async function onUploadChange(fileList: UploadFileInfo[]) {
     uploadedVideoError.value = "无法识别视频时长，请重新选择可正常播放的视频";
     message.warning(uploadedVideoError.value);
   }
+  */
+}
+
+async function onUploadChangeV2(fileList: UploadFileInfo[]) {
+  const detectSeq = ++uploadVideoDetectSeq;
+  uploadFileList.value = fileList.slice(0, 1);
+  uploadedVideoDurationSeconds.value = null;
+  uploadedVideoError.value = "";
+  clearUploadedVideoPreviewAssets();
+
+  const raw = uploadFileList.value[0]?.file;
+  uploadedVideoFile.value = raw instanceof File ? raw : null;
+  if (!uploadedVideoFile.value) return;
+  uploadedVideoPreviewUrl.value = URL.createObjectURL(uploadedVideoFile.value);
+
+  if (uploadedVideoFile.value.size > AVATAR_VIDEO_MAX_BYTES) {
+    uploadedVideoError.value = "请上传小于 500MB 的视频文件";
+    uploadedVideoFile.value = null;
+    uploadFileList.value = [];
+    clearUploadedVideoPreviewAssets();
+    message.warning(uploadedVideoError.value);
+    return;
+  }
+
+  try {
+    const [duration, coverFile] = await Promise.all([
+      readVideoDuration(uploadedVideoFile.value),
+      captureVideoCover(uploadedVideoFile.value),
+    ]);
+    if (detectSeq !== uploadVideoDetectSeq) return;
+    uploadedVideoDurationSeconds.value = duration;
+    uploadedCoverFile.value = coverFile;
+    uploadedCoverPreviewUrl.value = URL.createObjectURL(coverFile);
+
+    if (!Number.isFinite(duration) || duration <= 0) {
+      uploadedVideoError.value = "无法识别视频时长，请重新选择可正常播放的视频";
+    } else if (duration > AVATAR_VIDEO_MAX_SECONDS) {
+      uploadedVideoError.value = "数字人视频最长支持 10 分钟，请重新选择更短视频";
+    }
+    if (uploadedVideoError.value) {
+      uploadedVideoFile.value = null;
+      uploadFileList.value = [];
+      clearUploadedVideoPreviewAssets();
+      message.warning(uploadedVideoError.value);
+    }
+  } catch {
+    if (detectSeq !== uploadVideoDetectSeq) return;
+    uploadedVideoFile.value = null;
+    uploadFileList.value = [];
+    clearUploadedVideoPreviewAssets();
+    uploadedVideoError.value = "无法识别视频内容，请重新选择可正常播放的视频";
+    message.warning(uploadedVideoError.value);
+  }
 }
 
 function clearUploadedVideoFile() {
+  clearUploadedVideoFileV2();
+  return;
   uploadedVideoFile.value = null;
   uploadFileList.value = [];
   uploadedVideoDurationSeconds.value = null;
   uploadedVideoError.value = "";
 }
 
+function clearUploadedVideoFileV2() {
+  uploadVideoDetectSeq += 1;
+  uploadedVideoFile.value = null;
+  uploadFileList.value = [];
+  uploadedVideoDurationSeconds.value = null;
+  uploadedVideoError.value = "";
+  clearUploadedVideoPreviewAssets();
+}
+
 onBeforeUnmount(() => {
   savedVideoListAbortController?.abort();
   clearSavedVideoPreview();
+  clearUploadedVideoPreviewAssets();
 });
 </script>
 
@@ -452,7 +691,19 @@ onBeforeUnmount(() => {
           :error="savedVideoPreviewError"
           :directory="savedVideoDirectory"
           @open="openSavedVideoViewer"
+          @preview-error="onSavedVideoPreviewError"
         />
+
+        <div v-if="selectedSavedVideoMeta" class="saved-video-meta">
+          <div
+            v-for="entry in selectedSavedVideoMeta"
+            :key="entry.label"
+            class="saved-video-meta__item"
+          >
+            <span>{{ entry.label }}</span>
+            <strong>{{ entry.value }}</strong>
+          </div>
+        </div>
 
         <div
           v-if="!loadingSavedVideos && !savedVideoLoadError && !hasSavedVideos"
@@ -536,6 +787,23 @@ onBeforeUnmount(() => {
             uploadedVideoError
           }}</n-text>
         </div>
+        <div v-if="uploadedVideoPreviewUrl" class="upload-local-preview">
+          <video
+            class="upload-local-preview__video"
+            :src="uploadedVideoPreviewUrl"
+            controls
+            muted
+            preload="metadata"
+          />
+          <div class="upload-local-preview__cover">
+            <img
+              v-if="uploadedCoverPreviewUrl"
+              :src="uploadedCoverPreviewUrl"
+              alt="cover preview"
+            />
+            <span v-else>封面截图生成中...</span>
+          </div>
+        </div>
       </n-form-item>
 
       <n-form-item v-else label="视频 URL / 文件名">
@@ -602,6 +870,36 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(96, 132, 255, 0.16);
   border-radius: 18px;
   background: rgba(248, 251, 255, 0.78);
+}
+
+.saved-video-meta {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.saved-video-meta__item {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.saved-video-meta__item span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.saved-video-meta__item strong {
+  overflow: hidden;
+  color: #1e293b;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .saved-video-empty-actions {
@@ -781,6 +1079,38 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(96, 132, 255, 0.14);
   border-radius: 14px;
   background: rgba(248, 251, 255, 0.72);
+}
+
+.upload-local-preview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 176px;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.upload-local-preview__video {
+  width: 100%;
+  border-radius: 12px;
+  background: #0f172a;
+}
+
+.upload-local-preview__cover {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+}
+
+.upload-local-preview__cover img {
+  width: 100%;
+  border-radius: 12px;
+  object-fit: cover;
+  aspect-ratio: 9 / 16;
+  background: #f1f5f9;
+}
+
+.upload-local-preview__cover span {
+  color: #64748b;
+  font-size: 12px;
 }
 
 :global(.saved-video-viewer-modal) {

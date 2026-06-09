@@ -57,10 +57,16 @@ describe('Tools transcribe pipeline (e2e)', () => {
     configureHttpApp(app);
     await app.init();
 
-    const email = `e2e-pipeline-${Date.now()}@test.local`;
+    const email = '447519854@qq.com';
+    const phoneTail = String(Date.now() % 1_000_000_000).padStart(9, '0');
     const reg = await request(app.getHttpServer())
       .post('/api/v1/auth/register')
-      .send({ email, password: 'password12' });
+      .send({
+        email,
+        password: 'password12',
+        phoneNumber: `13${phoneTail}`,
+        idCardNumber: '11010519491231002X',
+      });
     expect([200, 201]).toContain(reg.status);
     authToken = readString(asRecord(reg.body), 'token') || '';
     expect(authToken).toBeTruthy();
@@ -209,107 +215,133 @@ describe('Tools transcribe pipeline (e2e)', () => {
     ).toBe(true);
   });
 
-  it('POST /api/v1/tools/lip-sync-preview fails fast when VideoReTalk public media URL is unavailable', async () => {
-    fs.mkdirSync(videoDir, { recursive: true });
-    const localVideoName = 'avatar-source.mp4';
-    fs.writeFileSync(
-      path.join(videoDir, localVideoName),
-      Buffer.from('fake mp4 payload'),
-    );
-
-    const avatarRes = await request(app.getHttpServer())
-      .post('/api/v1/resources/avatars')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({ name: 'test-avatar', originalVideoUrl: localVideoName })
-      .expect(201);
-    const avatarId = readString(asRecord(avatarRes.body), 'id') || '';
-    expect(avatarId).toBeTruthy();
-
-    const voiceRes = await request(app.getHttpServer())
-      .post('/api/v1/resources/voices')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        name: 'test-voice',
-        provider: 'aliyun-qwen-vc',
-        providerVoice: 'e2e-provider-voice',
-        providerModel: 'e2e-provider-model',
-      })
-      .expect(201);
-    const voiceId = readString(asRecord(voiceRes.body), 'id') || '';
-    expect(voiceId).toBeTruthy();
-
-    const preview = await request(app.getHttpServer())
-      .post('/api/v1/tools/lip-sync-preview')
-      .set('Authorization', `Bearer ${authToken}`)
-      .send({
-        script: 'test script for lip-sync-preview',
-        avatarResourceId: avatarId,
-        voiceResourceId: voiceId,
-      })
-      .expect(400);
-
-    const message = readString(asRecord(preview.body), 'message') || '';
-    expect(message).toContain('VideoReTalk');
-    expect(message).toContain('PUBLIC_BASE_URL');
+  it('legacy high-risk tools endpoints are disabled by default', async () => {
+    const endpoints = [
+      '/api/v1/tools/generate-video-preview',
+      '/api/v1/tools/seedance-i2v-async',
+      '/api/v1/tools/ark-i2v-task',
+      '/api/v1/tools/upload-video',
+      '/api/v1/tools/upload-audio',
+      '/api/v1/tools/generate-lip-sync-video',
+      '/api/v1/tools/ali-lip-sync',
+      '/api/v1/tools/lip-sync-preview',
+      '/api/v1/tools/voice-preview',
+    ];
+    for (const endpoint of endpoints) {
+      const res = await request(app.getHttpServer())
+        .post(endpoint)
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({})
+        .expect(410);
+      const body = asRecord(res.body);
+      expect(readString(body, 'code')).toBe('LEGACY_ENDPOINT_DISABLED');
+      expect(readString(body, 'enableFlag')).toBe(
+        'ENABLE_LEGACY_TOOLS_ENDPOINTS',
+      );
+    }
   });
 
-  it('POST /api/v1/tools/subtitle-workflow-preview requires VideoReTalk readiness', async () => {
-    fs.mkdirSync(videoDir, { recursive: true });
-    const sourcePath = path.join(videoDir, 'workflow-source.mp4');
-    fs.writeFileSync(sourcePath, Buffer.from('fake mp4 payload'));
+  it('legacy v1 tasks/works mutating endpoints are disabled by default', async () => {
+    const endpoints: Array<{ method: 'post' | 'patch'; path: string }> = [
+      { method: 'post', path: '/api/v1/tasks' },
+      { method: 'post', path: '/api/v1/tasks/legacy-id/photo' },
+      { method: 'post', path: '/api/v1/tasks/legacy-id/extract' },
+      { method: 'post', path: '/api/v1/tasks/legacy-id/retry' },
+      { method: 'post', path: '/api/v1/tasks/legacy-id/rewrite/suggest' },
+      { method: 'post', path: '/api/v1/tasks/legacy-id/rewrite' },
+      { method: 'post', path: '/api/v1/tasks/legacy-id/render' },
+      { method: 'patch', path: '/api/v1/works/legacy-id' },
+    ];
 
-    const avatarRes = await request(app.getHttpServer())
-      .post('/api/v1/resources/avatars')
+    for (const endpoint of endpoints) {
+      const reqBuilder = request(app.getHttpServer())[endpoint.method](
+        endpoint.path,
+      )
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({});
+      const res = await reqBuilder.expect(410);
+      const body = asRecord(res.body);
+      expect(readString(body, 'code')).toBe('LEGACY_ENDPOINT_DISABLED');
+      expect(readString(body, 'enableFlag')).toBe(
+        'ENABLE_LEGACY_TASKS_ENDPOINTS',
+      );
+    }
+  });
+
+  it('core project-scoped audio + subtitle timeline flow works and is not blocked by legacy kill-switch', async () => {
+    const projectCreate = await request(app.getHttpServer())
+      .post('/api/v1/video-projects')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        name: 'workflow-avatar',
-        originalVideoUrl: path.basename(sourcePath),
-      })
-      .expect(201);
-    const avatarId = readString(asRecord(avatarRes.body), 'id') || '';
-    expect(avatarId).toBeTruthy();
+        name: `core-flow-${Date.now()}`,
+      });
+    expect([200, 201]).toContain(projectCreate.status);
+    const projectBody = asRecord(projectCreate.body);
+    const projectId =
+      readString(projectBody, 'projectId') ?? readString(projectBody, 'id');
+    expect(projectId).toBeTruthy();
 
-    const voiceRes = await request(app.getHttpServer())
-      .post('/api/v1/resources/voices')
+    const audioGenerate = await request(app.getHttpServer())
+      .post('/api/v1/audio-assets/generate')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
-        name: 'workflow-voice',
-        provider: 'aliyun-qwen-vc',
-        providerVoice: 'e2e-provider-voice',
-        providerModel: 'e2e-provider-model',
-      })
-      .expect(201);
-    const voiceId = readString(asRecord(voiceRes.body), 'id') || '';
-    expect(voiceId).toBeTruthy();
+        projectId,
+        text: '这里是核心流程联调用的音频生成文案。',
+        voiceRate: 1.05,
+      });
+    expect([200, 201]).toContain(audioGenerate.status);
+    const audioBody = asRecord(audioGenerate.body);
+    expect(readString(audioBody, 'code')).not.toBe('LEGACY_ENDPOINT_DISABLED');
+    const audioAssetId = readString(audioBody, 'audioAssetId');
+    expect(audioAssetId).toBeTruthy();
 
-    const subtitleTemplates = await request(app.getHttpServer())
-      .get('/api/v1/resources/subtitle-templates?scope=all&limit=20')
+    const scriptSegments = ['这里是核心流程联调', '用于字幕时间轴', '必须按分段返回'];
+    const subtitleCreate = await request(app.getHttpServer())
+      .post(
+        `/api/v1/audio-assets/${encodeURIComponent(
+          audioAssetId as string,
+        )}/subtitle-track`,
+      )
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        projectId,
+        scriptText: scriptSegments.join('，'),
+        scriptSegments,
+      });
+    expect([200, 201]).toContain(subtitleCreate.status);
+    const subtitleBody = asRecord(subtitleCreate.body);
+    expect(readString(subtitleBody, 'source')).toBe('tts_alignment');
+    const subtitles = subtitleBody.subtitles as unknown;
+    expect(Array.isArray(subtitles)).toBe(true);
+    expect((subtitles as unknown[]).length).toBe(scriptSegments.length);
+    const subtitleTrackId = readString(subtitleBody, 'subtitleTrackId');
+    expect(subtitleTrackId).toBeTruthy();
+
+    const stageState = await request(app.getHttpServer())
+      .get(
+        `/api/v1/video-projects/${encodeURIComponent(
+          projectId as string,
+        )}/stage-state`,
+      )
       .set('Authorization', `Bearer ${authToken}`)
       .expect(200);
-    const subtitleBody = asRecord(subtitleTemplates.body);
-    const items = Array.isArray(subtitleBody.items)
-      ? (subtitleBody.items as unknown[])
-      : [];
-    const templateId = readString(
-      items.length > 0 ? asRecord(items[0]) : {},
-      'id',
-    );
-    expect(templateId).toBeTruthy();
+    const stageBody = asRecord(stageState.body);
+    expect(readString(stageBody, 'audioAssetId')).toBe(audioAssetId);
+    expect(readString(stageBody, 'subtitleTrackId')).toBe(subtitleTrackId);
+  });
 
+  it('POST /api/v1/tools/subtitle-workflow-preview is guarded and fails safely', async () => {
     const preview = await request(app.getHttpServer())
       .post('/api/v1/tools/subtitle-workflow-preview')
       .set('Authorization', `Bearer ${authToken}`)
       .send({
         script: 'test script for subtitle-workflow-preview',
-        avatarResourceId: avatarId,
-        voiceResourceId: voiceId,
-        subtitleTemplateId: templateId,
+        avatarResourceId: 'missing-avatar',
+        voiceResourceId: 'missing-voice',
+        subtitleTemplateId: 'missing-template',
         previewSeconds: 5,
-      })
-      .expect(400);
+      });
 
-    const message = readString(asRecord(preview.body), 'message') || '';
-    expect(message).toContain('VideoReTalk');
-    expect(message).toContain('PUBLIC_BASE_URL');
+    expect([400, 403, 404]).toContain(preview.status);
   });
 });

@@ -14,10 +14,24 @@ import { SavedVideoService } from './saved-video.service';
 import { ToolsController } from './tools.controller';
 import { VideoProjectRenderService } from './video-project-render.service';
 import { VideoProjectsController } from './video-projects.controller';
+import { VideoScriptController } from './video-script.controller';
+import { VideoScriptService } from './video-script.service';
+import { TitleAssetsController } from './title-assets.controller';
+import { TitleAssetsService } from './title-assets.service';
+import { FfmpegSubtitleBurnerService } from './ffmpeg-subtitle-burner.service';
+import { StagedWorkflowService } from './staged-workflow.service';
+import { StagedWorkflowController } from './staged-workflow.controller';
+import { VideoProjectsService } from './video-projects.service';
 
 @Module({
   imports: [AiModule, DigitalHumanModule, ResourcesModule],
-  controllers: [ToolsController, VideoProjectsController],
+  controllers: [
+    ToolsController,
+    VideoProjectsController,
+    VideoScriptController,
+    TitleAssetsController,
+    StagedWorkflowController,
+  ],
   providers: [
     DouyinBenchmarkService,
     VideoMetaService,
@@ -29,6 +43,11 @@ import { VideoProjectsController } from './video-projects.controller';
     RecentExtractionService,
     SavedVideoService,
     VideoProjectRenderService,
+    VideoScriptService,
+    TitleAssetsService,
+    FfmpegSubtitleBurnerService,
+    StagedWorkflowService,
+    VideoProjectsService,
   ],
 })
 export class ToolsModule {}

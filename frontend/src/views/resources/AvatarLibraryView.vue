@@ -3,10 +3,10 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { NAlert, NButton, NEmpty, NModal, NSpin, useMessage } from "naive-ui";
 import {
-  avatarVideoStreamUrl,
   createAvatarResource,
+  getAvatarUploadVideoMetadata,
   listAvatarResources,
-  uploadAvatarResource,
+  uploadAvatarResourceWithFallback,
 } from "@/api/resources";
 import AvatarResourceCard from "@/components/resources/AvatarResourceCard.vue";
 import DeleteConfirmModal from "@/components/resources/DeleteConfirmModal.vue";
@@ -53,6 +53,7 @@ const previewUrl = ref<string | null>(null);
 const cardVideoUrls = ref<Record<string, string>>({});
 const cardVideoLoading = ref<Record<string, boolean>>({});
 const pendingCardVideoIds = new Set<string>();
+const failedCardPreviewKeys = new Set<string>();
 let previewObjectUrl: string | null = null;
 
 const list = useCursorList<AvatarResource>((cursor) =>
@@ -104,6 +105,11 @@ watch(
     for (const id of Array.from(pendingCardVideoIds)) {
       if (!visibleIds.has(id)) pendingCardVideoIds.delete(id);
     }
+
+    for (const key of Array.from(failedCardPreviewKeys)) {
+      const id = key.slice(0, key.indexOf("::"));
+      if (!visibleIds.has(id)) failedCardPreviewKeys.delete(key);
+    }
   },
 );
 
@@ -124,16 +130,87 @@ function clearCardVideoState() {
   cardVideoUrls.value = {};
   cardVideoLoading.value = {};
   pendingCardVideoIds.clear();
+  failedCardPreviewKeys.clear();
 }
 
-function resolveAvatarPreviewUrl(source: string) {
-  return /^(https?:|data:|blob:)/i.test(source)
-    ? source
-    : avatarVideoStreamUrl(source);
+function isExpiredSignedUrl(url: string) {
+  const trimmed = url.trim();
+  if (!trimmed) return true;
+  try {
+    const parsed = new URL(trimmed, window.location.origin);
+    const rawExpires = parsed.searchParams.get("expires");
+    if (!rawExpires) return false;
+    const expires = Number(rawExpires);
+    if (!Number.isFinite(expires)) return true;
+    const now = Math.floor(Date.now() / 1000);
+    return now >= expires - 5;
+  } catch {
+    return false;
+  }
+}
+
+function isProtectedAvatarStreamUrl(url: string) {
+  const normalized = url.toLowerCase();
+  return (
+    normalized.includes("/avatar-video-files/") &&
+    normalized.includes("/stream") &&
+    !normalized.includes("/preview-stream") &&
+    !/[?&](token|expires)=/i.test(url)
+  );
+}
+
+function isBrowserPlayableAvatarPreview(url: string) {
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  if (isProtectedAvatarStreamUrl(trimmed)) return false;
+  if (isExpiredSignedUrl(trimmed)) return false;
+  return true;
+}
+
+function extractAvatarUploadFileName(item: AvatarResource) {
+  const candidates = [
+    item.originalVideoUrl?.trim() ?? "",
+    item.metadataUrl?.trim() ?? "",
+    item.previewUrl?.trim() ?? "",
+  ];
+  for (const value of candidates) {
+    if (!value) continue;
+    if (/^[^/?#\\]+$/.test(value) && !/^(https?:|data:|blob:)/i.test(value)) {
+      return value;
+    }
+    try {
+      const parsed = new URL(value, window.location.origin);
+      const match = parsed.pathname.match(
+        /\/avatar-video-files\/([^/]+)\/(?:stream|metadata|preview-stream|preview-metadata)$/i,
+      );
+      if (match?.[1]) return decodeURIComponent(match[1]);
+    } catch {
+      // ignore
+    }
+  }
+  return "";
+}
+
+async function resolveAvatarPreviewUrl(item: AvatarResource) {
+  const current = item.previewUrl?.trim() ?? "";
+  if (isBrowserPlayableAvatarPreview(current)) return current;
+  const fileName = extractAvatarUploadFileName(item);
+  if (!fileName) return "";
+  const metadata = await getAvatarUploadVideoMetadata(fileName);
+  item.previewUrl = metadata.previewUrl;
+  item.metadataUrl = metadata.metadataUrl;
+  return isBrowserPlayableAvatarPreview(metadata.previewUrl)
+    ? metadata.previewUrl
+    : "";
 }
 
 function getCardPreviewCacheKey(item: AvatarResource) {
-  return `${item.id}::${item.originalVideoUrl ?? ""}`;
+  const marker =
+    item.previewUrl?.trim() ||
+    item.metadataUrl?.trim() ||
+    item.originalVideoUrl?.trim() ||
+    "";
+  return `${item.id}::${marker}`;
 }
 
 function dropStaleCardPreviewCache(item: AvatarResource, keepKey: string) {
@@ -146,16 +223,16 @@ function dropStaleCardPreviewCache(item: AvatarResource, keepKey: string) {
 }
 
 async function ensureCardVideoPreview(item: AvatarResource) {
-  const source = item.originalVideoUrl?.trim();
-  if (
-    !source ||
-    cardVideoUrls.value[item.id] ||
-    pendingCardVideoIds.has(item.id)
-  )
+  if (pendingCardVideoIds.has(item.id)) return;
+  const existing = cardVideoUrls.value[item.id];
+  if (existing && isBrowserPlayableAvatarPreview(existing)) return;
+  if (!item.originalVideoUrl?.trim())
     return;
+
   const cacheKey = getCardPreviewCacheKey(item);
+  if (failedCardPreviewKeys.has(cacheKey)) return;
   const cachedUrl = avatarCardPreviewCache.get(cacheKey);
-  if (cachedUrl) {
+  if (cachedUrl && isBrowserPlayableAvatarPreview(cachedUrl)) {
     cardVideoUrls.value = {
       ...cardVideoUrls.value,
       [item.id]: cachedUrl,
@@ -166,7 +243,10 @@ async function ensureCardVideoPreview(item: AvatarResource) {
   pendingCardVideoIds.add(item.id);
   cardVideoLoading.value = { ...cardVideoLoading.value, [item.id]: true };
   try {
-    const nextUrl = resolveAvatarPreviewUrl(source);
+    const nextUrl = await resolveAvatarPreviewUrl(item);
+    if (!nextUrl) {
+      throw new Error("当前资源的预览链接未就绪，请稍后重试");
+    }
 
     if (!list.items.value.some((current) => current.id === item.id)) {
       return;
@@ -225,7 +305,7 @@ async function createAvatar(body: CreateAvatarResourceDraft) {
   creating.value = true;
   try {
     const item = body.uploadFile
-      ? await uploadAvatarResource(body)
+      ? await uploadAvatarResourceWithFallback(body)
       : await createAvatarResource(body);
     list.prepend(item);
     createOpen.value = false;
@@ -249,9 +329,31 @@ async function preview(item: AvatarResource) {
   const source = item.originalVideoUrl?.trim();
   if (!source) return;
   revokePreviewObjectUrl();
-  const nextUrl = resolveAvatarPreviewUrl(source);
+  const nextUrl = await resolveAvatarPreviewUrl(item);
+  if (!nextUrl) {
+    message.warning("预览链接已过期或未生成，请稍后重试。");
+    return;
+  }
   previewObjectUrl = nextUrl;
   previewUrl.value = nextUrl;
+}
+
+function onModalPreviewError() {
+  previewUrl.value = null;
+  revokePreviewObjectUrl();
+  message.warning("Video preview failed. Please refresh and try again.");
+}
+
+function onCardPreviewError(item: AvatarResource) {
+  failedCardPreviewKeys.add(getCardPreviewCacheKey(item));
+  const nextUrls = { ...cardVideoUrls.value };
+  delete nextUrls[item.id];
+  cardVideoUrls.value = nextUrls;
+  const cachePrefix = `${item.id}::`;
+  for (const cacheKey of Array.from(avatarCardPreviewCache.keys())) {
+    if (!cacheKey.startsWith(cachePrefix)) continue;
+    avatarCardPreviewCache.delete(cacheKey);
+  }
 }
 </script>
 
@@ -299,6 +401,7 @@ async function preview(item: AvatarResource) {
           @delete="requestDelete([item.id])"
           @preview="preview(item)"
           @request-preview="ensureCardVideoPreview(item)"
+          @preview-error="onCardPreviewError(item)"
           @create="goCreate(item)"
         />
       </div>
@@ -339,7 +442,14 @@ async function preview(item: AvatarResource) {
         }
       "
     >
-      <video v-if="previewUrl" controls :src="previewUrl" preload="metadata" />
+      <video
+        v-if="previewUrl"
+        :key="previewUrl"
+        controls
+        :src="previewUrl"
+        preload="metadata"
+        @error="onModalPreviewError"
+      />
     </n-modal>
   </main>
 </template>

@@ -5,12 +5,13 @@ import {
   NForm,
   NFormItem,
   NInput,
+  NModal,
   NTag,
   useMessage,
 } from 'naive-ui'
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { loginAuth } from '@/api/auth'
+import { loginAuth, resetPasswordAuth } from '@/api/auth'
 import { useUserStore } from '@/stores/user'
 import { describeHttpOrNetworkError } from '@/utils/httpErrorMessage'
 
@@ -19,10 +20,19 @@ const route = useRoute()
 const message = useMessage()
 const user = useUserStore()
 const loading = ref(false)
+const resetLoading = ref(false)
+const resetModalOpen = ref(false)
 
 const form = reactive({
   email: '',
   password: '',
+})
+const resetForm = reactive({
+  email: '',
+  phoneNumber: '',
+  idCardNumber: '',
+  newPassword: '',
+  confirmPassword: '',
 })
 
 const proofs = ['任务继续生成', '作品统一管理', '素材快速复用']
@@ -56,6 +66,58 @@ async function handleSubmit() {
     message.error(describeHttpOrNetworkError(e))
   } finally {
     loading.value = false
+  }
+}
+
+async function handleResetPassword() {
+  if (
+    !resetForm.email?.trim() ||
+    !resetForm.phoneNumber?.trim() ||
+    !resetForm.idCardNumber?.trim() ||
+    !resetForm.newPassword ||
+    !resetForm.confirmPassword
+  ) {
+    message.warning('请填写完整信息')
+    return
+  }
+
+  const normalizedPhone = resetForm.phoneNumber.replace(/\s+/g, '')
+  if (!/^1\d{10}$/.test(normalizedPhone)) {
+    message.warning('请输入 11 位手机号')
+    return
+  }
+
+  const normalizedIdCard = resetForm.idCardNumber.trim().toUpperCase()
+  if (!/^\d{17}[\dX]$/.test(normalizedIdCard)) {
+    message.warning('请输入 18 位身份证号')
+    return
+  }
+
+  if (resetForm.newPassword.length < 8) {
+    message.warning('新密码至少 8 位')
+    return
+  }
+  if (resetForm.newPassword !== resetForm.confirmPassword) {
+    message.warning('两次输入的新密码不一致')
+    return
+  }
+
+  resetLoading.value = true
+  try {
+    await resetPasswordAuth({
+      email: resetForm.email.trim(),
+      phoneNumber: normalizedPhone,
+      idCardNumber: normalizedIdCard,
+      newPassword: resetForm.newPassword,
+    })
+    message.success('密码重置成功，请使用新密码登录')
+    form.email = resetForm.email.trim()
+    form.password = ''
+    resetModalOpen.value = false
+  } catch (e: unknown) {
+    message.error(describeHttpOrNetworkError(e))
+  } finally {
+    resetLoading.value = false
   }
 }
 </script>
@@ -109,6 +171,13 @@ async function handleSubmit() {
           >
             登录
           </n-button>
+          <button
+            type="button"
+            class="auth-page__link-button"
+            @click="resetModalOpen = true"
+          >
+            忘记密码？
+          </button>
 
           <router-link
             :to="{ name: 'register', query: route.query }"
@@ -119,6 +188,67 @@ async function handleSubmit() {
         </n-form>
       </n-card>
     </section>
+
+    <n-modal
+      v-model:show="resetModalOpen"
+      preset="card"
+      class="reset-password-modal"
+      title="找回密码"
+      :bordered="false"
+      :mask-closable="false"
+    >
+      <n-form label-placement="top">
+        <n-form-item label="邮箱">
+          <n-input
+            v-model:value="resetForm.email"
+            clearable
+            placeholder="name@example.com"
+          />
+        </n-form-item>
+        <n-form-item label="手机号">
+          <n-input
+            v-model:value="resetForm.phoneNumber"
+            clearable
+            maxlength="11"
+            placeholder="11 位手机号"
+          />
+        </n-form-item>
+        <n-form-item label="身份证号">
+          <n-input
+            v-model:value="resetForm.idCardNumber"
+            type="password"
+            show-password-on="click"
+            placeholder="18 位身份证号"
+          />
+        </n-form-item>
+        <n-form-item label="新密码">
+          <n-input
+            v-model:value="resetForm.newPassword"
+            type="password"
+            show-password-on="click"
+            placeholder="至少 8 位"
+          />
+        </n-form-item>
+        <n-form-item label="确认新密码">
+          <n-input
+            v-model:value="resetForm.confirmPassword"
+            type="password"
+            show-password-on="click"
+            placeholder="再次输入新密码"
+          />
+        </n-form-item>
+        <div class="reset-password-modal__actions">
+          <n-button @click="resetModalOpen = false">取消</n-button>
+          <n-button
+            type="primary"
+            :loading="resetLoading"
+            @click="handleResetPassword"
+          >
+            提交重置
+          </n-button>
+        </div>
+      </n-form>
+    </n-modal>
   </div>
 </template>
 
@@ -258,8 +388,30 @@ async function handleSubmit() {
   text-align: center;
 }
 
+.auth-page__link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: 12px;
+  border: 0;
+  color: var(--primary);
+  background: transparent;
+  cursor: pointer;
+}
+
 .auth-page__link:hover {
   color: var(--primary-hover);
+}
+
+.reset-password-modal {
+  width: min(92vw, 460px);
+}
+
+.reset-password-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .auth-page :deep(.n-form-item-label__text) {

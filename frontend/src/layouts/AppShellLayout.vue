@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+import type { RouteLocationRaw } from 'vue-router'
 import { NButton, NIcon } from 'naive-ui'
 import {
   AlbumsOutline,
@@ -14,6 +15,7 @@ import { isFixedAdminEmail } from '@/constants/admin'
 import { useDigitalHumanStore } from '@/stores/digitalHuman'
 import { useTaskDraftStore } from '@/stores/taskDraft'
 import { useUserStore } from '@/stores/user'
+import ChangePasswordModal from '@/components/auth/ChangePasswordModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -51,6 +53,7 @@ const navItems = computed(() => {
 
   const loggedInItems = [
     ...base,
+    { label: '创作任务', name: 'video-projects', icon: AlbumsOutline },
     { label: '数字人库', name: 'home', icon: PersonCircleOutline },
     { label: '资源库', name: 'resource-library', icon: AlbumsOutline },
   ]
@@ -95,6 +98,43 @@ const memberSubtitle = computed(() => {
   if (user.profile?.accountStatus === 'pending') return '等待审核中'
   return '工作台已就绪'
 })
+const changePasswordOpen = ref(false)
+
+const navItemsForRender = computed(() => {
+  if (!isPendingNonAdmin.value) return navItems.value
+  return [
+    { label: '首页', name: 'landing', icon: HomeOutline },
+    { label: '账号审核', name: 'account-pending', icon: SparklesOutline },
+    { label: '登录', name: 'login', icon: LogInOutline },
+    { label: '注册', name: 'register', icon: PersonCircleOutline },
+  ]
+})
+
+const primaryToForRender = computed(() => {
+  if (isPendingNonAdmin.value) {
+    return { name: 'login' as const, query: { redirect: '/account-pending' } }
+  }
+  return primaryTo.value
+})
+
+const primaryTextForRender = computed(() => {
+  if (isPendingNonAdmin.value) return '重新登录'
+  return primaryText.value
+})
+
+const secondaryToForRender = computed(() => {
+  if (isPendingNonAdmin.value) return { name: 'register' as const }
+  return secondaryTo.value
+})
+
+const secondaryTextForRender = computed(() => {
+  if (isPendingNonAdmin.value) return '注册新账号'
+  return secondaryText.value
+})
+
+function navigate(to: RouteLocationRaw) {
+  void router.push(to)
+}
 
 async function clearBrowserCaches() {
   sessionStorage.clear()
@@ -135,7 +175,7 @@ onMounted(() => {
 
       <nav class="shell__nav" aria-label="主导航">
         <RouterLink
-          v-for="item in navItems"
+          v-for="item in navItemsForRender"
           :key="item.name"
           :to="{ name: item.name as never }"
           class="shell__nav-link"
@@ -163,6 +203,15 @@ onMounted(() => {
           <span>AI READY</span>
           <span>{{ user.isLoggedIn ? '在线' : '24ms' }}</span>
         </div>
+        <n-button
+          v-if="user.isLoggedIn"
+          quaternary
+          size="small"
+          class="shell__member-action"
+          @click="changePasswordOpen = true"
+        >
+          修改密码
+        </n-button>
       </section>
     </aside>
 
@@ -175,16 +224,29 @@ onMounted(() => {
 
         <div class="shell__actions">
           <span class="shell__hint">为短视频团队打造的 AI 内容工作台</span>
-          <RouterLink :to="secondaryTo">
-            <n-button secondary class="shell__secondary-action">{{
-              secondaryText
-            }}</n-button>
+          <RouterLink :to="secondaryToForRender">
+            <n-button
+              secondary
+              class="shell__secondary-action"
+              @click.prevent="navigate(secondaryToForRender)"
+              >{{ secondaryTextForRender }}</n-button
+            >
           </RouterLink>
-          <RouterLink :to="primaryTo">
-            <n-button type="primary" class="shell__primary-action">{{
-              primaryText
-            }}</n-button>
+          <RouterLink :to="primaryToForRender">
+            <n-button
+              type="primary"
+              class="shell__primary-action"
+              @click.prevent="navigate(primaryToForRender)"
+              >{{ primaryTextForRender }}</n-button
+            >
           </RouterLink>
+          <n-button
+            v-if="user.isLoggedIn"
+            quaternary
+            @click="changePasswordOpen = true"
+          >
+            修改密码
+          </n-button>
           <n-button v-if="user.isLoggedIn" quaternary @click="logout"
             >退出</n-button
           >
@@ -199,6 +261,8 @@ onMounted(() => {
         </RouterView>
       </main>
     </div>
+
+    <ChangePasswordModal v-model:show="changePasswordOpen" />
   </div>
 </template>
 
@@ -372,6 +436,10 @@ onMounted(() => {
 .shell__member-footer {
   color: var(--text-light);
   font-size: 11px;
+}
+
+.shell__member-action {
+  margin-top: 10px;
 }
 
 .shell__content {

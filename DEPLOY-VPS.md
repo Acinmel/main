@@ -1,248 +1,33 @@
-# VPS 部署说明（Docker Compose）
+# VPS Deployment Note
 
-> **生产环境建议使用制品化部署。** 本文档中的 `git pull`、`docker compose up -d --build`、`quickstart-server.sh` 属于源码部署方式，适合开发、测试或临时环境。生产服务器不应保留源码；请优先使用 [`docs/production-artifact-deployment.md`](./docs/production-artifact-deployment.md) 和 [`docs/development-to-server-release-flow.md`](./docs/development-to-server-release-flow.md)。
+本文件只保留 VPS 部署入口说明。详细部署步骤以 `docs/DEPLOY.md` 为准。
 
-本仓库已支持 **前端静态站 + Nginx 反代 + Nest API + MySQL** 的一体化部署；口播转写在 API 容器内通过 **FFmpeg 抽轨 + 千问3-ASR-Flash-Filetrans** 完成（在 `.env` 中配置 `DASHSCOPE_API_KEY`，见 `backend/.env.example`）。应用代码**未使用 Redis**，服务器上的 Redis 可留给其他服务，无需为本项目单独配置。
+## Current Runtime
 
-## 国内服务器：拉镜像超时 `registry-1.docker.io`
+- Docker Compose 编排 `web`、`api`、`mysql`。
+- `web` 提供前端静态站点并反代 `/api`。
+- `api` 运行 NestJS 后端。
+- 媒体处理依赖 FFmpeg。
+- 生产数据库和上传目录必须持久化。
 
-若出现 **`Client.Timeout exceeded`** / **`request canceled while waiting for connection`**，是 **访问 Docker Hub 不畅**，不是业务代码问题。
-
-1. 打开 [阿里云 容器镜像服务 → 镜像加速器](https://cr.console.aliyun.com/cn-hangzhou/instances/mirrors)（地域以控制台为准），复制 **专属加速地址**。
-2. 在 ECS 上执行（把 URL 换成你的；需要 **Python 3**，一般系统已带）：
-
-```bash
-cd /opt/shuziren   # 或你的项目路径
-sudo bash deploy/setup-docker-registry-mirror.sh https://你的ID.mirror.aliyuncs.com
-```
-
-也可临时加一个公共镜像（**不保证长期可用**）：
+## Standard Checks
 
 ```bash
-sudo bash deploy/setup-docker-registry-mirror.sh https://你的ID.mirror.aliyuncs.com https://docker.m.daocloud.io
-```
-
-3. 验证后重试：
-
-```bash
-docker info | grep -A5 'Registry Mirrors'
-docker pull hello-world
-cd /opt/shuziren && docker compose pull && docker compose up -d --build
-```
-
-脚本说明：[`deploy/setup-docker-registry-mirror.sh`](./deploy/setup-docker-registry-mirror.sh)。若暂无阿里云账号，可只试 `https://docker.m.daocloud.io`（稳定性因网络而异）。
-
-### 国内：`docker compose build` 极慢（半小时～数小时）
-
-构建慢通常有 **两类**原因，需分别排除：
-
-1. **拉基础镜像慢**（日志里长时间停在 `FROM node:` / `pull`）  
-   → 与访问 **Docker Hub** 有关：务必配置 **`registry-mirrors`**（见上一节），并确认 `docker info` 里已生效。
-
-2. **容器内 `apt-get` 慢**（日志里出现 `deb.debian.org` 且长时间不结束）  
-   → 说明 **`backend/Dockerfile`（API 镜像）仍是旧版**（未把 Debian 源换成国内镜像）。请先 **`git pull`** 同步主线，再 **`docker compose build --no-cache api`**。
-
-仓库内 Dockerfile 已默认 **`USE_CN_MIRROR=1`**（阿里云 apt + npmmirror npm 等），`deploy/quickstart-server.sh` 会开启 **BuildKit**。**海外构建**可在执行前导出：`export USE_CN_MIRROR=0`。
-
-## 最快：全新 ECS 一键部署（清空/空目录后）
-
-**默认安装目录**：`/opt/shuziren`（目录须不存在或为空，脚本会 `git clone`）。
-
-**方式 A — 两行（不依赖 raw 文件 URL，最稳）**（GitHub）：
-
-```bash
-git clone --depth 1 https://github.com/你的用户/shuziren.git /opt/shuziren
-sudo bash /opt/shuziren/deploy/oneclick-fresh-install.sh --no-clone
-```
-
-**方式 B — 单条 curl**（需已 `push` 到 GitHub，分支名与 URL 一致，例如 `main`）：
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/你的用户/shuziren/main/deploy/oneclick-fresh-install.sh" | sudo bash -s -- --repo-url "https://github.com/你的用户/shuziren.git"
-```
-
-使用 **Gitee** 时，把克隆地址换成 `https://gitee.com/...`，raw 用 `https://gitee.com/.../raw/main/deploy/oneclick-fresh-install.sh` 即可。
-
-**删库卷重来**（仅当 `$INSTALL_DIR` 里**已有** `docker-compose.yml` 时才会 `down -v`；**会清空 MySQL 卷**）：
-
-```bash
-sudo bash /opt/shuziren/deploy/oneclick-fresh-install.sh --no-clone --purge-volumes
-```
-
-若以前用 Docker 部署在**别的路径**，旧数据卷可能仍在，可到旧目录执行 `docker compose down -v`，或 `docker volume ls` 后按需删除。
-
-脚本说明：[`deploy/oneclick-fresh-install.sh`](./deploy/oneclick-fresh-install.sh)。
-
----
-
-## 已有代码：只启动容器（推荐，不要只敲 `docker compose`）
-
-**原因说明**：设计上是「项目到服务器 → 一条命令」。若你**跳过脚本、直接 `docker compose up`**，在国内 ECS 上往往会 **拉不动 Docker Hub 镜像**（超时），或 **没有 `.env`**，所以会感觉「跑不起来」——这不是业务代码坏了，而是 **缺镜像加速 / 缺环境文件**。
-
-**正确最小操作（复制即用）**：
-
-```bash
-cd /opt/shuziren          # 你的项目根目录，内含 docker-compose.yml
-sudo bash deploy/quickstart-server.sh
-```
-
-脚本会：**安装 Docker（如需）**、**未配置时自动写入国内镜像加速**、**生成 `.env`**、**放行 firewalld（如有）**、**`docker compose up -d --build`**，并打印访问说明。
-
-若你已**手动配好** `/etc/docker/daemon.json` 的 `registry-mirrors`，脚本会跳过镜像步骤。不想用自动公共源可：`SKIP_AUTO_DOCKER_MIRROR=1 sudo bash deploy/quickstart-server.sh`。
-
-**公网打不开时**：安全组放行 **`TCP 8080`**（与 `.env` 中 `WEB_PORT` 一致），浏览器使用 **`http://公网IP:8080/`**。
-
-**数字人形象「未配置 ARK / SEEDREAM」**：根目录 **`.env` 被 git 忽略**，`git pull` **不会**把本机的 `ARK_API_KEY` 带到服务器。须在 ECS 上**编辑或上传**同目录 `.env`，至少增加一行 `ARK_API_KEY=你的密钥`（或按 `deploy/docker.env.example` 配置 Seedream），然后执行 `docker compose up -d api`。
-
-其他：[`deploy/quickstart-server.sh`](./deploy/quickstart-server.sh)、[`deploy/bootstrap-server.sh`](./deploy/bootstrap-server.sh)（手写 `.env` 时用）。
-
-## 0. 关于「远程代部署」与本机自动化
-
-- 从本机 **SSH 连接服务器** 需要 **公钥认证** 或你在终端里 **手动输入密码**；自动化环境不能使用聊天里的密码，也无法代替你完成交互式登录。
-- 请在本机生成密钥并登记到服务器（示例）：
-  ```bash
-  ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_koubo -N ""
-  ssh-copy-id -i ~/.ssh/id_ed25519_koubo.pub root@你的服务器IP
-  ssh -i ~/.ssh/id_ed25519_koubo root@你的服务器IP
-  ```
-- 连上服务器后，先 **克隆或 rsync 完整项目** 到如 `/opt/koubo-remake`，再执行上一节 **`quickstart-server.sh`** 或：
-  ```bash
-  git clone 'https://你的仓库/shuziren.git' /opt/koubo-remake
-  cd /opt/koubo-remake
-  sudo bash deploy/quickstart-server.sh
-  ```
-  无 git 时：将整个项目目录同步到服务器后，同样 `cd` 到该目录执行 `sudo bash deploy/quickstart-server.sh`。
-
-## 1. 服务器准备
-
-- 安装 **Docker** 与 **Docker Compose**（插件 `docker compose`）。
-- 安全组/防火墙放行：**22**（SSH）、**80/443**（Web，按你实际端口）、以及你选用的 **`WEB_PORT`**（默认 **8080**）。
-- **不要在文档或聊天中发送 root / 数据库密码**；在服务器上本地编辑 `.env`。
-
-### 阿里云 ECS · Alibaba Cloud Linux 3（2 vCPU / 2 GiB 等）
-
-1. **安装 Docker**（在项目目录外任意路径执行均可，需 root）：
-   ```bash
-   cd /opt/koubo-remake    # 或你的项目根目录
-   sudo bash deploy/setup-docker-alinux.sh
-   ```
-   若 `dnf install` 报 GPG 或源错误，请到阿里云文档「安装 Docker」按当前地域/版本核对源地址。
-2. **内存**：2GB 机型上建议保持 `deploy/docker.env.example` 中的 **`BCRYPT_ROUNDS`** 偏低（如 `8`），并避免在 API 容器内并行大量重任务；口播转写为**外链式 ASR**，不在本机加载大模型。
-3. **安全组**：入方向放行 **TCP 8080**（与 `.env` 中 `WEB_PORT` 一致）。
-
-## 2. 获取代码
-
-```bash
-git clone <你的仓库地址> shuziren
-cd shuziren
-```
-
-## 3. 环境变量
-
-```bash
-cp deploy/docker.env.example .env
-nano .env   # 或 vim：至少修改 MYSQL_*、JWT_SECRET
-```
-
-建议同时补齐这几个和媒体链路直接相关的变量：
-
-```bash
-PUBLIC_UPLOAD_BASE_URL=http://你的公网IP或域名:8080/uploads
-PUBLIC_BASE_URL=http://你的公网IP或域名:8080
-VOICE_PROVIDER_STREAM_SECRET=请替换为随机长字符串
-UPLOAD_DIR=/workspace/uploads
-USER_UPLOAD_RESOURCE_TTL_DAYS=7
-USER_UPLOAD_RESOURCE_CLEANUP_INTERVAL_MS=3600000
-```
-
-如果使用宿主机 Nginx / Caddy 做 80 或 443 反代，则 `PUBLIC_UPLOAD_BASE_URL` 应写成最终用户访问的正式域名，例如：
-
-```bash
-PUBLIC_UPLOAD_BASE_URL=https://你的域名/uploads
-PUBLIC_BASE_URL=https://你的域名
-```
-
-`PUBLIC_BASE_URL` 必须是后端可对外访问的站点根地址（不带 `/uploads`），用于语音样本签名流和 VideoReTalk 可回源 URL。
-
-将 **大模型、抖音 Cookie、千问 ASR（`DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` / `QWEN_ASR_MODEL` 等）** 按 `backend/.env.example` 的说明，把需要的变量**追加**到根目录 `.env` 或 `backend/.env` 中（本仓库 `docker-compose.yml` 通过 `env_file` 注入；若你新增了自定义键且 Compose 不会自动带入，再在 `api.environment` 中增加一行 `${VAR}` 映射）。
-
-**生产环境必须设置强随机 `JWT_SECRET`**，例如：
-
-```bash
-openssl rand -base64 48
-```
-
-## 4. 构建并启动
-
-在**仓库根目录**：
-
-```bash
+docker compose config
 docker compose up -d --build
+bash scripts/smoke-test.sh
 ```
 
-查看状态：
+## Production Safety
 
-```bash
-docker compose ps
-docker compose logs -f api
-```
+- 不在生产执行 `docker compose down -v`。
+- 不在生产清空数据库卷或上传卷。
+- 不在未确认的情况下重启生产服务。
+- 不在未确认的情况下调用真实付费 AI provider。
 
-## 5. 访问方式
+## See Also
 
-- 默认站点：`http://服务器公网IP:8080`（若 `.env` 里 `WEB_PORT=80` 则为 `http://服务器公网IP`）。
-- 前端通过同域 **`/api`** 访问后端，无需再给浏览器单独配置后端地址。
-
-## 6. 使用「宿主机上已有的 MySQL」
-
-若 MySQL 已装在 VPS 上、**不想**使用 compose 里的 `mysql` 服务：
-
-1. 在 MySQL 中创建数据库与用户，并授权（库名与 `MYSQL_DATABASE` 一致）。
-2. 编辑 `docker-compose.yml`：
-   - 注释或删除 **`mysql`** 整个服务；
-   - 在 **`api.depends_on`** 中去掉对 `mysql` 的依赖（若无其它前置服务可删除整段 `depends_on`）；
-3. 在 `.env` 中设置例如：
-   - `MYSQL_HOST=host.docker.internal`
-   - `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` 与宿主机实例一致。
-
-`api` 服务已配置 `extra_hosts: host.docker.internal:host-gateway`，便于在 Linux 上访问宿主机端口。
-
-## 7. HTTPS 与域名（简述）
-
-常见做法：宿主机再装 **Caddy** 或 **Nginx**，监听 443，反代到 `127.0.0.1:8080`（或你改的 `WEB_PORT`），并配置证书。此时可在 `.env` 增加 `CORS_ORIGINS=https://你的域名`。
-
-**宿主机 Nginx 与 Docker 同时装时**：二选一，避免乱配。
-
-- **方案 A（最简单）**：不装/停用宿主机 Nginx，安全组只放行 Docker 映射端口（默认 **8080**），浏览器访问 `http://IP:8080/`。
-- **方案 B**：宿主机 Nginx 监听 **80**，整站反代到 **`127.0.0.1:8080`**（与 `.env` 里 `WEB_PORT` 一致）。参考仓库内 [`deploy/nginx-host-reverse-proxy.conf`](./deploy/nginx-host-reverse-proxy.conf)。不要用宿主机 Nginx 的 `root` 指到错误目录又去反代 API，容易 404/500。
-
-## 7.1 网页一直 500 / 打不开：排查顺序
-
-在**服务器**上执行（项目根目录）：
-
-```bash
-docker compose ps
-curl -sS -o /dev/null -w "首页 HTTP %{http_code}\n" http://127.0.0.1:8080/
-curl -sS -o /dev/null -w "API HTTP %{http_code}\n" http://127.0.0.1:8080/api
-docker compose logs --tail=80 api
-docker compose logs --tail=40 web
-```
-
-- **`api` 不是 `healthy` 或不断重启**：看 `api` 日志；常见是 **MySQL 密码与数据卷里旧库不一致**（曾改过 `.env`）。可 **`docker compose down`** 后确认 `.env` 与 `docker-compose.yml` 中 MySQL 一致再 **`docker compose up -d`**；开发环境可 **`docker compose down -v`** 清空库卷重来（**会丢库**）。
-- **本机 `curl` 正常、公网不行**：查云安全组是否放行 **`WEB_PORT`**（及宿主机 Nginx 若占 80 则放行 80）。
-- **`GET /api` 需匿名探活**：后端已为根路由加了 **`@Public()`**，返回 200 + `Hello World!` 即表示 API 进程正常。
-
-## 8. 更新发布（源码部署方式，仅限开发/临时环境）
-
-生产环境不要使用本节方式。生产发布应在开发机或 CI 构建产物 zip，再上传服务器解压并执行运行期 Compose 的 `--build` 部署，详见 [`docs/development-to-server-release-flow.md`](./docs/development-to-server-release-flow.md)。
-
-```bash
-cd shuziren
-git pull
-docker compose up -d --build
-```
-
-数据卷：`mysql_data`（若使用内置 MySQL）、`video_downloads`（下载的视频缓存）会保留，除非手动 `docker volume rm`。
-
----
-
-若你希望 **非 Docker**（systemd + 本机 Node/Python），可再单独拆一套脚本；当前维护路径以 Compose 为准。
+- `docs/DEPLOY.md`
+- `docs/TEST_PLAN.md`
+- `scripts/deploy-staging.sh`
+- `scripts/rollback.sh`

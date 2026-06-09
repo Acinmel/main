@@ -16,7 +16,7 @@ export type ScriptSnapshotForNext = {
   sourceVideoUrl: string
 }
 
-/** 首页草稿 → 任务流；`transcriptDraft` 为口播正文出口（与 ASR 转写 /「使用文案」共用） */
+/** 创作草稿 → 任务流；`transcriptDraft` 为口播正文出口（与 ASR 转写 /「使用文案」共用） */
 export const useTaskDraftStore = defineStore('taskDraft', () => {
   const videoUrl = ref('')
   /** 用户选中的原始照片文件（不上传到 store 持久化，仅存内存） */
@@ -30,7 +30,7 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
   const rewriteStyle = ref<RewriteStyle>('conservative')
   const renderMode = ref<RenderMode>('virtual_bg')
   const aspectRatio = ref<AspectRatio>('9:16')
-  const voiceStyleId = ref<string>('neutral_female')
+  const voiceStyleId = ref<string>('')
   const subtitleStyleId = ref<string>('minimal_white')
 
   /** 首页「解析文案」后展示/编辑的口播正文，会随创建任务提交为 initialTranscript */
@@ -66,7 +66,7 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
     photoPreviewUrl.value = URL.createObjectURL(file)
   }
 
-  /** 用户在 PhotoUploader 中选择本地文件 */
+  /** 用户选择本地口播形象文件 */
   function setPhotoFromUserUpload(file: File | null) {
     if (!file) {
       revokePhotoPreview()
@@ -93,7 +93,7 @@ export const useTaskDraftStore = defineStore('taskDraft', () => {
     videoMeta.value = meta
   }
 
-  /** 由 `videoMeta` 更新时预填文案编辑框（见 HomeView watch） */
+  /** 由 `videoMeta` 更新时预填文案编辑框 */
   function prefillManualScriptFromMeta(meta: VideoMetaPreview) {
     const text =
       (meta.content && meta.content.trim()) ||

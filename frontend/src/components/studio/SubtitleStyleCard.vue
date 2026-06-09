@@ -10,10 +10,19 @@
 
     <div class="style-card">
       <div class="template-thumb">
-        <img v-if="coverUrl" :src="coverUrl" alt="字幕模板封面" />
+        <img
+          v-if="coverUrl"
+          :src="coverUrl"
+          alt="字幕模板封面"
+          loading="lazy"
+          decoding="async"
+          referrerpolicy="no-referrer"
+        />
         <div v-else class="thumb-fallback">
-          <strong>福气别乱说</strong>
-          <span>小心招损!</span>
+          <template v-if="hasTitlePreview">
+            <strong>{{ localTitleLines[0] }}</strong>
+            <span>{{ localTitleLines[1] }}</span>
+          </template>
         </div>
       </div>
 
@@ -21,7 +30,7 @@
         <div class="style-header">
           <div>
             <span class="eyebrow">当前样式</span>
-            <strong>{{ templateName || '模板 2054060216177152000' }}</strong>
+            <strong>{{ templateName || '未命名模板' }}</strong>
           </div>
           <button class="ghost-btn" type="button" @click="$emit('change-template')">
             更换模板
@@ -60,9 +69,11 @@ const emit = defineEmits<{
 }>()
 
 const localTitleLines = computed(() => {
-  const [first = '福气别乱说', second = '小心招损!'] = props.titleLines || []
+  const [first = '', second = ''] = props.titleLines || []
   return [first, second]
 })
+
+const hasTitlePreview = computed(() => localTitleLines.value.some((line) => line.trim()))
 
 function updateLine(index: number, event: Event) {
   const target = event.target as HTMLInputElement
